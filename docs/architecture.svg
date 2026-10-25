@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="470" viewBox="0 0 1120 470" role="img" aria-labelledby="title desc">
+  <title id="title">Ghost Hands Mobile architecture</title>
+  <desc id="desc">A user provides a goal and sees approvals and a run trail. The agent observes a web page, asks a local model for one action, checks it through the Governor, records the decision, and then either waits for approval or acts on the page.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#101635"/>
+      <stop offset="1" stop-color="#18133b"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#72e5ff"/>
+      <stop offset="1" stop-color="#ad8dff"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10z" fill="#8ca2d9"/>
+    </marker>
+    <style>
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .title { fill: #f2f5ff; font-size: 25px; font-weight: 700; }
+      .sub { fill: #aab6db; font-size: 14px; }
+      .label { fill: #ecf1ff; font-size: 16px; font-weight: 650; }
+      .detail { fill: #b4c0df; font-size: 12px; }
+      .step { fill: #90a4d7; font-size: 11px; font-weight: 700; letter-spacing: 1.1px; }
+      .box { fill: #20294b; stroke: #39466e; stroke-width: 1.4; }
+      .boxAccent { fill: #242349; stroke: #7869c4; stroke-width: 1.4; }
+      .arrow { fill: none; stroke: #8ca2d9; stroke-width: 2; marker-end: url(#arrow); }
+    </style>
+  </defs>
+  <rect width="1120" height="470" rx="24" fill="url(#bg)"/>
+  <text x="48" y="55" class="title">A small, inspectable action loop</text>
+  <text x="48" y="80" class="sub">Planning is local; policy checks happen before an action reaches the page.</text>
+
+  <rect x="42" y="145" width="190" height="132" rx="16" class="box"/>
+  <text x="62" y="173" class="step">01 · INTENT</text>
+  <text x="62" y="204" class="label">User goal</text>
+  <text x="62" y="230" class="detail">Text or voice input</text>
+  <text x="62" y="250" class="detail">Approval + run trail</text>
+
+  <rect x="292" y="145" width="190" height="132" rx="16" class="box"/>
+  <text x="312" y="173" class="step">02 · OBSERVE</text>
+  <text x="312" y="204" class="label">Android WebView</text>
+  <text x="312" y="230" class="detail">Page text and controls</text>
+  <text x="312" y="250" class="detail">Current page state</text>
+
+  <rect x="542" y="145" width="190" height="132" rx="16" class="boxAccent"/>
+  <text x="562" y="173" class="step">03 · PLAN</text>
+  <text x="562" y="204" class="label">Local model</text>
+  <text x="562" y="230" class="detail">Qwen2.5 · llama.cpp</text>
+  <text x="562" y="250" class="detail">One JSON action</text>
+
+  <rect x="792" y="145" width="190" height="132" rx="16" class="box"/>
+  <text x="812" y="173" class="step">04 · GOVERN</text>
+  <text x="812" y="204" class="label">Governor + trail</text>
+  <text x="812" y="230" class="detail">Allow · ask · deny</text>
+  <text x="812" y="250" class="detail">Record before execution</text>
+
+  <path d="M232 211H283" class="arrow"/>
+  <path d="M482 211H533" class="arrow"/>
+  <path d="M732 211H783" class="arrow"/>
+
+  <rect x="792" y="330" width="190" height="83" rx="14" class="boxAccent"/>
+  <text x="812" y="359" class="label">Policy decision</text>
+  <text x="812" y="383" class="detail">Ask? Wait for the user.</text>
+  <text x="812" y="400" class="detail">Allow? Perform one action.</text>
+  <path d="M887 277V319" class="arrow"/>
+
+  <path d="M792 371H387V288" class="arrow"/>
+  <text x="504" y="359" class="detail">Observe again · continue or finish</text>
+
+  <text x="48" y="445" class="sub">Page access and first-run model download use the network; model inference runs on the device.</text>
+</svg>
