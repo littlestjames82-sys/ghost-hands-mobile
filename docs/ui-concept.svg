@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="700" viewBox="0 0 980 700" role="img" aria-labelledby="title desc">
+  <title id="title">Conceptual Ghost Hands app screen</title>
+  <desc id="desc">A conceptual, not captured, Ghost Hands Android screen. It shows a model-ready status, a browser URL, a sample goal, start and stop controls, an approval request with approve and deny buttons, and a short run trail.</desc>
+  <defs>
+    <linearGradient id="backdrop" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#10182d"/>
+      <stop offset="1" stop-color="#080d18"/>
+    </linearGradient>
+    <linearGradient id="phone" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#060b18"/>
+      <stop offset="1" stop-color="#04070f"/>
+    </linearGradient>
+    <style>
+      text { font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      .heading { fill: #f2f7ff; font-size: 29px; font-family: Georgia, serif; font-weight: 700; }
+      .muted { fill: #8fa8bf; font-size: 12px; }
+      .small { fill: #d9e7f5; font-size: 12px; }
+      .body { fill: #eaf6ff; font-size: 14px; }
+      .tiny { fill: #9db2c7; font-size: 10px; }
+      .card { fill: #0a1220; stroke: #24506e; stroke-width: 1.2; }
+      .inner { fill: #0d1830; stroke: #24506e; stroke-width: 1; }
+      .cyan { fill: #38c6ff; }
+      .amber { fill: #ffc44d; }
+      .red { fill: #ff4a4a; }
+    </style>
+  </defs>
+  <rect width="980" height="700" rx="24" fill="url(#backdrop)"/>
+  <text x="54" y="61" fill="#f2f5ff" font-size="23" font-weight="700">A glimpse of the mobile UI</text>
+  <text x="54" y="87" fill="#aab6db" font-size="13">Concept illustration · not an app screenshot</text>
+
+  <rect x="329" y="112" width="322" height="552" rx="34" fill="#03050a" stroke="#64748b" stroke-width="2"/>
+  <rect x="342" y="129" width="296" height="518" rx="22" fill="url(#phone)"/>
+  <rect x="451" y="119" width="78" height="7" rx="4" fill="#303846"/>
+
+  <text x="360" y="170" class="heading">Ghost Hands</text>
+  <text x="361" y="190" class="muted">Ethereal on-device agent</text>
+  <rect x="496" y="200" width="128" height="26" rx="13" fill="#0a1220" stroke="#24506e"/>
+  <text x="506" y="217" class="cyan" font-size="9" font-weight="700">● MODEL READY · Q5_K_M</text>
+
+  <rect x="357" y="238" width="266" height="64" rx="12" class="card"/>
+  <text x="372" y="259" class="tiny" font-weight="700" letter-spacing="1">MODEL</text>
+  <text x="372" y="279" class="small">Qwen2.5 · on-device</text>
+  <text x="372" y="293" class="tiny">Model files download on demand</text>
+
+  <rect x="357" y="314" width="266" height="104" rx="12" class="card"/>
+  <text x="372" y="336" class="tiny" font-weight="700" letter-spacing="1">BROWSER</text>
+  <rect x="371" y="346" width="238" height="26" rx="7" class="inner"/>
+  <text x="382" y="363" class="small">https://example.org/visit</text>
+  <text x="372" y="393" class="tiny">Sample URL for illustration only</text>
+
+  <rect x="357" y="430" width="266" height="100" rx="12" class="card"/>
+  <text x="372" y="452" class="tiny" font-weight="700" letter-spacing="1">GOAL</text>
+  <text x="372" y="476" class="body">Find the museum's opening</text>
+  <text x="372" y="496" class="body">hours and summarize them.</text>
+  <text x="372" y="517" class="tiny">Text goal · voice input is also available</text>
+
+  <rect x="357" y="542" width="158" height="40" rx="10" fill="#38c6ff"/>
+  <text x="398" y="568" fill="#031e2b" font-size="14" font-weight="700">▶ START</text>
+  <rect x="523" y="542" width="100" height="40" rx="10" fill="#2a0e12" stroke="#ff4a4a"/>
+  <text x="545" y="568" class="red" font-size="14" font-weight="700">■ STOP</text>
+
+  <rect x="357" y="593" width="266" height="43" rx="10" fill="#171729" stroke="#7869c4"/>
+  <text x="372" y="612" class="amber" font-size="10" font-weight="700">APPROVAL REQUEST · EXAMPLE</text>
+  <text x="372" y="628" class="small">Review before a consequential action</text>
+
+  <path d="M683 269H724" stroke="#38c6ff" stroke-width="2"/>
+  <circle cx="683" cy="269" r="4" fill="#38c6ff"/>
+  <text x="740" y="264" fill="#eaf6ff" font-size="14" font-weight="700">Model card</text>
+  <text x="740" y="284" fill="#9db2c7" font-size="12">Status and download progress</text>
+
+  <path d="M683 374H724" stroke="#38c6ff" stroke-width="2"/>
+  <circle cx="683" cy="374" r="4" fill="#38c6ff"/>
+  <text x="740" y="369" fill="#eaf6ff" font-size="14" font-weight="700">Browser + goal</text>
+  <text x="740" y="389" fill="#9db2c7" font-size="12">Set where to start and what to do</text>
+
+  <path d="M683 564H724" stroke="#ff4a4a" stroke-width="2"/>
+  <circle cx="683" cy="564" r="4" fill="#ff4a4a"/>
+  <text x="740" y="559" fill="#eaf6ff" font-size="14" font-weight="700">Run controls</text>
+  <text x="740" y="579" fill="#9db2c7" font-size="12">Start or request a stop at any time</text>
+
+  <text x="54" y="675" fill="#8798b7" font-size="11">Layout is illustrative; the Android app builds its interface with framework views.</text>
+</svg>

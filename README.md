@@ -12,19 +12,39 @@ Ghost Hands turns a plain-language goal into a sequence of small browser actions
 
 ![Ghost Hands architecture: the user sets a goal, the agent observes a WebView, plans locally, checks each action, and records the run](docs/architecture.svg)
 
+### What the app looks like
+
+![Conceptual Ghost Hands mobile screen showing model status, a browser goal, run controls, and an approval card; this is an illustration, not a device screenshot](docs/ui-concept.svg)
+
+This is a concept illustration based on the app’s current UI and styling, not a captured screen. For the implementation, see [`MainActivity.java`](v1/app/src/main/java/com/ghosthands/app/MainActivity.java).
+
 ### Example goal
 
 > “Find the posted opening hours for the museum and summarize them.”
 
-An illustrative run might navigate to a page, read visible content, note relevant facts, and return a summary. The planner uses a small JSON action vocabulary, for example:
+An illustrative, read-focused run could navigate to a page, inspect its content, note a relevant fact, and finish with a summary:
 
 ```json
+{"action":"goto","url":"https://example.org/visit"}
 {"action":"read"}
 {"action":"note","fact":"The museum is open from 10:00 to 17:00."}
 {"action":"done","summary":"The posted hours are 10:00–17:00."}
 ```
 
-These are examples of the action format, not a recording of a successful run. Policy packs can allow, ask for approval, or deny actions; consequential actions are subject to the active policy.
+This is an example of the action format, not a recording of a successful run. The agent plans from the page it actually observes; it may take different steps or fail to complete a task.
+
+### Actions that need a person
+
+For a goal that could submit a form or make a purchase, the Governor evaluates the proposed action under the selected policy pack. With the default `standard` pack, a consequential action asks for approval instead of proceeding silently:
+
+```text
+Agent proposes: tap “Place order”
+Governor: consequential action · approval required
+You choose: Approve or Deny
+Trail: records the decision and outcome
+```
+
+The available packs have different postures: `readonly` denies writes, `standard` allows ordinary writes but asks on consequential actions, `strict` asks on writes too, and `seatbelt` adds curated text-pattern denials. This is a policy layer, not a guarantee that every website action can be classified perfectly. See [`PolicyPacks.java`](v1/app/src/main/java/com/ghosthands/app/PolicyPacks.java) and [`Governor.java`](v1/app/src/main/java/com/ghosthands/app/Governor.java).
 
 ## What’s in this repository?
 
@@ -40,6 +60,7 @@ The mobile app uses framework-only Java and a JNI bridge to `llama.cpp`. Its Qwe
 - **One action at a time:** the agent observes the current page, plans a small action, and then observes again.
 - **Policy before execution:** actions pass through the Governor, which classifies actions and applies the selected policy.
 - **Visible run history:** the trail records decisions and outcomes; the UI also provides an answer card for a finished run.
+- **User controls:** stop an active run, review approval requests, and inspect or export the run log.
 - **Local inference, networked browsing:** model inference runs on the device after the model download. Loading websites and initially downloading a model require network access. Voice entry uses Android’s speech-recognition framework.
 - **Small, native Android implementation:** Java, Android framework UI, `WebView`, JNI, and `llama.cpp`; no AndroidX or Kotlin.
 
@@ -64,7 +85,7 @@ v1/native/           Main app's JNI shim
 v1/test/             Host-side Java tests
 parity-lab/          Web perception/action experiments
 read-lab/            Page-reading experiments
-docs/                Diagrams for this README
+docs/                README architecture diagram and UI concept illustration
 ```
 
 ## Contributing
