@@ -309,6 +309,20 @@ public class Agent {
                 throws Exception {
             return "error: documents are not supported by these hands";
         }
+        /** v3.34: the weather action's body — fetch the
+         *  named place's forecast from the data tool
+         *  (WeatherTool) and return its result text: the
+         *  forecast as evidence, or an error string the
+         *  loop records like any failed action. DEFAULT
+         *  method, deliberately — the choose/toggle/tab/
+         *  document reasoning: hands that predate the tool
+         *  answer with the honest error, and their runs
+         *  stay byte-identical. The Activity's WebHands
+         *  and the unattended ServiceHands override it
+         *  with the real tool, so both paths share it. */
+        default String weather(String place) throws Exception {
+            return "error: weather is not supported by these hands";
+        }
         /** v3.25 (accessibility eyes): an alternate, READ-ONLY
          *  perception of the current page from this app's own
          *  accessibility node tree (A11yMap's conversion of
@@ -3709,8 +3723,15 @@ public class Agent {
                 // is the text the planner receives (carried into
                 // history nearly whole just below). A failed read
                 // read nothing and contributes nothing.
+                // v3.34: a successful weather result joins on
+                // exactly the same terms — the forecast text IS
+                // the step's evidence, and a note or done quoting
+                // its figures must ground against it. A failed
+                // lookup (an "error:" result, ok=false here)
+                // contributes nothing, like a failed read.
                 if (ok && ("read".equals(action.action)
-                        || "read_file".equals(action.action))) {
+                        || "read_file".equals(action.action)
+                        || "weather".equals(action.action))) {
                     readCorpus.append(result).append('\n');
                 }
                 trail.record("result", step, Trail.fields(
@@ -3735,8 +3756,15 @@ public class Agent {
                 // read-URL (the stubbing keys on pages) — a
                 // document's facts reach done only through the
                 // scratchpad, like a second tab's do (R7).
+                // v3.34: a weather result is evidence of exactly
+                // the read kind too — the forecast is the answer's
+                // evidence as a page's text is — so it rides the
+                // same cap and the same one-time NOTE_HINT. It is
+                // NOT a page read either: no readPageUrls, no
+                // completion totals, no entry read-URL.
                 int historyCap = "read".equals(action.action)
                         || "read_file".equals(action.action)
+                        || "weather".equals(action.action)
                         ? READ_HISTORY_CHARS
                         : ("ask".equals(action.action) ? 600 : 120);
                 String entry = "step " + step + ": " + action.toJson()
@@ -3748,7 +3776,8 @@ public class Agent {
                 // untouched, and a run that never reads successfully
                 // never sees it.
                 if (ok && ("read".equals(action.action)
-                        || "read_file".equals(action.action))
+                        || "read_file".equals(action.action)
+                        || "weather".equals(action.action))
                         && !noteHintGiven) {
                     noteHintGiven = true;
                     entry += NOTE_HINT;
@@ -4507,6 +4536,8 @@ public class Agent {
         if ("read".equals(a.action)) return hands.read(currentReadChunkChars);
         if ("read_file".equals(a.action)) return hands.readDocument(
                 a.name == null ? "" : a.name, currentReadChunkChars);
+        if ("weather".equals(a.action)) return hands.weather(
+                a.place == null ? "" : a.place);
         if ("wait".equals(a.action)) return "ok: waited " + a.ms + "ms";
         return "error: unhandled action " + a.action;
     }
@@ -5063,12 +5094,30 @@ public class Agent {
      * (its pinned shapes — the value in the text, the value
      * in the summary — are untouched). Every pinned
      * sentence is byte-for-byte as before.
+     *
+     * v3.34 (the weather tool): the weather shape joined
+     * the actions line, beside search (its sibling: a
+     * query to a data tool, not a page), and one teaching
+     * sentence joined the rules paragraph, beside the
+     * search rule ("Weather or forecast goal: use weather
+     * with the place named in the goal."). This one is
+     * NOT paid for by trims, and the reason is stated
+     * plainly: every remaining sentence in the block is
+     * pinned byte-for-byte by the harness (search-first,
+     * the homepage ban, the question-goal rule, the done
+     * rule, the auto-read rule, the title rule, the delta
+     * line) — there is no unpinned prose left to cut.
+     * The two budget checks therefore move by the
+     * addition's measured size (the harness re-pins them
+     * at v2.3 + 40 + the weather line's measure), and
+     * every pinned sentence is still byte-for-byte as
+     * before.
      */
     public static final String CONTRACT_TEXT =
             "You are Ghost Hands, a careful web agent.\n"
             + "Actions: {\"action\":\"tap\",\"el\":N} {\"action\":\"type\",\"el\":N,\"text\":\"...\"} "
             + "{\"action\":\"choose\",\"el\":N,\"text\":\"...\"} {\"action\":\"toggle\",\"el\":N,\"text\":\"...\"} "
-            + "{\"action\":\"search\",\"query\":\"...\"} {\"action\":\"read\"} "
+            + "{\"action\":\"search\",\"query\":\"...\"} {\"action\":\"weather\",\"place\":\"...\"} {\"action\":\"read\"} "
             + "{\"action\":\"read_file\",\"name\":\"...\"} "
             + "{\"action\":\"note\",\"fact\":\"...\"} "
             + "{\"action\":\"ask\",\"question\":\"...\"} "
@@ -5081,7 +5130,9 @@ public class Agent {
             + "Later steps may show only changes: + added, "
             + "~ changed, - removed; numbers from the last full "
             + "map.\n"
-            + "use search first. If unclear, ask. "
+            + "use search first. Weather or forecast goal: "
+            + "use weather with the place named in the goal. "
+            + "If unclear, ask. "
             + "Tabs: 3 max; facts in-tab. "
             + "Do not tap featured or random homepage content. "
             + "Question: open, use read "

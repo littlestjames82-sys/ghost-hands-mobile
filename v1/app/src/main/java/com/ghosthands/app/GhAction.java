@@ -21,6 +21,7 @@ import java.util.Map;
  *   {"action":"switch_tab","tab":N}                     (v3.15)
  *   {"action":"close_tab","tab":N}                      (v3.15)
  *   {"action":"read_file","name":"..."}                 (v3.16)
+ *   {"action":"weather","place":"..."}                 (v3.34)
  *   {"action":"done","summary":"..."} {"action":"stuck","reason":"..."}
  */
 public class GhAction {
@@ -28,7 +29,7 @@ public class GhAction {
     public static final String[] KINDS = {
             "tap", "type", "goto", "scroll", "back", "wait", "done", "stuck",
             "search", "read", "note", "choose", "toggle", "ask",
-            "open_tab", "switch_tab", "close_tab", "read_file"
+            "open_tab", "switch_tab", "close_tab", "read_file", "weather"
     };
 
     public String action;
@@ -51,6 +52,10 @@ public class GhAction {
     public String name;          // read_file (v3.16): the document's
                                  // name in the downloads store, as
                                  // the prompt's Files line lists it
+    public String place;         // weather (v3.34): the place to
+                                 // fetch the forecast for, as the
+                                 // goal names it ("Oakdale,
+                                 // Tennessee")
 
     public GhAction(String action) {
         this.action = action;
@@ -79,6 +84,7 @@ public class GhAction {
         if (question != null) m.put("question", question);
         if (tab >= 0) m.put("tab", Long.valueOf(tab));
         if (name != null) m.put("name", name);
+        if (place != null) m.put("place", place);
         return m;
     }
 
@@ -89,7 +95,7 @@ public class GhAction {
     /** Stable identity for the runner's stuck detection. */
     public String signature() {
         return action + "|" + el + "|" + text + "|" + url + "|" + query
-                + "|" + question + "|" + tab + "|" + name;
+                + "|" + question + "|" + tab + "|" + name + "|" + place;
     }
 
     /** Human-readable one-liner for the step feed / approval panel. */
@@ -124,6 +130,8 @@ public class GhAction {
             sb.append(" tab ").append(tab);
         } else if ("read_file".equals(action)) {
             sb.append(" \"").append(name == null ? "" : name).append('"');
+        } else if ("weather".equals(action)) {
+            sb.append(" \"").append(place == null ? "" : place).append('"');
         } else if ("done".equals(action)) {
             sb.append(" : ").append(summary == null ? "" : summary);
         } else if ("stuck".equals(action)) {

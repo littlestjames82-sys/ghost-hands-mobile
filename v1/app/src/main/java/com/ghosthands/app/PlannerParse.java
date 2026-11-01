@@ -141,6 +141,15 @@ public final class PlannerParse {
                     || ((String) n).trim().length() == 0) return null;
             a.name = ((String) n).trim();
         }
+        if ("weather".equals(kind)) {
+            // v3.34: the place is named, as the goal names it —
+            // a weather without a place names nowhere, so it
+            // fails closed like a search without a query.
+            Object pl = m.get("place");
+            if (!(pl instanceof String)
+                    || ((String) pl).trim().length() == 0) return null;
+            a.place = ((String) pl).trim();
+        }
         if ("switch_tab".equals(kind) || "close_tab".equals(kind)) {
             // v3.15 (R7): the tab number is required and 1-based,
             // exactly like el — a tab action that names no tab

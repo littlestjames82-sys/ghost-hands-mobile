@@ -1009,6 +1009,18 @@ public class UnattendedService extends Service {
                     settings.fallbackEngine, query);
         }
 
+        /** v3.34: the weather action's body — the same
+         *  data tool the interactive hands carry
+         *  (WeatherTool over its production transport), so
+         *  a schedule-fired goal check gets the forecast
+         *  the same way a foreground run does: one Agent
+         *  loop, one tool, both paths. */
+        @Override public String weather(String place)
+                throws Exception {
+            return WeatherTool.forecastFor(place,
+                    new WeatherTool.HttpTransport());
+        }
+
         /** The read action on the full-page extractor: the
          *  cursor walks the text across calls and restarts
          *  at the top past the end, saying so — the v1.2

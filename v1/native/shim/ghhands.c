@@ -59,7 +59,8 @@ typedef struct {
  * with "action" first, as the prompt contract and every worked
  * example write it. It grew with the action vocabulary: note
  * (v2.x), choose/toggle (v3.9), ask (v3.12), the tab actions
- * (v3.15), read_file (v3.16). The parser's non-blank fields ride
+ * (v3.15), read_file (v3.16), weather (v3.34). The parser's
+ * non-blank fields ride
  * nstring (v3.11's parity discipline: the grammar never emits a
  * shape PlannerParse would reject); rule names use hyphens, not
  * underscores -- the pinned GBNF parser's word characters are
@@ -77,7 +78,7 @@ typedef struct {
  * generate(). */
 static const char * GH_ACTION_GRAMMAR =
     "root ::= ws obj ws\n"
-    "obj ::= tap | type | goto | scroll | back | wait | search | read | done | stuck | choose | toggle | note | ask | open-tab | switch-tab | close-tab | read-file\n"
+    "obj ::= tap | type | goto | scroll | back | wait | search | read | done | stuck | choose | toggle | note | ask | open-tab | switch-tab | close-tab | read-file | weather\n"
     "choose ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"choose\\\"\" ws \",\" ws \"\\\"el\\\"\" ws \":\" ws elnum ws \",\" ws \"\\\"text\\\"\" ws \":\" ws nstring ws \"}\"\n"
     "toggle ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"toggle\\\"\" ws \",\" ws \"\\\"el\\\"\" ws \":\" ws elnum (ws \",\" ws \"\\\"text\\\"\" ws \":\" ws string)? ws \"}\"\n"
     "tap ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"tap\\\"\" ws \",\" ws \"\\\"el\\\"\" ws \":\" ws elnum ws \"}\"\n"
@@ -88,6 +89,7 @@ static const char * GH_ACTION_GRAMMAR =
     "back ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"back\\\"\" ws \"}\"\n"
     "wait ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"wait\\\"\" (ws \",\" ws \"\\\"ms\\\"\" ws \":\" ws posint)? ws \"}\"\n"
     "search ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"search\\\"\" ws \",\" ws \"\\\"query\\\"\" ws \":\" ws nstring ws \"}\"\n"
+    "weather ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"weather\\\"\" ws \",\" ws \"\\\"place\\\"\" ws \":\" ws nstring ws \"}\"\n"
     "read ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"read\\\"\" ws \"}\"\n"
     "done ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"done\\\"\" (ws \",\" ws \"\\\"summary\\\"\" ws \":\" ws string)? ws \"}\"\n"
     "stuck ::= \"{\" ws \"\\\"action\\\"\" ws \":\" ws \"\\\"stuck\\\"\" (ws \",\" ws \"\\\"reason\\\"\" ws \":\" ws string)? ws \"}\"\n"

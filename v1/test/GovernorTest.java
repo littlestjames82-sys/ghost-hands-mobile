@@ -78,6 +78,7 @@ import com.ghosthands.app.WidgetText;
 import com.ghosthands.app.VoiceLoop;
 import com.ghosthands.app.CloudBrain;
 import com.ghosthands.app.GroundingGuard;
+import com.ghosthands.app.WeatherTool;
 
 /**
  * Host-side smoke harness for the Ghost Hands Mobile governor port.
@@ -1760,6 +1761,10 @@ public class GovernorTest {
         // alone (~150 tokens) exceeded the preview's weight, so no
         // fixture could keep this premise. 26 lines restore it:
         // the overage is again smaller than the preview line.
+        // v3.34 re-size: the contract grew by the weather action
+        // (+27 est), which pushed the overage past the preview's
+        // weight again and let stage (iii) trim history too; the
+        // section chunk sheds 104 chars to restore the premise.
 
         Eyes.Perception bp2 = new Eyes.Perception();
         bp2.url = articleUrl;
@@ -1778,7 +1783,7 @@ public class GovernorTest {
                     .append("] <a> \"x\" href=https://en.wikipedia.org/wiki/X\n");
         }
         String sectionB = Agent.autoReadSection(
-                Eyes.formatReadChunk(0, rep('B', 3000), 9000));
+                Eyes.formatReadChunk(0, rep('B', 2896), 9000));
         String over2 = Agent.buildPromptWithinBudget(wikiGoal, bp2,
                 mapB26.toString(), hist2, urls2, sectionB, articleUrl, 0);
         check("budget(ii): the result fits the budget",
@@ -3309,18 +3314,26 @@ public class GovernorTest {
         // Item 5's budget: v2.3's static prefix measured 292 est
         // tokens (1168 chars); the trim had to pay for the examples,
         // so the whole block may exceed it by at most 40.
-        check("trim: the static prefix stays within v2.3 + 40 est "
-                        + "tokens (" + Agent.estTokens(Agent.CONTRACT_BLOCK)
-                        + " <= 292 + 40)",
+        // v3.34: the weather shape + its one teaching sentence
+        // joined the contract and could NOT be paid for by trims
+        // (every remaining sentence is pinned byte-for-byte —
+        // see the CONTRACT_TEXT header), so both bounds carry
+        // the addition's measured size (+27 est) on top.
+        check("trim: the static prefix stays within v2.3 + 40 + 27 "
+                        + "est tokens (" + Agent.estTokens(Agent.CONTRACT_BLOCK)
+                        + " <= 292 + 40 + 27)",
                 Boolean.valueOf(Agent.estTokens(Agent.CONTRACT_BLOCK)
-                        <= 292 + 40),
+                        <= 292 + 40 + 27),
                 Boolean.TRUE);
-        check("trim: the standing text itself shrank vs v2.3 (292)",
+        check("trim: the standing text itself stays within "
+                        + "v2.3 + 27 (318 <= 292 + 27; v3.34's "
+                        + "weather line is the growth)",
                 Boolean.valueOf(Agent.estTokens(Agent.CONTRACT_TEXT)
-                        < 292),
+                        <= 292 + 27),
                 Boolean.TRUE);
         String[] allActions = { "tap", "type", "search", "read",
-                "goto", "scroll", "back", "wait", "done", "stuck" };
+                "goto", "scroll", "back", "wait", "done", "stuck",
+                "weather" };
         boolean allPresent = true;
         for (int i = 0; i < allActions.length; i++) {
             if (!Agent.CONTRACT_BLOCK.contains(
@@ -4580,18 +4593,31 @@ public class GovernorTest {
                 Boolean.valueOf(Agent.estTokens(fieldFit.prompt)
                         <= Agent.PROMPT_TOKEN_BUDGET),
                 Boolean.TRUE);
-        check("fit pair: the history read was stubbed, the section "
-                        + "kept",
-                Boolean.valueOf(fieldFit.prompt.contains(
-                                Agent.READ_STUB_TAIL)
+        // v3.34 expectation move (disclosed): this composition's
+        // page and history parts are unchanged, but the prompt's
+        // static prefix is the CURRENT contract, and v3.34's
+        // weather line made it 27 est heavier — stubbing the
+        // history read no longer closes the fit alone, so the
+        // ladder now runs to rung 4 and the auto-read section's
+        // text drops too (its accounting stays). The pair below
+        // pins the new, measured behavior (rungs=4, stub tail
+        // present, section header and next chunk gone); the
+        // blind-spot and fits checks above are untouched.
+        check("fit pair: the history read was stubbed (v3.34: "
+                        + "the ladder now runs to rung 4 on this "
+                        + "composition)",
+                Boolean.valueOf(fieldFit.rungs == 4
                         && fieldFit.prompt.contains(
-                                "auto-read, chars 2400-4800")),
+                                Agent.READ_STUB_TAIL)),
                 Boolean.TRUE);
-        check("fit pair: the stubbed chunk's text is gone (the "
-                        + "section's next chunk remains)",
+        check("fit pair: the stubbed chunk's text is gone (and "
+                        + "the section's next chunk went with it "
+                        + "at rung 4)",
                 Boolean.valueOf(!fieldFit.prompt.contains(
                                 wxChunk.substring(2000, 2060))
-                        && fieldFit.prompt.contains(
+                        && !fieldFit.prompt.contains(
+                                "auto-read, chars 2400-4800")
+                        && !fieldFit.prompt.contains(
                                 "Chevron right\n3 AM")),
                 Boolean.TRUE);
 
@@ -4722,6 +4748,11 @@ public class GovernorTest {
 
         // Rung 2: no reads to stub; the preview's truncation closes
         // it (the map and section survive).
+        // v3.34 re-size: the contract's weather line (+27 est)
+        // pushed the raw prompt's overage past what the preview
+        // truncation alone repays, so the fit ran to rung 3; the
+        // last history entry sheds 104 chars of ballast to
+        // restore the rung-2 geometry.
         Eyes.Perception fitPage2 = new Eyes.Perception();
         fitPage2.url = "https://en.wikipedia.org/wiki/Clinch_River";
         fitPage2.title = "Clinch River - Wikipedia";
@@ -4734,7 +4765,7 @@ public class GovernorTest {
                 new java.util.ArrayList<String>();
         for (int i = 1; i <= 5; i++) {
             histR2.add("step " + i + ": {\"action\":\"tap\",\"el\":16}"
-                    + " -> ok: " + rep('h', i == 5 ? 476 : 380));
+                    + " -> ok: " + rep('h', i == 5 ? 372 : 380));
             urlsR2.add(null);
         }
         String sectionR2 = Agent.autoReadSection(
@@ -4760,6 +4791,10 @@ public class GovernorTest {
 
         // Rung 3: the dense map carries the overage; only the
         // reduced set closes it.
+        // v3.34 re-size: the contract's weather line (+27 est)
+        // pushed the fit past rung 3 to rung 4; each history
+        // entry sheds 24 chars of ballast to restore the
+        // rung-3 geometry.
         Eyes.Perception fitPage3 = accuPage("");
         String rendered3 = fitPage3.render(rainGoal);
         java.util.List<String> histR3 =
@@ -4768,7 +4803,7 @@ public class GovernorTest {
                 new java.util.ArrayList<String>();
         for (int i = 1; i <= 5; i++) {
             histR3.add("step " + i + ": {\"action\":\"tap\",\"el\":16}"
-                    + " -> ok: " + rep('h', 380));
+                    + " -> ok: " + rep('h', 356));
             urlsR3.add(null);
         }
         String sectionR3 = Agent.autoReadSection(
@@ -9194,6 +9229,7 @@ public class GovernorTest {
         v331Tests(args);
         v332Tests(args);
         v333Tests(args);
+        v334Tests(args);
 
         System.out.println();
         System.out.println("GovernorTest: " + passed + " passed, " + failed + " failed");
@@ -13292,13 +13328,13 @@ public class GovernorTest {
         // the ONE existing check a release changes, disclosed
         // in the notes (v3.17's pin; v3.18, v3.19, v3.20,
         // v3.21, v3.22, v3.23, v3.24, v3.25, v3.26, v3.27,
-        // v3.28, v3.29, v3.30, v3.31, v3.32 and v3.33 move
-        // it again).
-        check("v3.33 pin: the version is 3.33.0 / code 55",
+        // v3.28, v3.29, v3.30, v3.31, v3.32, v3.33 and
+        // v3.34 move it again).
+        check("v3.34 pin: the version is 3.34.0 / code 56",
                 Boolean.valueOf(manifest.contains(
-                                "android:versionCode=\"55\"")
+                                "android:versionCode=\"56\"")
                         && manifest.contains(
-                                "android:versionName=\"3.33.0\"")),
+                                "android:versionName=\"3.34.0\"")),
                 Boolean.TRUE);
         check("v3.14 pin: the config asks for read + gestures, no flags",
                 Boolean.valueOf(cfgSrc.contains(
@@ -14282,9 +14318,15 @@ public class GovernorTest {
             }
             if (shimSrc != null) {
                 String gbnf = decodeGrammarLiterals(shimSrc);
-                check("v3.16 grammar: the object rule offers read-file",
+                // v3.34: the tail moved — weather was
+                // appended after read-file, the standing
+                // append-at-the-end discipline; this pin
+                // now names the new tail.
+                check("v3.16 grammar: the object rule offers "
+                                + "read-file (v3.34: weather "
+                                + "appended after it)",
                         Boolean.valueOf(grammarLine(gbnf, "obj ::=")
-                                .endsWith("| read-file")),
+                                .endsWith("| read-file | weather")),
                         Boolean.TRUE);
                 check("v3.16 grammar: the read-file rule carries "
                                 + "the name as nstring",
@@ -25040,5 +25082,642 @@ public class GovernorTest {
                         && mainSrc333.contains(
                         "refreshImportButton();")),
                 Boolean.TRUE);
+    }
+
+    /** v3.34 tests, in their own method like every wave's:
+     *  the weather action's parse/govern/prompt wiring,
+     *  WeatherTool as pure checks behind a fake transport,
+     *  then scripted runs proving the result joins the
+     *  grounding corpus (interactive and unattended). */
+    private static void v334Tests(String[] args) {
+        // ================= parser + action shape ==========
+        GhAction wxAct334 = PlannerParse.extract(
+                "{\"action\":\"weather\",\"place\":"
+                        + "\"Oakdale, Tennessee\"}");
+        check("v334 parse: a weather action keeps its place",
+                Boolean.valueOf(wxAct334 != null
+                        && "weather".equals(wxAct334.action)
+                        && "Oakdale, Tennessee".equals(
+                                wxAct334.place)),
+                Boolean.TRUE);
+        check("v334 parse: a weather without a place is "
+                        + "rejected — it names nowhere",
+                PlannerParse.extract(
+                        "{\"action\":\"weather\"}"), null);
+        check("v334 parse: a weather with a blank place is "
+                        + "rejected",
+                PlannerParse.extract(
+                        "{\"action\":\"weather\",\"place\":"
+                                + "\"  \"}"), null);
+        check("v334 action: the trail map carries the place",
+                wxAct334.toMap().get("place"),
+                "Oakdale, Tennessee");
+        check("v334 action: describe names the place, "
+                        + "search-style",
+                wxAct334.describe(null),
+                "weather \"Oakdale, Tennessee\"");
+        GhAction wxAct334b = PlannerParse.extract(
+                "{\"action\":\"weather\",\"place\":"
+                        + "\"Harriman, Tennessee\"}");
+        check("v334 action: the signature tells two places "
+                        + "apart (stuck detection sees the "
+                        + "difference)",
+                Boolean.valueOf(!wxAct334.signature().equals(
+                        wxAct334b.signature())),
+                Boolean.TRUE);
+
+        // ================= governor =======================
+        String[] packIds334 = {"readonly", "standard",
+                "strict", "seatbelt"};
+        for (int i = 0; i < packIds334.length; i++) {
+            Governor g = new Governor(
+                    PolicyPacks.loadPack(packIds334[i]).policy);
+            check("v334 governor: weather is classified "
+                            + "readonly under " + packIds334[i],
+                    g.classify(wxAct334, null, ""), "readonly");
+            check("v334 governor: weather is allowed under "
+                            + packIds334[i],
+                    g.evaluate(wxAct334, null, "").outcome,
+                    "allow");
+        }
+        GhAction wxScary334 = PlannerParse.extract(
+                "{\"action\":\"weather\",\"place\":"
+                        + "\"Pay and delete everything, "
+                        + "Oakdale\"}");
+        Governor gSeat334 = new Governor(
+                PolicyPacks.loadPack("seatbelt").policy);
+        check("v334 governor: a place named like money or "
+                        + "destruction cannot upgrade the "
+                        + "fetch — the place is a label, not "
+                        + "a target",
+                Boolean.valueOf("readonly".equals(gSeat334
+                                .classify(wxScary334, null, ""))
+                        && "allow".equals(gSeat334.evaluate(
+                                wxScary334, null, "").outcome)),
+                Boolean.TRUE);
+
+        // ================= prompt =========================
+        check("v334 prompt: the weather shape is standing "
+                        + "text, beside search",
+                Boolean.valueOf(Agent.CONTRACT_TEXT.contains(
+                        "{\"action\":\"weather\",\"place\":"
+                                + "\"...\"}")),
+                Boolean.TRUE);
+        check("v334 prompt: the teaching line is standing "
+                        + "text — weather goals use the tool "
+                        + "with the goal's place",
+                Boolean.valueOf(Agent.CONTRACT_TEXT.contains(
+                        "Weather or forecast goal: use "
+                                + "weather with the place "
+                                + "named in the goal.")),
+                Boolean.TRUE);
+
+        // ================= WeatherTool: the wire ==========
+        check("v334 tool: the geocoding URL is the "
+                        + "brief's endpoint, place encoded, "
+                        + "five candidates",
+                WeatherTool.geocodingUrl("Oakdale, Tennessee"),
+                "https://geocoding-api.open-meteo.com/v1/"
+                        + "search?name=Oakdale%2C+Tennessee"
+                        + "&count=5&language=en&format=json");
+        check("v334 tool: the forecast URL carries the "
+                        + "brief's daily set, three days, "
+                        + "Fahrenheit, the place's timezone",
+                WeatherTool.forecastUrl(35.9976, -84.4098),
+                "https://api.open-meteo.com/v1/forecast?"
+                        + "latitude=35.9976&longitude=-84.4098"
+                        + "&daily=temperature_2m_max,"
+                        + "temperature_2m_min,"
+                        + "precipitation_probability_max"
+                        + "&forecast_days=3"
+                        + "&temperature_unit=fahrenheit"
+                        + "&timezone=auto");
+
+        // ================= WeatherTool: resolution ========
+        final String geoTnSecond334 = "{\"results\":["
+                + "{\"name\":\"Oakdale\",\"admin1\":"
+                + "\"Missouri\",\"country\":\"United "
+                + "States\",\"latitude\":38.79,"
+                + "\"longitude\":-90.72},"
+                + "{\"name\":\"Oakdale\",\"admin1\":"
+                + "\"Tennessee\",\"country\":\"United "
+                + "States\",\"latitude\":35.9976,"
+                + "\"longitude\":-84.4098}]}";
+        final String geoCaFirst334 = "{\"results\":["
+                + "{\"name\":\"Oakdale\",\"admin1\":"
+                + "\"California\",\"country\":\"United "
+                + "States\",\"latitude\":37.76,"
+                + "\"longitude\":-120.85},"
+                + "{\"name\":\"Oakdale\",\"admin1\":"
+                + "\"Tennessee\",\"country\":\"United "
+                + "States\",\"latitude\":35.9976,"
+                + "\"longitude\":-84.4098}]}";
+        final String fc334 = "{\"daily\":{\"time\":"
+                + "[\"2026-11-01\",\"2026-11-02\","
+                + "\"2026-11-03\"],"
+                + "\"temperature_2m_max\":[61.2,71.4,76.0],"
+                + "\"temperature_2m_min\":[53.6,52.5,61.3],"
+                + "\"precipitation_probability_max\":"
+                + "[80,10,null]}}";
+        final String wxExpected334 =
+                "ok: Weather for Oakdale, Tennessee, "
+                + "United States (Open-Meteo)\n"
+                + "Sun Nov 1: high 61°F, low 54°F, "
+                + "chance of rain 80%.\n"
+                + "Mon Nov 2: high 71°F, low 53°F, "
+                + "chance of rain 10%.\n"
+                + "Tue Nov 3: high 76°F, low 61°F, "
+                + "chance of rain not reported.";
+        final java.util.List<String> urls334 =
+                new java.util.ArrayList<String>();
+        final String[] geoBody334 = {geoTnSecond334};
+        final String[] fcBody334 = {fc334};
+        WeatherTool.Transport fake334 =
+                new WeatherTool.Transport() {
+            @Override public String get(String url)
+                    throws Exception {
+                urls334.add(url);
+                if (url.startsWith(
+                        WeatherTool.GEOCODING_URL)) {
+                    return geoBody334[0];
+                }
+                if (url.startsWith(
+                        WeatherTool.FORECAST_URL)) {
+                    return fcBody334[0];
+                }
+                throw new Exception("unexpected url");
+            }
+        };
+        String wxResult334 = WeatherTool.forecastFor(
+                "Oakdale, Tennessee", fake334);
+        check("v334 tool: the forecast is the evidence — "
+                        + "resolved place named, three days "
+                        + "in the goal's terms, a null rain "
+                        + "chance reported as not reported",
+                wxResult334, wxExpected334);
+        check("v334 tool: the state named in the place "
+                        + "beat the first candidate — the "
+                        + "forecast fetch went to Tennessee's "
+                        + "coordinates",
+                Boolean.valueOf(urls334.size() == 2
+                        && urls334.get(1).contains(
+                                "latitude=35.9976")
+                        && urls334.get(1).contains(
+                                "longitude=-84.4098")),
+                Boolean.TRUE);
+        urls334.clear();
+        geoBody334[0] = geoCaFirst334;
+        String wxFirst334 = WeatherTool.forecastFor(
+                "Oakdale", fake334);
+        check("v334 tool: no state named — the first "
+                        + "candidate wins, and the header "
+                        + "NAMES it (California), so the "
+                        + "resolution is never silent",
+                Boolean.valueOf(wxFirst334.startsWith(
+                        "ok: Weather for Oakdale, "
+                                + "California, United States")
+                        && urls334.get(1).contains(
+                                "latitude=37.76")),
+                Boolean.TRUE);
+        geoBody334[0] = geoTnSecond334;
+        boolean pickOk334 = false;
+        try {
+            pickOk334 = WeatherTool.pickCandidate(
+                            WeatherTool.parseCandidates(
+                                    geoTnSecond334),
+                            "Oakdale, Tennessee") == 1
+                    && WeatherTool.pickCandidate(
+                            WeatherTool.parseCandidates(
+                                    geoTnSecond334),
+                            "Oakdale") == 0;
+        } catch (Exception e) {
+            pickOk334 = false;
+        }
+        check("v334 tool pure: pickCandidate — the named "
+                        + "state wins, an unnamed place "
+                        + "takes the first",
+                Boolean.valueOf(pickOk334),
+                Boolean.TRUE);
+        check("v334 tool pure: a state named inside "
+                        + "another word never matches "
+                        + "(Yorktown is not York)",
+                Boolean.valueOf(!WeatherTool.containsPhrase(
+                                "yorktown, virginia", "york")
+                        && WeatherTool.containsPhrase(
+                                "oakdale, tennessee",
+                                "tennessee")),
+                Boolean.TRUE);
+
+        // ================= WeatherTool: failures ==========
+        geoBody334[0] = "{}";
+        check("v334 tool: no candidate — an honest error "
+                        + "that names the place and invites "
+                        + "browsing",
+                WeatherTool.forecastFor("Nowhereville",
+                        fake334),
+                "error: could not find a place called "
+                        + "\"Nowhereville\" — browse for "
+                        + "the forecast instead (use "
+                        + "search).");
+        geoBody334[0] = "{\"results\":[]}";
+        check("v334 tool: an empty results list is the "
+                        + "same honest not-found",
+                Boolean.valueOf(WeatherTool.forecastFor(
+                        "Nowhereville", fake334).startsWith(
+                        "error: could not find a place "
+                                + "called")),
+                Boolean.TRUE);
+        WeatherTool.Transport down334 =
+                new WeatherTool.Transport() {
+            @Override public String get(String url)
+                    throws Exception {
+                throw new Exception("HTTP 503");
+            }
+        };
+        check("v334 tool: a transport failure is a "
+                        + "result, not a stop — the run is "
+                        + "told to browse instead",
+                Boolean.valueOf(WeatherTool.forecastFor(
+                        "Oakdale, Tennessee", down334)
+                        .startsWith("error: the weather "
+                                + "lookup failed (HTTP 503)")
+                        && WeatherTool.forecastFor(
+                                "Oakdale, Tennessee",
+                                down334).contains(
+                                "browse for the forecast "
+                                        + "instead")),
+                Boolean.TRUE);
+        geoBody334[0] = geoTnSecond334;
+        fcBody334[0] = "not json";
+        check("v334 tool: a malformed forecast reply is "
+                        + "the same failure result",
+                Boolean.valueOf(WeatherTool.forecastFor(
+                        "Oakdale, Tennessee", fake334)
+                        .startsWith("error: the weather "
+                                + "lookup failed")),
+                Boolean.TRUE);
+        fcBody334[0] = "{}";
+        check("v334 tool: a forecast reply with no daily "
+                        + "block is the same failure result",
+                Boolean.valueOf(WeatherTool.forecastFor(
+                        "Oakdale, Tennessee", fake334)
+                        .startsWith("error: the weather "
+                                + "lookup failed")),
+                Boolean.TRUE);
+        fcBody334[0] = "{\"daily\":{\"time\":"
+                + "[\"2026-11-01\",\"2026-11-02\","
+                + "\"2026-11-03\"],"
+                + "\"temperature_2m_max\":[61.2,71.4,76.0],"
+                + "\"temperature_2m_min\":[53.6,52.5,61.3]}}";
+        String wxNoRain334 = WeatherTool.forecastFor(
+                "Oakdale, Tennessee", fake334);
+        check("v334 tool: a wholly unreported rain "
+                        + "chance renders as not reported "
+                        + "on every day — never an "
+                        + "invented 0",
+                Boolean.valueOf(wxNoRain334.startsWith(
+                        "ok: Weather for Oakdale, "
+                                + "Tennessee")
+                        && wxNoRain334.contains(
+                                "chance of rain not "
+                                        + "reported.")
+                        && !wxNoRain334.contains(
+                                "rain 0%")),
+                Boolean.TRUE);
+        fcBody334[0] = fc334;
+
+        // ================= scripted run: the corpus =====
+        // The tool's result is evidence: the planner asks
+        // for the weather, notes the figures it was GIVEN
+        // (lands — no correction), notes figures it was
+        // NOT given (corrected, the v3.31 guard judging
+        // against the tool's text), then answers with the
+        // given figures and completes. Four calls.
+        Agent.Ui ui334 = new Agent.Ui() {
+            @Override public void feed(String line) { }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision, String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() {
+                return false;
+            }
+            @Override public boolean foreground() {
+                return false;
+            }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) {
+                return false;
+            }
+        };
+        final String goal334 = "Search for the weather "
+                + "forecast for Oakdale, Tennessee and tell "
+                + "me the high and low temperatures and "
+                + "chance of rain for the next three days.";
+        final Eyes.Perception home334 = mdPage(
+                "https://example.test/home",
+                elx(1, "a", "Home", "/"),
+                elx(2, "a", "About", "/about"),
+                elx(3, "a", "Contact", "/contact"));
+        home334.title = "Example Home";
+        final String wxServed334 = wxExpected334;
+        Agent.Hands wxHands334 = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return home334;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int chunk) {
+                return "ok: nothing to read";
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+            @Override public String weather(String place) {
+                return wxServed334;
+            }
+        };
+        final java.util.List<String> prompts334 =
+                new java.util.ArrayList<String>();
+        final int[] calls334 = {0};
+        ModelEngine engine334 = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                prompts334.add(prompt);
+                calls334[0]++;
+                if (calls334[0] == 1) {
+                    return "{\"action\":\"weather\","
+                            + "\"place\":\"Oakdale, "
+                            + "Tennessee\"}";
+                }
+                if (calls334[0] == 2) {
+                    return "{\"action\":\"note\",\"fact\":"
+                            + "\"Sun Nov 1: high 61°F, low "
+                            + "54°F, chance of rain 80%.\"}";
+                }
+                if (calls334[0] == 3) {
+                    return "{\"action\":\"note\",\"fact\":"
+                            + "\"Tue Nov 3: high 99°F, low "
+                            + "11°F, chance of rain 5%.\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, Tennessee: high "
+                        + "61°F, low 54°F, chance of rain "
+                        + "80% on Sun Nov 1.\"}";
+            }
+        };
+        com.ghosthands.app.Trail trail334 =
+                new com.ghosthands.app.Trail(null);
+        new Agent(wxHands334, engine334,
+                PolicyPacks.loadPack("standard"), trail334,
+                ui334, "q5_k_m").run(goal334);
+        int wExec334 = 0;
+        int wNoteAdded334 = 0;
+        int wCorrect334 = 0;
+        String wStop334 = null;
+        for (java.util.Map<String, Object> ev
+                : trail334.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("execute".equals(t)) {
+                Object a = ev.get("action");
+                if (a instanceof java.util.Map) {
+                    java.util.Map<?, ?> am =
+                            (java.util.Map<?, ?>) a;
+                    if ("weather".equals(
+                            String.valueOf(am.get("action")))
+                            && "Oakdale, Tennessee".equals(
+                                    String.valueOf(
+                                            am.get("place")))) {
+                        wExec334++;
+                    }
+                }
+            }
+            if ("note".equals(t) && "added".equals(
+                    String.valueOf(ev.get("status")))) {
+                wNoteAdded334++;
+            }
+            if ("guard".equals(t) && String.valueOf(
+                    ev.get("reason")).startsWith(
+                            "fact grounding")
+                    && "correct".equals(
+                            String.valueOf(
+                                    ev.get("outcome")))) {
+                wCorrect334++;
+            }
+            if ("stop".equals(t)) {
+                wStop334 = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v334 run: the weather action executed "
+                        + "through the standing govern/execute "
+                        + "trail, place and all",
+                Integer.valueOf(wExec334), Integer.valueOf(1));
+        check("v334 run: the tool's figures NOTE clean — "
+                        + "the result joined the grounding "
+                        + "corpus, so quoting it is not "
+                        + "fabrication",
+                Integer.valueOf(wNoteAdded334),
+                Integer.valueOf(1));
+        check("v334 run: figures the tool never gave are "
+                        + "still corrected — the corpus is "
+                        + "the tool's text, not a licence",
+                Integer.valueOf(wCorrect334),
+                Integer.valueOf(1));
+        check("v334 run: the run completes on the tool's "
+                        + "figures (four calls, done)",
+                wStop334 + "|" + calls334[0], "done|4");
+        check("v334 run: the next prompt carries the "
+                        + "forecast whole — the result rode "
+                        + "the read history cap, like a "
+                        + "read's text",
+                Boolean.valueOf(prompts334.size() >= 2
+                        && prompts334.get(1).contains(
+                                "Weather for Oakdale, "
+                                        + "Tennessee")
+                        && prompts334.get(1).contains(
+                                "chance of rain 80%")),
+                Boolean.TRUE);
+
+        // ================= scripted run: unattended =====
+        // The same loop headless under the readonly pack:
+        // weather, then a done quoting the tool — the
+        // correction count stays zero and the run carries
+        // its unattended stamp.
+        final int[] callsU334 = {0};
+        ModelEngine engineU334 = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsU334[0]++;
+                if (callsU334[0] == 1) {
+                    return "{\"action\":\"weather\","
+                            + "\"place\":\"Oakdale, "
+                            + "Tennessee\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, Tennessee: high "
+                        + "61°F, low 54°F, chance of rain "
+                        + "80% on Sun Nov 1.\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailU334 =
+                new com.ghosthands.app.Trail(null);
+        new Agent(wxHands334, engineU334,
+                PolicyPacks.loadPack("readonly"), trailU334,
+                new HeadlessUi(System.currentTimeMillis()),
+                "q5_k_m", false, 25, true, true,
+                Settings.CHUNK_AUTO, 4, "duckduckgo", false,
+                true, false, false, Settings.END_CARD, false,
+                true, Settings.STYLE_BALANCED, null, null,
+                null, null, false, null, null, 0, 0, null,
+                null, true).run("Check the Oakdale forecast");
+        int uExec334 = 0;
+        int uCorrect334 = 0;
+        String uStop334 = null;
+        Object uUnattended334 = null;
+        for (java.util.Map<String, Object> ev
+                : trailU334.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("execute".equals(t)) {
+                Object a = ev.get("action");
+                if (a instanceof java.util.Map
+                        && "weather".equals(String.valueOf(
+                                ((java.util.Map<?, ?>) a)
+                                        .get("action")))) {
+                    uExec334++;
+                }
+            }
+            if ("guard".equals(t) && String.valueOf(
+                    ev.get("reason")).startsWith(
+                            "fact grounding")
+                    && "correct".equals(
+                            String.valueOf(
+                                    ev.get("outcome")))) {
+                uCorrect334++;
+            }
+            if ("stop".equals(t)) {
+                uStop334 = String.valueOf(ev.get("reason"));
+            }
+            if ("run".equals(t)) {
+                uUnattended334 = ev.get("unattended");
+            }
+        }
+        check("v334 run UNATTENDED: the tool fires "
+                        + "headless under the readonly pack "
+                        + "and its figures answer clean — "
+                        + "one loop, both paths",
+                uExec334 + "|" + uCorrect334 + "|" + uStop334
+                        + "|" + Boolean.TRUE.equals(
+                                uUnattended334),
+                "1|0|done|true");
+
+        // ================= grammar parity ===============
+        if (args != null && args.length > 0) {
+            String shimSrc334 = readTestFile(
+                    new java.io.File(args[0]));
+            if (shimSrc334 != null) {
+                String g334 = decodeGrammarLiterals(
+                        shimSrc334);
+                check("v334 grammar: the object rule "
+                                + "appends weather at the "
+                                + "end — the standing "
+                                + "discipline every "
+                                + "vocabulary growth follows",
+                        Boolean.valueOf(grammarLine(g334,
+                                "obj").contains(
+                                "read-file | weather")),
+                        Boolean.TRUE);
+                check("v334 grammar: the weather rule "
+                                + "takes a non-blank place, "
+                                + "the parser's shape",
+                        Boolean.valueOf(grammarLine(g334,
+                                "weather").contains(
+                                "\\\"place\\\"")
+                                && grammarLine(g334,
+                                        "weather").contains(
+                                        "nstring")),
+                        Boolean.TRUE);
+            }
+            // Source pins: the dispatch and both hands'
+            // overrides — a refactor that unwired the
+            // tool fails here, not on a phone.
+            java.io.File shimFile334 =
+                    new java.io.File(args[0]);
+            java.io.File shimDir334 =
+                    shimFile334.getParentFile();
+            java.io.File v1Dir334 = shimDir334 == null
+                    ? null
+                    : shimDir334.getParentFile() == null
+                            ? null
+                            : shimDir334.getParentFile()
+                                    .getParentFile();
+            if (v1Dir334 != null) {
+                String agentSrc334 = readTestFile(
+                        new java.io.File(v1Dir334,
+                                "app/src/main/java/com/"
+                                        + "ghosthands/app/"
+                                        + "Agent.java"));
+                String mainSrc334 = readTestFile(
+                        new java.io.File(v1Dir334,
+                                "app/src/main/java/com/"
+                                        + "ghosthands/app/"
+                                        + "MainActivity.java"));
+                String svcSrc334 = readTestFile(
+                        new java.io.File(v1Dir334,
+                                "app/src/main/java/com/"
+                                        + "ghosthands/app/"
+                                        + "UnattendedService"
+                                        + ".java"));
+                check("v334 pin: the loop dispatches "
+                                + "weather to the hands",
+                        Boolean.valueOf(agentSrc334 != null
+                                && agentSrc334.contains(
+                                        "\"weather\".equals"
+                                        + "(a.action)) return "
+                                        + "hands.weather(")),
+                        Boolean.TRUE);
+                check("v334 pin: both device hands carry "
+                                + "the real tool (WebHands "
+                                + "and ServiceHands)",
+                        Boolean.valueOf(mainSrc334 != null
+                                && mainSrc334.contains(
+                                        "WeatherTool"
+                                        + ".forecastFor(place")
+                                && svcSrc334 != null
+                                && svcSrc334.contains(
+                                        "WeatherTool"
+                                        + ".forecastFor(place")),
+                        Boolean.TRUE);
+            }
+        }
+
+        // ---- no new trail types ----
+        check("v334 registry: EVENT_TYPES unchanged (33 "
+                        + "types, no v3.34 addition — the "
+                        + "tool rides the standing decide / "
+                        + "govern / execute / result events)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
     }
 }

@@ -187,7 +187,8 @@ public class Governor {
                 || "note".equals(kind)
                 || "open_tab".equals(kind) || "switch_tab".equals(kind)
                 || "close_tab".equals(kind)
-                || "read_file".equals(kind)) {
+                || "read_file".equals(kind)
+                || "weather".equals(kind)) {
             // search (v1.1) performs a read-only web search: it perceives
             // the world, it does not change account/site state.
             // read (v1.2) extracts page text: pure perception.
@@ -213,6 +214,14 @@ public class Governor {
             // a document NAMED like money or destruction
             // ("delete-taxes.csv") can never upgrade it: the
             // name is a label, not a target.
+            // weather (v3.34) fetches a public forecast for a
+            // named place from a keyless data API: it perceives
+            // the world and changes nothing — no page, no
+            // account, no state anywhere. It returns here too,
+            // so a place NAMED like money or destruction can
+            // never upgrade it: the place is a label, not a
+            // target, and the fetch's endpoints are the tool's
+            // own constants, never the planner's.
             return READONLY;
         }
 

@@ -15675,6 +15675,17 @@ public class MainActivity extends Activity {
             return "ok: went back";
         }
 
+        /** v3.34: the weather action's body — the data
+         *  tool itself (WeatherTool over its production
+         *  transport). No page is touched: the forecast
+         *  comes back as the step's result text, evidence
+         *  the loop's grounding corpus takes on read's
+         *  terms. */
+        @Override public String weather(String place) throws Exception {
+            return WeatherTool.forecastFor(place,
+                    new WeatherTool.HttpTransport());
+        }
+
         /** v1.6: the error-page recovery reload. When the error
          *  page names the URL that failed, navigate back to it —
          *  the WebView's current URL is the chrome-error

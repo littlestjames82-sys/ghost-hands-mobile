@@ -5,6 +5,168 @@ entirely on the phone. Foundation reused from the on-device proof
 (~/workspace/ghost-hands-mobile/BUILD_NOTES.md): same pinned llama.cpp
 b11382 Android build, same JNI shim design, same model download flow.
 
+## v3.34.0 (Nov 1, 2026) — the weather tool
+
+The standing field test (the Oakdale weather goal,
+GitHub issue #1) has never completed honestly: three
+device runs died in browsing machinery or ended in
+fabrication — most recently the trained model's run,
+which read only the generic NWS landing page and then
+noted figures that appeared in nothing it read.
+v3.31's grounding guard now blocks the fabrication;
+this car gives the planner a legitimate way to KNOW:
+a data tool whose result arrives as evidence. No new
+permissions (INTERNET already declared), no settings
+keys, no new trail types — the registry stands at 33
+and the tool rides the standing decide / govern /
+execute / result events. Build-start checks: the tree
+matched the v3.33.0 record (version pin 3.33.0 /
+code 55) and the suite was re-verified green in the
+foreground (2,335) before the first edit. Version is
+now 56 / "3.34.0".
+
+- THE ACTION. `{"action":"weather","place":"..."}`
+  joins the vocabulary exactly where `search`'s shape
+  set the pattern: GhAction carries a `place` field
+  (toMap, describe, signature); PlannerParse demands
+  a non-blank place and fails closed like search's
+  query; the GBNF grammar grew by the standing
+  append-at-the-end discipline (obj tail now
+  `... | read-file | weather`, weather rule takes
+  place as nstring); Agent's loop dispatches to a
+  new Hands method both device hands override
+  (WebHands in MainActivity, ServiceHands in
+  UnattendedService), so the interactive and
+  unattended loops share the handling by
+  construction — a headless scripted run under the
+  readonly pack is in the suite and answers clean.
+- GOVERNANCE. Governor.classify returns READONLY
+  for weather in the standing early-return family:
+  the place is a label, not a target — the tool
+  only ever fetches its own two constant endpoints,
+  so the string's content is never a URL, a path,
+  or a financial term. It is allowed under every
+  pack including seatbelt (a test drives a place
+  string full of scary words — "Pay and delete
+  everything, Oakdale" — and it still classifies
+  readonly/allow, because nothing in the string can
+  aim the fetch).
+- THE TOOL (new pure class WeatherTool, no
+  Android). Transport is a one-method interface
+  (`String get(String url)`), fakeable in tests —
+  the host suite never touches the network.
+  HttpTransport is HttpURLConnection GET with
+  CloudBrain's timeout discipline (15s connect /
+  60s read) and throws `HTTP <status>` on non-200.
+  Two keyless Open-Meteo GETs: geocoding
+  (name=<urlencoded place>&count=5) then forecast
+  (daily max/min temperature + precipitation
+  probability, 3 days, fahrenheit, timezone=auto).
+  https only; the manifest's
+  usesCleartextTraffic=false stands.
+- RESOLUTION, HONEST ABOUT AMBIGUITY. From the
+  geocoding candidates the tool prefers the one
+  whose admin1/state is named in the place string
+  as a bounded phrase (non-letter boundaries, so
+  "York" does not match "Yorktown"); otherwise the
+  first candidate. The result ALWAYS names the
+  resolved place — "Weather for Oakdale,
+  Tennessee, United States (Open-Meteo)" — so a
+  wrong-town resolution is visible in the trail and
+  to the planner, never silent. The suite pins it:
+  a fixture with Oakdale, Missouri first and
+  Oakdale, Tennessee second resolves Tennessee
+  (the forecast URL carries Tennessee's
+  coordinates); a place naming no state takes the
+  first candidate and the header says California.
+- RESULT TEXT IS THE EVIDENCE. One line per day
+  for 3 days in the goal's own terms — "Sun Nov 1:
+  high 61°F, low 54°F, chance of rain 80%." Day
+  labels are computed locale-free (days-from-civil,
+  so a 0-2-digit day or epoch boundary cannot
+  shift one). Temperatures round to whole degrees.
+  A null precipitation probability renders as
+  "chance of rain not reported." — never an
+  invented 0.
+- CORPUS WIRING (the point of the car). In
+  Agent.run, a successful weather result appends
+  to the run's readCorpus under the exact
+  condition that admits read and read_file results,
+  and rides the same read-history size cap and
+  one-time note hint as a read's text. The
+  grounding guard therefore judges note/done
+  figures against the tool's numbers by
+  construction. The scripted proof is in the
+  suite: weather -> note the tool's figures
+  (lands, uncorrected) -> note figures the tool
+  never gave (corrected) -> done quoting the
+  tool's figures (completes; four model calls).
+- FAILURES ARE RESULTS, never stops, never thrown
+  past the tool: no candidate ->
+  `error: could not find a place called "<place>"
+  — browse for the forecast instead (use search).`;
+  transport failure, non-200, malformed JSON, or
+  missing/ragged daily fields ->
+  `error: the weather lookup failed (<detail>) —
+  browse for the forecast instead (use search).`
+  The run continues; the planner falls back to
+  browsing, now with the guard watching it.
+- PROMPT. One teaching line beside search's: the
+  contract's Actions line gains the weather shape,
+  and one sentence after "use search first." —
+  "Weather or forecast goal: use weather with the
+  place named in the goal." Nothing else moved.
+  DISCLOSED BUDGET MOVE: the contract grew by
+  exactly that line, +27 est tokens (CONTRACT_TEXT
+  291 -> 318 est, CONTRACT_BLOCK 329 -> 355). The
+  squeeze alternatives were measured and refused:
+  every remaining contract sentence is pinned
+  byte-for-byte by a standing check, and cutting
+  the teaching sentence would delete the feature's
+  discoverability. The two budget checks were
+  edited in place to carry the +27 with the reason
+  in their comments.
+- DISCLOSED FIXTURE/EXPECTATION MOVES (all from
+  the +27 static prefix, nothing else): the
+  budget(ii) fixture's section chunk sheds 104
+  chars (3000 -> 2896) restoring its "overage
+  smaller than the preview" premise, in the v2.2
+  re-size pattern; the rung-2 fixture's last
+  history entry sheds 104 chars (raw est 1749 ->
+  1723, closes at rung 2 again, fit est 1689); the
+  rung-3 fixture's history entries shed 24 chars
+  each (closes at rung 3 again, fit est 1688); the
+  fit-pair composition — its page/history parts
+  frozen since v2.9 — now closes at rung 4 instead
+  of rung 1 (stubbing the history read no longer
+  suffices; the auto-read section's text drops
+  too), and its two degradation checks pin the
+  measured new behavior with the cause in their
+  comment; the v3.16 grammar pin's obj tail now
+  ends "| read-file | weather". Every other
+  pre-existing check is untouched and green.
+- TESTS. Baseline 2,335 (v3.33) -> 2,376 passed,
+  0 failed (+41): parser acceptance/rejection,
+  governor classification under all four packs,
+  prompt pins, exact endpoint URLs, resolution
+  preference and fallback, result formatting
+  from a recorded-shape fixture (including the
+  null-precipitation day and a no-precipitation
+  response), the error shapes (no candidates,
+  empty results, HTTP failure, malformed JSON,
+  missing daily), the corpus-grounding scripted
+  run, the unattended scripted run, grammar
+  parity, source pins for the dispatch and both
+  hands' overrides, and the 33-type registry pin.
+- APK: 4,705,095 B, sha256
+  60279958b4c8bec5798d89a9ebc25d4cd0e5ecf9
+  f9fcd3efd298f539a9456e53, same signer, package
+  com.ghosthands.app, versionCode 56 /
+  versionName 3.34.0 verified in the built APK.
+  Device pass is Ryan's: install over v3.33 and
+  run the Oakdale weather goal — the honest exam
+  is a done whose figures came from the tool.
+
 ## v3.33.0 (Nov 1, 2026) — speaking locks + visible import progress
 
 One defect, experienced live: at 1:54 AM on Nov 1, 2026
