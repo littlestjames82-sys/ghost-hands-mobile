@@ -40,6 +40,13 @@ import java.util.TimeZone;
  *   offer) while the app is in the background posts
  *   postNeedsYou; the NeedsMe decision gates every post, and a
  *   foreground wait never notifies.
+ * - Unattended arming (v3.27, R13): a goal opted into
+ *   unattended mode arms EXACT (setExactAndAllowWhileIdle)
+ *   while its exact-alarm grant is in hand — the exact alarm
+ *   is the platform's key for starting the run's foreground
+ *   service from the background. Grants are re-read at every
+ *   arm (canScheduleExact / batteryExempt below), and every
+ *   other goal arms inexact exactly as it always has.
  *
  * Android 13+ note (disclosed in the release notes): this app
  * targets API 34 but deliberately does NOT declare
@@ -58,6 +65,14 @@ public final class Alerts {
     public static final String EXTRA_GOAL_NAME = "saved_goal_name";
     public static final String EXTRA_FROM_CHECK = "from_check";
     public static final String EXTRA_CARD_TRAIL = "card_trail_path";
+    /** v3.18 (R9): marks a condition RETRY firing — the same
+     *  check alarm, carrying this extra, so the receiver can
+     *  tell a retry (judge against the deferral book) from the
+     *  check's daily firing (re-arm the daily cadence, then
+     *  judge). The retry's PendingIntent uses a distinct
+     *  request code (see retryIntent): a check has at most one
+     *  daily alarm and one retry alarm, and they never alias. */
+    public static final String EXTRA_RETRY = "check_retry";
 
     /** v3.6 (needs-me): the waits that can ask for the user —
      *  the kinds postNeedsYou words its text for. v3.12 (R4)
@@ -236,7 +251,16 @@ public final class Alerts {
     }
 
     /** Arm (or re-arm) one goal's daily check at its next
-     *  occurrence. A goal without a schedule disarms instead. */
+     *  occurrence. A goal without a schedule disarms instead.
+     *  v3.27 (R13): an unattended goal whose exact-alarm
+     *  grant is in hand AT ARM TIME arms exact (the exact
+     *  alarm is the documented key that lets the receiver
+     *  start the foreground service — R13 spike §2); every
+     *  other goal arms exactly as it always has. The grant
+     *  is re-read here, never assumed (it is revocable),
+     *  and a SecurityException from the exact call degrades
+     *  to the inexact arming rather than crashing the
+     *  caller — degrade, not crash (spike §8.1). */
     public static void armCheck(Context ctx, SavedGoals.SavedGoal g) {
         if (g == null) return;
         if (!g.hasSchedule()) {
@@ -249,8 +273,48 @@ public final class Alerts {
         long when = SavedGoals.nextFireMillis(
                 System.currentTimeMillis(), g.schedMinutes,
                 TimeZone.getDefault());
+        if (Unattended.armMode(g.unattended,
+                canScheduleExact(ctx))
+                == Unattended.ARM_EXACT) {
+            try {
+                am.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP, when,
+                        alarmIntent(ctx, g.name));
+                return;
+            } catch (SecurityException denied) {
+                // The grant left between the check and the
+                // call: fall through to the inexact arming.
+            }
+        }
         am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, when,
                 alarmIntent(ctx, g.name));
+    }
+
+    /** v3.27 (R13): can this app schedule exact alarms right
+     *  now? Before Android 12 (API 31) exact alarms need no
+     *  grant at all; from 31 the user-granted
+     *  SCHEDULE_EXACT_ALARM state is the answer. Shared by
+     *  the arming above, the receiver's fire-time judgement
+     *  and the Settings status line — one reader, so the
+     *  three can never disagree. */
+    public static boolean canScheduleExact(Context ctx) {
+        if (Build.VERSION.SDK_INT < 31) return true;
+        AlarmManager am = (AlarmManager)
+                ctx.getSystemService(Context.ALARM_SERVICE);
+        return am != null && am.canScheduleExactAlarms();
+    }
+
+    /** v3.27 (R13): is the app exempt from battery
+     *  optimization ("Unrestricted") right now? The grant
+     *  the unattended design stands on (spike §5: network
+     *  and wake locks inside Doze, a standing FGS-start
+     *  exemption, exact-alarm eligibility). Shared by the
+     *  receiver and the Settings status line. */
+    public static boolean batteryExempt(Context ctx) {
+        android.os.PowerManager pm = (android.os.PowerManager)
+                ctx.getSystemService(Context.POWER_SERVICE);
+        return pm != null && pm.isIgnoringBatteryOptimizations(
+                ctx.getPackageName());
     }
 
     /** Disarm one goal's daily check. */
@@ -346,5 +410,56 @@ public final class Alerts {
                 armPageWatchCheck(ctx, all.get(i));
             }
         }
+    }
+
+    // ---------------- v3.18: condition retries (R9) ----------------
+    // A deferred check's retry is a SECOND alarm for the same
+    // check name, on the same intent shape plus EXTRA_RETRY,
+    // under a request code the daily alarm never uses — so
+    // arming, firing, or cancelling one never touches the
+    // other. The cadence is CheckConditions.RETRY_MS; the
+    // receiver owns the judgement, this class only the alarm.
+
+    private static PendingIntent retryIntent(Context ctx,
+                                             String name) {
+        Intent i = new Intent(ctx, CheckReceiver.class);
+        i.setAction(ACTION_CHECK);
+        i.putExtra(EXTRA_GOAL_NAME, name);
+        i.putExtra(EXTRA_RETRY, true);
+        return PendingIntent.getBroadcast(ctx,
+                ("retry:" + name).hashCode(), i,
+                PendingIntent.FLAG_UPDATE_CURRENT
+                        | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    /** Arm a goal check's condition retry RETRY_MS out. */
+    public static void armCheckRetry(Context ctx, String name,
+                                     long delayMs) {
+        if (name == null) return;
+        AlarmManager am = (AlarmManager)
+                ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) return;
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP,
+                System.currentTimeMillis() + delayMs,
+                retryIntent(ctx, name));
+    }
+
+    /** Arm a page-watch check's condition retry RETRY_MS out. */
+    public static void armPageWatchRetry(Context ctx,
+                                         PageWatches.PageWatch w,
+                                         long delayMs) {
+        if (w == null) return;
+        armCheckRetry(ctx, PageWatches.alarmName(w), delayMs);
+    }
+
+    /** Disarm a check's condition retry (it posted, or the
+     *  check is gone). Name-based, for goal checks and
+     *  page-watch checks alike (the alarm name is the key). */
+    public static void cancelCheckRetry(Context ctx, String name) {
+        if (name == null) return;
+        AlarmManager am = (AlarmManager)
+                ctx.getSystemService(Context.ALARM_SERVICE);
+        if (am == null) return;
+        am.cancel(retryIntent(ctx, name));
     }
 }

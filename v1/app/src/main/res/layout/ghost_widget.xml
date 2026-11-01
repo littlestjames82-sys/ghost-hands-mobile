@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v3.23 (Everything Train R12): the home-screen widget's
+     layout — the app's first res/layout/. RemoteViews-legal
+     classes ONLY (LinearLayout, TextView, Button): anything
+     else throws at inflation time on the user's home screen,
+     where the host harness cannot see it (the R12 plan's
+     grep pin guards this file). The widget is a reader: a
+     run line, up to three verdict lines, and a Stop button
+     whose intent GhostWidget chooses by the judged phase. -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_body"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#FF0A1220"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/widget_run_line"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="No runs yet"
+        android:textColor="#FFE8F1FA"
+        android:textSize="14sp"
+        android:maxLines="2"
+        android:ellipsize="end" />
+
+    <TextView
+        android:id="@+id/widget_verdicts"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:text="No watched checks yet"
+        android:textColor="#FF9FD8F2"
+        android:textSize="12sp"
+        android:maxLines="3"
+        android:ellipsize="end" />
+
+    <Button
+        android:id="@+id/widget_stop"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="■ Stop"
+        android:textColor="#FF5A6B85"
+        android:textSize="13sp" />
+</LinearLayout>

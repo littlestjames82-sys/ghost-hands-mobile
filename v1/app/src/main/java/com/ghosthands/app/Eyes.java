@@ -852,6 +852,35 @@ public final class Eyes {
             + "window.__gh.readCands=stash;"
             + "return {list:list,legacy:legacy};}";
 
+    /** JS: the DuckDuckGo region-picker test (v3.28), shared
+     *  by the extraction walks below and by readTextJs. The
+     *  Nov 1, 2026 v3.26 device trail corrected the region
+     *  story: the picker is furniture ON the results page — a
+     *  region <select> in the search form whose ~50 option
+     *  labels ("All Regions", "Argentina", ...) flatten into
+     *  the extracted text's head and lead everything the
+     *  planner reads, while the page's results sit below
+     *  them. The walks therefore skip the picker subtree —
+     *  on DuckDuckGo hosts only (host-scoped by the hostname
+     *  test), and only for a select that is recognisably the
+     *  picker: named "kl" (the region parameter the fallback
+     *  URL pins), or carrying at least 8 options whose first
+     *  reads "All Regions". Element enumeration is untouched:
+     *  the select still appears in the map as one element,
+     *  exactly as it should — only its option LABELS leave
+     *  the page's text. */
+    private static final String DDG_PICKER_JS =
+            "function ghIsDdgPicker(k){"
+            + "if(k.tagName!=='SELECT')return false;"
+            + "var host='';"
+            + "try{host=location.hostname||'';}catch(e){return false;}"
+            + "if(!/(^|\\.)duckduckgo\\.com$/i.test(host))return false;"
+            + "if(k.name==='kl')return true;"
+            + "var o=k.options;if(!o||o.length<8)return false;"
+            + "var f=(o[0].text||'').replace(/\\s+/g,' ')"
+            + ".trim().toLowerCase();"
+            + "return f==='all regions';}";
+
     /** JS: the extraction walk (READ_WALK_JS) — the v1.8
      *  visibility-blind DOM walk with the same skip set, block
      *  breaks and cleaning as readTextJs, parameterised by root
@@ -880,6 +909,7 @@ public final class Eyes {
             + "return t.replace(/[ \\t]+/g,' ')"
             + ".replace(/\\n[ \\t]+/g,'\\n')"
             + ".replace(/\\n{3,}/g,'\\n\\n').trim();}"
+            + DDG_PICKER_JS
             + "function ghWalkText(root,supp){"
             + "var parts=[];"
             + "function walk(n){"
@@ -890,6 +920,7 @@ public final class Eyes {
             + "else if(k.nodeType===1){"
             + "var tag=k.tagName;"
             + "if(GH_SKIP[tag])continue;"
+            + "if(ghIsDdgPicker(k))continue;"
             + "if(supp&&ghIsChromeEl(k))continue;"
             + "if(tag==='BR'){parts.push('\\n');continue;}"
             + "walk(k);"
@@ -911,6 +942,7 @@ public final class Eyes {
             + "else if(k.nodeType===1){"
             + "var tag=k.tagName;"
             + "if(GH_SKIP[tag])continue;"
+            + "if(ghIsDdgPicker(k))continue;"
             + "if(tag==='BR'){parts.push('\\n');size+=1;continue;}"
             + "walk(k);"
             + "if(GH_BLOCK[tag]){parts.push('\\n');size+=1;}"
@@ -1589,9 +1621,18 @@ public final class Eyes {
      *  (skipping script/style/noscript/iframe/svg subtrees and
      *  restoring block-level line breaks), so collapsed sections
      *  are read like any other. The MAP_JS preview keeps innerText:
-     *  a 240-char "what is on screen" glimpse is its whole job. */
+     *  a 240-char "what is on screen" glimpse is its whole job.
+     *
+     *  v3.28: the walk also skips the DuckDuckGo region picker
+     *  (DDG_PICKER_JS — host-scoped, select-shaped), the same
+     *  skip READ_WALK_JS's walks carry, so a DDG results page
+     *  reads as its results from the first char instead of
+     *  leading with fifty region names. Totals and offsets are
+     *  computed over the skipped text, so the cursor walk is
+     *  consistent end to end. */
     public static String readTextJs(int start, int len) {
         return "(function(){"
+                + DDG_PICKER_JS
                 + "var root=document.querySelector('main')"
                 + "||document.querySelector('article')||document.body;"
                 + "var SKIP={SCRIPT:1,STYLE:1,NOSCRIPT:1,IFRAME:1,SVG:1};"
@@ -1609,6 +1650,7 @@ public final class Eyes {
                 + "else if(k.nodeType===1){"
                 + "var tag=k.tagName;"
                 + "if(SKIP[tag])continue;"
+                + "if(ghIsDdgPicker(k))continue;"
                 + "if(tag==='BR'){parts.push('\\n');continue;}"
                 + "walk(k);"
                 + "if(BLOCK[tag])parts.push('\\n');"

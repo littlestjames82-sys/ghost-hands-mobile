@@ -86,6 +86,17 @@ import java.util.Map;
  * capability it arms also needs the accessibility service the
  * user alone enables in Android Settings (SpikeGate), and no
  * run rule reads it.
+ *
+ * v3.29 adds one more on the same discipline — the planner
+ * brain choice (BRAIN): on-device (the default; every run
+ * through v3.28 planned on the phone) or the Fireworks
+ * cloud brain (CloudBrain — opt-in, and inert until the
+ * user sets an API key). The KEY ITSELF IS NOT A SETTING:
+ * it is a credential, stored in the app's private
+ * preferences under CloudBrain.PREF_API_KEY and never
+ * carried in this model's map — this map is captured into
+ * run markers (captureRunRules), and a credential must
+ * never ride it. Only the CHOICE lives here.
  */
 public final class Settings {
 
@@ -135,6 +146,15 @@ public final class Settings {
     public static final String KEY_PLANNER_STYLE = "planner_style";
     // v3.14 key (Everything Train R6 — the accessibility spike).
     public static final String KEY_A11Y_SPIKE = "a11y_spike";
+    // v3.18 keys (Everything Train R9 — smart checks + briefing).
+    public static final String KEY_CHECK_CONDITIONS = "check_conditions";
+    public static final String KEY_BRIEFING = "morning_briefing";
+    // v3.23 key (Everything Train R12 — the voice loop).
+    public static final String KEY_VOICE_LOOP = "voice_loop";
+    // v3.29 key — the planner brain choice (BRAIN). The
+    // Fireworks API key is NOT a key here (see the class
+    // doc): it lives under CloudBrain.PREF_API_KEY.
+    public static final String KEY_BRAIN = "brain";
 
     /** Every key the model reads/writes (the Activity's bridge
      *  walks this list, so a key cannot be forgotten on either
@@ -156,6 +176,9 @@ public final class Settings {
             KEY_BUTTON_HAPTICS,
             KEY_PLANNER_STYLE,
             KEY_A11Y_SPIKE,
+            KEY_CHECK_CONDITIONS, KEY_BRIEFING,
+            KEY_VOICE_LOOP,
+            KEY_BRAIN,
     };
 
     // ---- choices ----------------------------------------------
@@ -230,6 +253,22 @@ public final class Settings {
             "balanced", "careful", "fast", "thorough"};
     public static final String[] STYLE_NAMES = {
             "Balanced", "Careful", "Fast", "Thorough"};
+
+    // ---- v3.29 choices (the planner brain) -----------------
+    /** BRAIN: where a run's planning happens, in chip
+     *  order. DEVICE is the posture every run through
+     *  v3.28 used — the on-device model plans, nothing
+     *  leaves the phone. FIREWORKS is the opt-in cloud
+     *  brain (CloudBrain): prompts and page content are
+     *  sent to Fireworks' API to plan each step, and the
+     *  choice stays inert until the user sets an API key
+     *  on the device. */
+    public static final String BRAIN_DEVICE = "device";
+    public static final String BRAIN_FIREWORKS = "fireworks";
+    public static final String[] BRAIN_IDS = {
+            BRAIN_DEVICE, BRAIN_FIREWORKS};
+    public static final String[] BRAIN_NAMES = {
+            "On-device", "Fireworks cloud"};
 
     // ---- the settings -----------------------------------------
     /** BRAIN: the active model (a ModelStore registry id,
@@ -403,6 +442,45 @@ public final class Settings {
      *  is untouched by the spike's existence. */
     public boolean a11ySpikeOn = false;
 
+    /** ALERTS (v3.18, Everything Train R9): the master switch
+     *  for condition-aware scheduled checks — when on, a check
+     *  whose record asks for charging and/or Wi-Fi can DEFER
+     *  its reminder until the condition holds (CheckConditions
+     *  judges; the receiver only ever gates the POST, never
+     *  browsing). Default OFF — through v3.17 conditions did
+     *  not exist, and a check's reminder posted at its time. */
+    public boolean checkConditionsOn = false;
+    /** ALERTS (v3.18, Everything Train R9): the morning
+     *  briefing — on the day's first open, read out what the
+     *  watched checks found (BriefingDigest over BriefingLog).
+     *  Default OFF (spoken audio on open is intrusive; the
+     *  defaults precedent is speakOnFinish / needsMe). */
+    public boolean briefingOn = false;
+
+    /** VOICE & SPEECH (v3.23, Everything Train R12): the
+     *  voice conversation loop — after a spoken answer, the
+     *  app speaks one prompt and opens the recognizer once
+     *  for a follow-up goal, which then starts as a normal
+     *  run (VoiceLoop carries the machine; this is only its
+     *  switch). Default OFF: a microphone that opens itself
+     *  is opt-in squared (the speakOnFinish / needsMeOn
+     *  defaults precedent). Needs voiceOn and speakOnFinish
+     *  — the loop arms only off the auto-speak path, and the
+     *  accordion copy says so. */
+    public boolean voiceLoopOn = false;
+
+    /** BRAIN (v3.29): the planner brain choice (a BRAIN_*
+     *  id). Default DEVICE — the on-device model plans and
+     *  nothing leaves the phone, the behaviour of every
+     *  build through v3.28. FIREWORKS routes each run's
+     *  decides to the Fireworks cloud brain (CloudBrain),
+     *  which is inert without the user's on-device API
+     *  key. Captured at Start like every run rule (a
+     *  resume restores the dead run's own choice from its
+     *  marker) and named on the run's trail by the brain's
+     *  own model id. */
+    public String brain = BRAIN_DEVICE;
+
     public Settings() { }
 
     // ---- persistence ------------------------------------------
@@ -459,6 +537,11 @@ public final class Settings {
         s.hapticsOn = parseOnOff(m.get(KEY_BUTTON_HAPTICS), false);
         s.plannerStyle = parsePlannerStyle(m.get(KEY_PLANNER_STYLE));
         s.a11ySpikeOn = parseOnOff(m.get(KEY_A11Y_SPIKE), false);
+        s.checkConditionsOn = parseOnOff(
+                m.get(KEY_CHECK_CONDITIONS), false);
+        s.briefingOn = parseOnOff(m.get(KEY_BRIEFING), false);
+        s.voiceLoopOn = parseOnOff(m.get(KEY_VOICE_LOOP), false);
+        s.brain = resolveBrain(m.get(KEY_BRAIN));
         return s;
     }
 
@@ -504,7 +587,37 @@ public final class Settings {
         m.put(KEY_BUTTON_HAPTICS, onOff(hapticsOn));
         m.put(KEY_PLANNER_STYLE, styleName(plannerStyle));
         m.put(KEY_A11Y_SPIKE, onOff(a11ySpikeOn));
+        m.put(KEY_CHECK_CONDITIONS, onOff(checkConditionsOn));
+        m.put(KEY_BRIEFING, onOff(briefingOn));
+        m.put(KEY_VOICE_LOOP, onOff(voiceLoopOn));
+        m.put(KEY_BRAIN, brain);
         return m;
+    }
+
+    // ---- v3.29 helpers (the planner brain) ------------------
+
+    /** A brain id that exists, or the on-device default.
+     *  Case-insensitive, trimmed; the canonical (lowercase)
+     *  id survives. A strange value must never invent a
+     *  brain the user did not pick — least of all one that
+     *  sends page content off the phone. */
+    public static String resolveBrain(String saved) {
+        if (saved != null) {
+            String key = saved.trim().toLowerCase(java.util.Locale.US);
+            for (int i = 0; i < BRAIN_IDS.length; i++) {
+                if (BRAIN_IDS[i].equals(key)) return key;
+            }
+        }
+        return BRAIN_DEVICE;
+    }
+
+    /** A brain id's chip label. */
+    public static String brainName(String id) {
+        String r = resolveBrain(id);
+        for (int i = 0; i < BRAIN_IDS.length; i++) {
+            if (BRAIN_IDS[i].equals(r)) return BRAIN_NAMES[i];
+        }
+        return BRAIN_NAMES[0];
     }
 
     // ---- v3.10 helpers (Everything Train R2) -------------------

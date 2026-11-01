@@ -1,15 +1,19 @@
 import com.ghosthands.app.Agent;
 import com.ghosthands.app.AnswerCard;
+import com.ghosthands.app.DownloadRedirects;
+import com.ghosthands.app.NavScheme;
 import com.ghosthands.app.Copilot;
 import com.ghosthands.app.ElementInfo;
 import com.ghosthands.app.ErrorPages;
 import com.ghosthands.app.Eyes;
 import com.ghosthands.app.GhAction;
 import com.ghosthands.app.Governor;
+import com.ghosthands.app.MascotState;
 import com.ghosthands.app.ModelEngine;
 import com.ghosthands.app.PlannerParse;
 import com.ghosthands.app.PolicyPacks;
 import com.ghosthands.app.RelevanceGuard;
+import com.ghosthands.app.RedirectShims;
 import com.ghosthands.app.Routes;
 import com.ghosthands.app.SavedGoals;
 import com.ghosthands.app.Scratchpad;
@@ -36,8 +40,11 @@ import com.ghosthands.app.SelfTest;
 import com.ghosthands.app.DebugInfo;
 import com.ghosthands.app.TrailStats;
 import com.ghosthands.app.MapDelta;
+import com.ghosthands.app.ThinMap;
 import com.ghosthands.app.RetryStrategy;
 import com.ghosthands.app.A11yNode;
+import com.ghosthands.app.A11yMap;
+import com.ghosthands.app.A11yEyes;
 import com.ghosthands.app.NodeSketch;
 import com.ghosthands.app.SpikeGate;
 import com.ghosthands.app.SpikeLog;
@@ -45,6 +52,30 @@ import com.ghosthands.app.Downloads;
 import com.ghosthands.app.DocText;
 import com.ghosthands.app.PageWatches;
 import com.ghosthands.app.Trail;
+import com.ghosthands.app.GoalChains;
+import com.ghosthands.app.ChainCard;
+import com.ghosthands.app.CheckConditions;
+import com.ghosthands.app.CheckDeferrals;
+import com.ghosthands.app.BriefingLog;
+import com.ghosthands.app.BriefingDigest;
+import com.ghosthands.app.GhostFigure;
+import com.ghosthands.app.MissionBoard;
+import com.ghosthands.app.RunCompare;
+import com.ghosthands.app.RunDigest;
+import com.ghosthands.app.RunQa;
+import com.ghosthands.app.RunReport;
+import com.ghosthands.app.GoalTemplates;
+import com.ghosthands.app.ShareIntake;
+import com.ghosthands.app.DlProvider;
+import com.ghosthands.app.RunControl;
+import com.ghosthands.app.Unattended;
+import com.ghosthands.app.UnattendedLog;
+import com.ghosthands.app.HeadlessUi;
+import com.ghosthands.app.WidgetState;
+import com.ghosthands.app.WidgetText;
+import com.ghosthands.app.VoiceLoop;
+import com.ghosthands.app.CloudBrain;
+import com.ghosthands.app.GroundingGuard;
 
 /**
  * Host-side smoke harness for the Ghost Hands Mobile governor port.
@@ -418,6 +449,12 @@ public class GovernorTest {
     }
 
     public static void main(String[] args) {
+        // v3.24: the host harness never pays the thin-map
+        // backoff for real (the RunControl slice-latch
+        // precedent: a test seam around a wait). The pure
+        // schedule is pinned by the v324 tests; device code
+        // never touches the divisor.
+        ThinMap.BACKOFF_DIVISOR = 1000000L;
         Governor standard = new Governor(PolicyPacks.loadPack("standard").policy);
 
         // -- classification, ported from test_governor.py ----------------
@@ -3744,9 +3781,10 @@ public class GovernorTest {
                 Boolean.valueOf(
                         com.ghosthands.app.ModelStore.defaultSpec() == q5),
                 Boolean.TRUE);
-        check("models: the registry holds exactly the two quants",
+        check("models: the registry holds the two quants and "
+                        + "the trained planner (v3.30)",
                 Integer.valueOf(com.ghosthands.app.ModelStore.MODELS.length),
-                Integer.valueOf(2));
+                Integer.valueOf(3));
         check("models: specFor trims and matches case-insensitively",
                 com.ghosthands.app.ModelStore.specFor(" Q4_K_M ").id,
                 "q4_k_m");
@@ -4384,8 +4422,16 @@ public class GovernorTest {
         String promptContent = Agent.buildPrompt(wikiGoal, ddgContent,
                 "[1] <a> \"x\"\n", new java.util.ArrayList<String>(),
                 null, 0);
+        // v3.28 moves this check's wall half: through v3.27
+        // the prompt's page-text line carried the raw
+        // preview, region furniture included; v3.28 strips
+        // DDG furniture in buildPrompt, so the wall — a
+        // preview that is ALL furniture — now shows no
+        // page-text line at all. The content half is
+        // unchanged. Disclosed in the v3.28 notes under
+        // EXISTING CHECKS CHANGED.
         check("preview: the planner's page-text line follows the preview",
-                Boolean.valueOf(promptWall.contains("All Regions")
+                Boolean.valueOf(!promptWall.contains("All Regions")
                         && promptContent.contains("10-day weather")
                         && !promptWall.equals(promptContent)),
                 Boolean.TRUE);
@@ -5279,6 +5325,49 @@ public class GovernorTest {
         // with an invented 99 — the evidence guard must correct it
         // (under the v2.1 shape rule 99 would have passed) — then
         // answers with the noted 43 and the run completes.
+        // v3.31 fixture repair (disclosed): the run now stands on
+        // an ARRIVED forecast page whose arrival auto-read carries
+        // the low (43) and the rain chance (10), so the note
+        // states figures the run has actually read — the
+        // discipline the fact-grounding guard requires of every
+        // note. The script and every assertion below are
+        // unchanged; only the world gained the read.
+        final String noteText30 = "Tonight's low is 43 degrees, "
+                + "with a rain chance of 10 percent.";
+        final Eyes.Perception notePage30 = new Eyes.Perception();
+        notePage30.url = "https://wx.test/oakdale-forecast";
+        notePage30.title = "Oakdale, Tennessee Forecast";
+        notePage30.textPreview = noteText30;
+        notePage30.elements.add(elx(1, "a", "Hourly", "/hourly"));
+        notePage30.elements.add(elx(2, "a", "10-Day", "/10day"));
+        notePage30.elements.add(elx(3, "a", "Radar", "/radar"));
+        notePage30.elements.add(elx(4, "a", "Alerts", "/alerts"));
+        Agent.Hands noteHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return notePage30;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String query) {
+                return "ok";
+            }
+            @Override public String read(int chunkChars) {
+                return Eyes.formatReadChunk(0, noteText30,
+                        noteText30.length());
+            }
+            @Override public String reload(String failedUrl) {
+                return "ok";
+            }
+        };
 
         final int[] noteCalls = {0};
         ModelEngine noteEngine = new ModelEngine() {
@@ -5299,7 +5388,7 @@ public class GovernorTest {
         };
         com.ghosthands.app.Trail noteTrail =
                 new com.ghosthands.app.Trail(null);
-        Agent noteAgent = new Agent(stubHands, noteEngine,
+        Agent noteAgent = new Agent(noteHands, noteEngine,
                 PolicyPacks.loadPack("standard"), noteTrail, stubUi,
                 "q5_k_m");
         noteAgent.run(rainGoal30);
@@ -8244,9 +8333,9 @@ public class GovernorTest {
                         && "duckduckgo".equals(
                                 SearchEngines.resolveId(null))),
                 Boolean.TRUE);
-        check("search engines: DuckDuckGo URL is the pre-v3.6 URL verbatim",
+        check("search engines: DuckDuckGo URL carries the v3.26 region pin",
                 SearchEngines.searchUrl("duckduckgo", "oakdale+tn"),
-                "https://html.duckduckgo.com/html/?q=oakdale+tn");
+                "https://html.duckduckgo.com/html/?q=oakdale+tn&kl=us-en");
         check("search engines: Google URL",
                 SearchEngines.searchUrl("google", "oakdale+tn"),
                 "https://www.google.com/search?q=oakdale+tn");
@@ -9085,6 +9174,23 @@ public class GovernorTest {
         v315RunTests();
         v316Tests(args);
         v316RunTests();
+        v317Tests(args);
+        v318Tests(args);
+        v318RunTests();
+        v319Tests(args);
+        v320Tests(args);
+        v321Tests(args);
+        v322Tests(args);
+        v323Tests(args);
+        v324Tests(args);
+        v325Tests(args);
+        v326Tests(args);
+        v327Tests(args);
+        v328Tests(args);
+        v329Tests(args);
+        v330Tests(args);
+        v331Tests(args);
+        v332Tests(args);
 
         System.out.println();
         System.out.println("GovernorTest: " + passed + " passed, " + failed + " failed");
@@ -13138,11 +13244,17 @@ public class GovernorTest {
                 "app/src/main/res/xml/a11y_service_config.xml"));
         if (manifest == null || mainSrc == null || svcSrc == null
                 || cfgSrc == null) return;
-        check("v3.14 pin: the uses-permission set is still exactly four",
+        // v3.27: this pin MOVES — the R13 spike's §8.3 list
+        // adds six named permissions (see the manifest's own
+        // comment and the v3.27 notes). The set is pinned in
+        // full so a seventh silent addition still fails here.
+        check("v3.14 pin, as moved by v3.27: the uses-permission "
+                        + "set is exactly ten",
                 Integer.valueOf(countOccurrences(
                         manifest, "<uses-permission")),
-                Integer.valueOf(4));
-        check("v3.14 pin: the four standing permissions are the set",
+                Integer.valueOf(10));
+        check("v3.14 pin, as moved by v3.27: the ten permissions "
+                        + "are the set (four standing + the R13 six)",
                 Boolean.valueOf(manifest.contains(
                                 "android.permission.INTERNET")
                         && manifest.contains(
@@ -13150,7 +13262,19 @@ public class GovernorTest {
                         && manifest.contains(
                                 "android.permission.VIBRATE")
                         && manifest.contains(
-                                "android.permission.RECORD_AUDIO")),
+                                "android.permission.RECORD_AUDIO")
+                        && manifest.contains(
+                                "android.permission.FOREGROUND_SERVICE")
+                        && manifest.contains(
+                                "android.permission.FOREGROUND_SERVICE_SPECIAL_USE")
+                        && manifest.contains(
+                                "android.permission.WAKE_LOCK")
+                        && manifest.contains(
+                                "android.permission.SCHEDULE_EXACT_ALARM")
+                        && manifest.contains(
+                                "android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS")
+                        && manifest.contains(
+                                "android.permission.RECEIVE_BOOT_COMPLETED")),
                 Boolean.TRUE);
         check("v3.14 pin: the spike service is declared, system-bound only",
                 Boolean.valueOf(manifest.contains(".GhostA11yService")
@@ -13161,14 +13285,16 @@ public class GovernorTest {
                         && manifest.contains(
                                 "@xml/a11y_service_config")),
                 Boolean.TRUE);
-        // v3.16 (R8): the standing version pin moves with the
-        // release — the ONE existing check this release changes,
-        // disclosed in the notes.
-        check("v3.16 pin: the version is 3.16.0 / code 38",
+        // The standing version pin moves with the release —
+        // the ONE existing check a release changes, disclosed
+        // in the notes (v3.17's pin; v3.18, v3.19, v3.20,
+        // v3.21, v3.22, v3.23, v3.24, v3.25, v3.26, v3.27,
+        // v3.28, v3.29, v3.30, v3.31 and v3.32 move it again).
+        check("v3.32 pin: the version is 3.32.0 / code 54",
                 Boolean.valueOf(manifest.contains(
-                                "android:versionCode=\"38\"")
+                                "android:versionCode=\"54\"")
                         && manifest.contains(
-                                "android:versionName=\"3.16.0\"")),
+                                "android:versionName=\"3.32.0\"")),
                 Boolean.TRUE);
         check("v3.14 pin: the config asks for read + gestures, no flags",
                 Boolean.valueOf(cfgSrc.contains(
@@ -14712,8 +14838,9 @@ public class GovernorTest {
             permCount++;
             idx += 4;
         }
-        check("v3.16 pin: the uses-permission set is still four",
-                Integer.valueOf(permCount), Integer.valueOf(4));
+        check("v3.16 pin, as moved by v3.27: the uses-permission "
+                        + "set is ten (the R13 spike's §8.3 list)",
+                Integer.valueOf(permCount), Integer.valueOf(10));
     }
 
     private static void v316RunTests() {
@@ -14800,5 +14927,9970 @@ public class GovernorTest {
                         DocText.PDF_REFUSAL)),
                 Boolean.TRUE);
     }
-}
 
+    /** v3.17 (Mascot Interlude): the mascot's pure decisions —
+     *  the plan's eight MascotStateTest groups. The view layer
+     *  (tiles, animators) cannot host-test; everything
+     *  decidable lives in MascotState and is pinned here. */
+    private static void v317Tests(String[] args) {
+        // ---- group 1: transition-table completeness -------
+        // Every combination of the five base inputs resolves
+        // to exactly one base state — never NONE, never a
+        // one-shot (one-shots are events, not resolutions).
+        int combos = 0;
+        int unresolved = 0;
+        int nonBase = 0;
+        for (int i = 0; i < 32; i++) {
+            boolean running = (i & 1) != 0;
+            boolean stopping = (i & 2) != 0;
+            boolean downloading = (i & 4) != 0;
+            boolean approvalUp = (i & 8) != 0;
+            boolean askUp = (i & 16) != 0;
+            int s = MascotState.resolveBase(running, stopping,
+                    downloading, approvalUp, askUp);
+            combos++;
+            if (s == MascotState.NONE) unresolved++;
+            if (s != MascotState.IDLE
+                    && s != MascotState.DOWNLOADING
+                    && s != MascotState.RUNNING
+                    && s != MascotState.APPROVAL_WAITING
+                    && s != MascotState.ASK_WAITING) nonBase++;
+        }
+        check("v3.17 mascot g1: all 32 input combinations resolve",
+                Integer.valueOf(combos), Integer.valueOf(32));
+        check("v3.17 mascot g1: no combination falls through",
+                Integer.valueOf(unresolved), Integer.valueOf(0));
+        check("v3.17 mascot g1: resolutions are base states only",
+                Integer.valueOf(nonBase), Integer.valueOf(0));
+
+        // ---- group 2: priority ----------------------------
+        check("v3.17 mascot g2: approval up beats running",
+                Integer.valueOf(MascotState.resolveBase(
+                        true, false, false, true, false)),
+                Integer.valueOf(MascotState.APPROVAL_WAITING));
+        check("v3.17 mascot g2: ask up beats running",
+                Integer.valueOf(MascotState.resolveBase(
+                        true, false, false, false, true)),
+                Integer.valueOf(MascotState.ASK_WAITING));
+        check("v3.17 mascot g2: both panels up is APPROVAL_WAITING (pinned)",
+                Integer.valueOf(MascotState.resolveBase(
+                        true, false, false, true, true)),
+                Integer.valueOf(MascotState.APPROVAL_WAITING));
+        check("v3.17 mascot g2: stopping while running stays RUNNING",
+                Integer.valueOf(MascotState.resolveBase(
+                        true, true, false, false, false)),
+                Integer.valueOf(MascotState.RUNNING));
+        check("v3.17 mascot g2: stopping alone resolves IDLE (droop is a finish event, never mid-stop)",
+                Integer.valueOf(MascotState.resolveBase(
+                        false, true, false, false, false)),
+                Integer.valueOf(MascotState.IDLE));
+        check("v3.17 mascot g2: running beats downloading",
+                Integer.valueOf(MascotState.resolveBase(
+                        true, false, true, false, false)),
+                Integer.valueOf(MascotState.RUNNING));
+        check("v3.17 mascot g2: a panel beats downloading",
+                Integer.valueOf(MascotState.resolveBase(
+                        false, false, true, false, true)),
+                Integer.valueOf(MascotState.ASK_WAITING));
+
+        // ---- group 3: the one-shot queue ------------------
+        MascotState q = new MascotState();
+        check("v3.17 mascot g3: a fresh mascot shows IDLE",
+                Integer.valueOf(q.current()),
+                Integer.valueOf(MascotState.IDLE));
+        q.setBase(true, false, false, false, false);
+        check("v3.17 mascot g3: the base shows through an empty queue",
+                Integer.valueOf(q.current()),
+                Integer.valueOf(MascotState.RUNNING));
+        check("v3.17 mascot g3: a non-event is refused as a one-shot",
+                Boolean.valueOf(q.offerOneShot(MascotState.RUNNING)),
+                Boolean.FALSE);
+        check("v3.17 mascot g3: FINISHED is taken over RUNNING",
+                Boolean.valueOf(q.offerOneShot(MascotState.FINISHED)),
+                Boolean.TRUE);
+        check("v3.17 mascot g3: the queued shot is the display",
+                Integer.valueOf(q.current()),
+                Integer.valueOf(MascotState.FINISHED));
+        check("v3.17 mascot g3: begin plays the shot",
+                Integer.valueOf(q.beginCurrent()),
+                Integer.valueOf(MascotState.FINISHED));
+        check("v3.17 mascot g3: the shot plays once, then falls back to the base",
+                Integer.valueOf(q.finishCurrent()),
+                Integer.valueOf(MascotState.RUNNING));
+        MascotState q2 = new MascotState();
+        q2.offerOneShot(MascotState.WATCH_CHANGED);
+        q2.offerOneShot(MascotState.FINISHED);
+        check("v3.17 mascot g3: change + finished queue in offer order (changed first)",
+                Integer.valueOf(q2.beginCurrent()),
+                Integer.valueOf(MascotState.WATCH_CHANGED));
+        check("v3.17 mascot g3: finishing the change advances to the hop",
+                Integer.valueOf(q2.finishCurrent()),
+                Integer.valueOf(MascotState.FINISHED));
+        check("v3.17 mascot g3: a shot offered behind the queued hop fills the cap",
+                Boolean.valueOf(q2.offerOneShot(
+                        MascotState.WATCH_CHANGED)),
+                Boolean.TRUE);
+        check("v3.17 mascot g3: a third one-shot in flight is dropped at the cap, never stacked",
+                Boolean.valueOf(q2.offerOneShot(
+                        MascotState.FINISHED)),
+                Boolean.FALSE);
+        check("v3.17 mascot g3: the cap is two in flight",
+                Integer.valueOf(q2.pendingOneShots()),
+                Integer.valueOf(MascotState.MAX_ONESHOTS));
+        MascotState q3 = new MascotState();
+        q3.offerOneShot(MascotState.WATCH_CHANGED);
+        q3.offerOneShot(MascotState.FINISHED);
+        check("v3.17 mascot g3: STOPPED_DENIED takes over a queued pair",
+                Boolean.valueOf(q3.offerOneShot(
+                        MascotState.STOPPED_DENIED)),
+                Boolean.TRUE);
+        check("v3.17 mascot g3: the droop clears the queue ahead of it",
+                Integer.valueOf(q3.pendingOneShots()),
+                Integer.valueOf(0));
+        check("v3.17 mascot g3: the droop begins",
+                Integer.valueOf(q3.beginCurrent()),
+                Integer.valueOf(MascotState.STOPPED_DENIED));
+        check("v3.17 mascot g3: the droop is HELD after its transition",
+                Integer.valueOf(q3.finishCurrent()),
+                Integer.valueOf(MascotState.STOPPED_DENIED));
+        q3.setBase(true, false, false, false, false);
+        check("v3.17 mascot g3: a live state replaces the held droop",
+                Integer.valueOf(q3.current()),
+                Integer.valueOf(MascotState.RUNNING));
+
+        // ---- group 4: waiting exit -------------------------
+        MascotState w = new MascotState();
+        w.setBase(true, false, false, true, false);
+        check("v3.17 mascot g4: the panel up is the wait",
+                Integer.valueOf(w.current()),
+                Integer.valueOf(MascotState.APPROVAL_WAITING));
+        w.setBase(true, false, false, false, false);
+        check("v3.17 mascot g4: panel gone, run alive, back to RUNNING",
+                Integer.valueOf(w.current()),
+                Integer.valueOf(MascotState.RUNNING));
+        w.setBase(true, false, false, true, false);
+        w.setBase(false, false, false, false, false);
+        check("v3.17 mascot g4: a run that ended under the panel exits to IDLE",
+                Integer.valueOf(w.current()),
+                Integer.valueOf(MascotState.IDLE));
+
+        // ---- group 5: the pose table ---------------------
+        check("v3.17 mascot g5: idle floats at the pinned period",
+                Long.valueOf(MascotState.poseFor(
+                        MascotState.IDLE, false).periodMs),
+                Long.valueOf(MascotState.FLOAT_PERIOD_MS));
+        check("v3.17 mascot g5: the float period is 2600ms",
+                Long.valueOf(MascotState.FLOAT_PERIOD_MS),
+                Long.valueOf(2600L));
+        check("v3.17 mascot g5: downloading floats quicker",
+                Long.valueOf(MascotState.poseFor(
+                        MascotState.DOWNLOADING, false).periodMs),
+                Long.valueOf(MascotState.DOWNLOAD_PERIOD_MS));
+        MascotState.Pose sway = MascotState.poseFor(
+                MascotState.RUNNING, false);
+        check("v3.17 mascot g5: running sways",
+                Integer.valueOf(sway.kind),
+                Integer.valueOf(MascotState.KIND_SWAY));
+        check("v3.17 mascot g5: the sway period is 1800ms",
+                Long.valueOf(sway.periodMs), Long.valueOf(1800L));
+        check("v3.17 mascot g5: the running glow rides the pill's 1400ms pulse",
+                Long.valueOf(sway.glowPeriodMs),
+                Long.valueOf(MascotState.PULSE_PERIOD_MS));
+        MascotState.Pose bounce = MascotState.poseFor(
+                MascotState.APPROVAL_WAITING, false);
+        check("v3.17 mascot g5: a wait bounces on the 1600ms cycle",
+                Long.valueOf(bounce.periodMs),
+                Long.valueOf(MascotState.BOUNCE_CYCLE_MS));
+        check("v3.17 mascot g5: the bounce hop is 550ms of it",
+                Long.valueOf(MascotState.BOUNCE_HOP_MS),
+                Long.valueOf(550L));
+        MascotState.Pose hop = MascotState.poseFor(
+                MascotState.FINISHED, false);
+        check("v3.17 mascot g5: finished hops twice at 450ms",
+                Boolean.valueOf(hop.kind == MascotState.KIND_HOP
+                        && hop.periodMs == MascotState.HOP_MS
+                        && hop.cycles == MascotState.HOP_COUNT),
+                Boolean.TRUE);
+        check("v3.17 mascot g5: the hop count is two",
+                Integer.valueOf(MascotState.HOP_COUNT),
+                Integer.valueOf(2));
+        MascotState.Pose heroHop = MascotState.poseFor(
+                MascotState.FINISHED, true);
+        check("v3.17 mascot g5: the hero's hop is a single gentle one at half amplitude",
+                Boolean.valueOf(heroHop.cycles
+                                == MascotState.HERO_HOP_COUNT
+                        && heroHop.ampDp
+                                == MascotState.HOP_AMP_DP / 2f),
+                Boolean.TRUE);
+        MascotState.Pose change = MascotState.poseFor(
+                MascotState.WATCH_CHANGED, false);
+        check("v3.17 mascot g5: a change is one 550ms bounce",
+                Boolean.valueOf(change.kind == MascotState.KIND_HOP
+                        && change.periodMs
+                                == MascotState.BOUNCE_HOP_MS
+                        && change.cycles == 1
+                        && change.ampDp
+                                == MascotState.BOUNCE_AMP_DP),
+                Boolean.TRUE);
+        MascotState.Pose droop = MascotState.poseFor(
+                MascotState.STOPPED_DENIED, false);
+        check("v3.17 mascot g5: the droop lands sunk, tilted, dimmed",
+                Boolean.valueOf(droop.kind == MascotState.KIND_DROOP
+                        && droop.periodMs == MascotState.DROOP_MS
+                        && droop.endDyDp == MascotState.DROOP_DY_DP
+                        && droop.endRotDeg
+                                == MascotState.DROOP_ROT_DEG
+                        && droop.endAlpha
+                                == MascotState.DROOP_ALPHA),
+                Boolean.TRUE);
+        int badPoses = 0;
+        for (int s = 0; s < MascotState.STATE_COUNT; s++) {
+            for (int h = 0; h < 2; h++) {
+                MascotState.Pose p = MascotState.poseFor(
+                        s, h == 1);
+                MascotState.Pose sp = MascotState.staticPoseFor(
+                        s, h == 1);
+                if (p == null || p.periodMs <= 0) badPoses++;
+                if (sp == null
+                        || sp.kind != MascotState.KIND_STATIC
+                        || sp.periodMs != 0) badPoses++;
+            }
+        }
+        check("v3.17 mascot g5: every state has an animated pose (duration > 0) and a static pose",
+                Integer.valueOf(badPoses), Integer.valueOf(0));
+        check("v3.17 mascot g5: the hero maps attention states to the calm float",
+                Boolean.valueOf(MascotState.heroStateFor(
+                                MascotState.RUNNING)
+                                == MascotState.IDLE
+                        && MascotState.heroStateFor(
+                                MascotState.APPROVAL_WAITING)
+                                == MascotState.IDLE
+                        && MascotState.heroStateFor(
+                                MascotState.WATCH_CHANGED)
+                                == MascotState.IDLE
+                        && MascotState.heroStateFor(
+                                MascotState.FINISHED)
+                                == MascotState.FINISHED
+                        && MascotState.heroStateFor(
+                                MascotState.STOPPED_DENIED)
+                                == MascotState.STOPPED_DENIED),
+                Boolean.TRUE);
+
+        // ---- group 6: glow color discipline ----------------
+        check("v3.17 mascot g6: waits glow amber (the guard/ask family)",
+                Boolean.valueOf(MascotState.glowRole(
+                                MascotState.APPROVAL_WAITING)
+                                == MascotState.GLOW_AMBER
+                        && MascotState.glowRole(
+                                MascotState.ASK_WAITING)
+                                == MascotState.GLOW_AMBER),
+                Boolean.TRUE);
+        check("v3.17 mascot g6: a change glows cyan",
+                Integer.valueOf(MascotState.glowRole(
+                        MascotState.WATCH_CHANGED)),
+                Integer.valueOf(MascotState.GLOW_CYAN));
+        check("v3.17 mascot g6: a download glows cyan",
+                Integer.valueOf(MascotState.glowRole(
+                        MascotState.DOWNLOADING)),
+                Integer.valueOf(MascotState.GLOW_CYAN));
+        check("v3.17 mascot g6: finished glows violet",
+                Integer.valueOf(MascotState.glowRole(
+                        MascotState.FINISHED)),
+                Integer.valueOf(MascotState.GLOW_VIOLET));
+        check("v3.17 mascot g6: stopped/denied glow is OFF (alpha 0, never red)",
+                Boolean.valueOf(MascotState.glowRole(
+                                MascotState.STOPPED_DENIED)
+                                == MascotState.GLOW_OFF
+                        && MascotState.poseFor(
+                                MascotState.STOPPED_DENIED,
+                                false).glowMax == 0),
+                Boolean.TRUE);
+        int redRoles = 0;
+        for (int s = 0; s < MascotState.STATE_COUNT; s++) {
+            int r = MascotState.glowRole(s);
+            if (r < MascotState.GLOW_VIOLET
+                    || r > MascotState.GLOW_OFF) redRoles++;
+        }
+        check("v3.17 mascot g6: no state maps outside the four glow roles (no red exists)",
+                Integer.valueOf(redRoles), Integer.valueOf(0));
+
+        // ---- group 7: reduce-motion mapping ----------------
+        int animatedUnderReduce = 0;
+        for (int s = 0; s < MascotState.STATE_COUNT; s++) {
+            for (int h = 0; h < 2; h++) {
+                if (MascotState.wantsAnimator(s, h == 1, true)) {
+                    animatedUnderReduce++;
+                }
+            }
+        }
+        check("v3.17 mascot g7: reduced motion wants no animator, any state, either tile",
+                Integer.valueOf(animatedUnderReduce),
+                Integer.valueOf(0));
+        check("v3.17 mascot g7: full motion wants animators (idle float, droop transition)",
+                Boolean.valueOf(MascotState.wantsAnimator(
+                                MascotState.IDLE, false, false)
+                        && MascotState.wantsAnimator(
+                                MascotState.STOPPED_DENIED,
+                                false, false)),
+                Boolean.TRUE);
+        check("v3.17 mascot g7: the waiting signal survives as steady amber (110)",
+                Integer.valueOf(MascotState.staticPoseFor(
+                        MascotState.APPROVAL_WAITING,
+                        false).glowMin),
+                Integer.valueOf(110));
+        check("v3.17 mascot g7: static running glows steady at 90",
+                Integer.valueOf(MascotState.staticPoseFor(
+                        MascotState.RUNNING, false).glowMin),
+                Integer.valueOf(90));
+        check("v3.17 mascot g7: static idle glows steady at 50",
+                Integer.valueOf(MascotState.staticPoseFor(
+                        MascotState.IDLE, false).glowMin),
+                Integer.valueOf(50));
+        check("v3.17 mascot g7: the static droop is the droop, applied instantly",
+                Boolean.valueOf(MascotState.staticPoseFor(
+                                MascotState.STOPPED_DENIED, false)
+                                .endAlpha
+                                == MascotState.DROOP_ALPHA
+                        && MascotState.staticPoseFor(
+                                MascotState.STOPPED_DENIED,
+                                false).glowMin == 0),
+                Boolean.TRUE);
+
+        // ---- group 8: state-name stability -----------------
+        check("v3.17 mascot g8: the state names are pinned",
+                Boolean.valueOf("IDLE".equals(MascotState.name(
+                                MascotState.IDLE))
+                        && "DOWNLOADING".equals(MascotState.name(
+                                MascotState.DOWNLOADING))
+                        && "RUNNING".equals(MascotState.name(
+                                MascotState.RUNNING))
+                        && "APPROVAL_WAITING".equals(
+                                MascotState.name(
+                                        MascotState.APPROVAL_WAITING))
+                        && "ASK_WAITING".equals(MascotState.name(
+                                MascotState.ASK_WAITING))
+                        && "WATCH_CHANGED".equals(
+                                MascotState.name(
+                                        MascotState.WATCH_CHANGED))
+                        && "FINISHED".equals(MascotState.name(
+                                MascotState.FINISHED))
+                        && "STOPPED_DENIED".equals(
+                                MascotState.name(
+                                        MascotState.STOPPED_DENIED))),
+                Boolean.TRUE);
+        check("v3.17 mascot g8: unknown states name NONE",
+                Boolean.valueOf("NONE".equals(MascotState.name(
+                                MascotState.NONE))
+                        && "NONE".equals(MascotState.name(99))),
+                Boolean.TRUE);
+        check("v3.17 mascot g8: the waiting/event classifiers agree with the names",
+                Boolean.valueOf(MascotState.isWaiting(
+                                MascotState.APPROVAL_WAITING)
+                        && MascotState.isWaiting(
+                                MascotState.ASK_WAITING)
+                        && !MascotState.isWaiting(
+                                MascotState.RUNNING)
+                        && MascotState.isOneShot(
+                                MascotState.WATCH_CHANGED)
+                        && MascotState.isOneShot(
+                                MascotState.FINISHED)
+                        && MascotState.isOneShot(
+                                MascotState.STOPPED_DENIED)
+                        && !MascotState.isOneShot(
+                                MascotState.IDLE)),
+                Boolean.TRUE);
+
+        // ---- source pins -----------------------------------
+        if (args == null || args.length == 0) return;
+        java.io.File shimF = new java.io.File(args[0]);
+        java.io.File shimDirF = shimF.getParentFile();
+        java.io.File v1DirF = shimDirF == null ? null
+                : shimDirF.getParentFile() == null ? null
+                : shimDirF.getParentFile().getParentFile();
+        if (v1DirF == null) return;
+        String mainSrc = readTestFile(new java.io.File(v1DirF,
+                "app/src/main/java/com/ghosthands/app/MainActivity.java"));
+        if (mainSrc == null) return;
+        check("v3.17 pin: both tiles load the bundled mascot drawables",
+                Boolean.valueOf(mainSrc.contains(
+                                "mascotDrawableId(\"mascot_header\")")
+                        && mainSrc.contains(
+                                "mascotDrawableId(\"mascot_hero\")")),
+                Boolean.TRUE);
+        check("v3.17 pin: one shared MascotState drives the tiles",
+                Boolean.valueOf(mainSrc.contains(
+                                "new MascotState()")
+                        && mainSrc.contains("heroStateFor(")),
+                Boolean.TRUE);
+        check("v3.17 pin: the pill re-resolves the mascot (updateMascot rides updatePill)",
+                Boolean.valueOf(countOccurrences(
+                        mainSrc, "updateMascot();") >= 4),
+                Boolean.TRUE);
+        check("v3.17 pin: both panel waits fire their mascot events",
+                Boolean.valueOf(mainSrc.contains(
+                                "mascotEvent(MascotState.APPROVAL_WAITING)")
+                        && mainSrc.contains(
+                                "mascotEvent(MascotState.ASK_WAITING)")),
+                Boolean.TRUE);
+        check("v3.17 pin: the finish fires change, finished, and the droop",
+                Boolean.valueOf(mainSrc.contains(
+                                "mascotEvent(MascotState.WATCH_CHANGED)")
+                        && mainSrc.contains(
+                                "? MascotState.FINISHED")
+                        && mainSrc.contains(
+                                ": MascotState.STOPPED_DENIED")),
+                Boolean.TRUE);
+        check("v3.17 pin: the lifecycle stops the mascot beside the pulse",
+                Boolean.valueOf(countOccurrences(
+                        mainSrc, "stopMascotAnimators();") >= 3),
+                Boolean.TRUE);
+        java.io.File headerPng = new java.io.File(v1DirF,
+                "app/src/main/res/drawable-nodpi/mascot_header.png");
+        java.io.File heroPng = new java.io.File(v1DirF,
+                "app/src/main/res/drawable-nodpi/mascot_hero.png");
+        check("v3.17 pin: the header drawable is the prep cut (432px, 146,404 bytes)",
+                Long.valueOf(headerPng.length()),
+                Long.valueOf(146404L));
+        check("v3.17 pin: the hero drawable is the prep cut (1024px, 510,035 bytes)",
+                Long.valueOf(heroPng.length()),
+                Long.valueOf(510035L));
+    }
+
+    // ================= v3.18 (R9) =================
+
+    /** A synthetic finished trail for card tests: a run, an
+     *  optional chain_seed, optional notes, a done stop. */
+    private static Trail cardTrail318(String goal, String summary,
+                                      String[] seedFacts,
+                                      String[] noteFacts) {
+        Trail t = new Trail(null);
+        t.record("run", 0, Trail.fields("goal", goal));
+        if (seedFacts != null) {
+            java.util.List<Object> facts =
+                    new java.util.ArrayList<Object>();
+            java.util.List<Object> stamps =
+                    new java.util.ArrayList<Object>();
+            for (int i = 0; i < seedFacts.length; i++) {
+                facts.add(seedFacts[i]);
+                stamps.add("previous step: earlier goal");
+            }
+            t.record("chain_seed", 0, Trail.fields(
+                    "facts", facts, "stamps", stamps,
+                    "from_goal", "earlier goal",
+                    "from_trail", "trail-x.jsonl"));
+        }
+        if (noteFacts != null) {
+            for (int i = 0; i < noteFacts.length; i++) {
+                t.record("note", i + 1, Trail.fields(
+                        "fact", noteFacts[i], "status", "added",
+                        "url", "", "title", ""));
+            }
+        }
+        t.record("stop", 9, Trail.fields(
+                "reason", "done", "summary", summary));
+        t.record("run_summary", 9, Trail.fields(
+                "steps", Long.valueOf(2),
+                "seconds", Long.valueOf(3),
+                "reuse_percent", Long.valueOf(10)));
+        return t;
+    }
+
+    private static void v318Tests(String[] args) {
+        // ---- registry: chain_seed is a known type -------------
+        boolean sweepOk = true;
+        try {
+            Trail sweep = new Trail(null);
+            for (int i = 0; i < Trail.EVENT_TYPES.length; i++) {
+                sweep.record(Trail.EVENT_TYPES[i], 0,
+                        Trail.fields("k", "v"));
+            }
+        } catch (Exception e) {
+            sweepOk = false;
+        }
+        boolean registered = false;
+        for (int i = 0; i < Trail.EVENT_TYPES.length; i++) {
+            if ("chain_seed".equals(Trail.EVENT_TYPES[i])) {
+                registered = true;
+            }
+        }
+        check("v3.18 registry: chain_seed is registered",
+                Boolean.valueOf(registered), Boolean.TRUE);
+        check("v3.18 registry: every registered type records",
+                Boolean.valueOf(sweepOk), Boolean.TRUE);
+
+        // ---- GoalChains: store round-trips --------------------
+        GoalChains store = new GoalChains();
+        GoalChains.Chain two = new GoalChains.Chain("errands");
+        two.steps.add(new GoalChains.Step(
+                "find the oat milk price", "readonly"));
+        two.steps.add(new GoalChains.Step(
+                "compare it with {prev}", "standard"));
+        store.put(two);
+        GoalChains.Chain five = new GoalChains.Chain("big");
+        for (int i = 0; i < 5; i++) {
+            five.steps.add(new GoalChains.Step(
+                    "step " + (i + 1) + " goal", "standard"));
+        }
+        store.put(five);
+        GoalChains back = GoalChains.parse(store.serialize());
+        check("v3.18 chains: a 2-step chain round-trips",
+                Boolean.valueOf(back.find("errands") != null
+                        && back.find("errands").steps.size() == 2
+                        && "compare it with {prev}".equals(
+                                back.find("errands").steps.get(1).goal)
+                        && "readonly".equals(
+                                back.find("errands").steps.get(0)
+                                        .packId)),
+                Boolean.TRUE);
+        check("v3.18 chains: a 5-step chain round-trips",
+                Boolean.valueOf(back.find("big") != null
+                        && back.find("big").steps.size() == 5),
+                Boolean.TRUE);
+        check("v3.18 chains: validate accepts a sound chain",
+                GoalChains.validate(two), null);
+        GoalChains.Chain badFirst = new GoalChains.Chain("bad");
+        badFirst.steps.add(new GoalChains.Step(
+                "start from {prev}", "standard"));
+        badFirst.steps.add(new GoalChains.Step("next", "standard"));
+        check("v3.18 chains: {prev} in step 1 is refused",
+                Boolean.valueOf(GoalChains.validate(badFirst) != null),
+                Boolean.TRUE);
+        GoalChains.Chain oneStep = new GoalChains.Chain("one");
+        oneStep.steps.add(new GoalChains.Step("only", "standard"));
+        check("v3.18 chains: a 1-step chain is refused",
+                Boolean.valueOf(GoalChains.validate(oneStep) != null),
+                Boolean.TRUE);
+        // Corrupt tolerance: 1-step and 6-step records drop,
+        // the valid chain in the same array survives.
+        String mixed = "[{\"name\":\"ok\",\"steps\":["
+                + "{\"goal\":\"a\",\"pack\":\"standard\"},"
+                + "{\"goal\":\"b\",\"pack\":\"standard\"}]},"
+                + "{\"name\":\"tiny\",\"steps\":["
+                + "{\"goal\":\"a\",\"pack\":\"standard\"}]},"
+                + "{\"name\":\"huge\",\"steps\":["
+                + "{\"goal\":\"1\"},{\"goal\":\"2\"},{\"goal\":\"3\"},"
+                + "{\"goal\":\"4\"},{\"goal\":\"5\"},{\"goal\":\"6\"}]}]";
+        GoalChains mixedBack = GoalChains.parse(mixed);
+        check("v3.18 chains: corrupt chains drop, the store survives",
+                Boolean.valueOf(mixedBack.size() == 1
+                        && mixedBack.find("ok") != null),
+                Boolean.TRUE);
+        check("v3.18 chains: garbage parses to an empty store",
+                Integer.valueOf(GoalChains.parse("{nope").size()),
+                Integer.valueOf(0));
+        // Substitution: literal, and a seedless start empties it.
+        check("v3.18 chains: {prev} substitutes literally",
+                GoalChains.substitute("compare with {prev} today",
+                        "the river answer"),
+                "compare with the river answer today");
+        check("v3.18 chains: seedless {prev} substitutes empty",
+                GoalChains.substitute("compare with {prev}", null),
+                "compare with ");
+
+        // ---- ChainRun state round-trip --------------------------
+        GoalChains.ChainRun run = new GoalChains.ChainRun();
+        run.chainName = "errands";
+        run.stepIndex = 1;
+        run.stepTrailNames.add("trail-1.jsonl");
+        run.seedFacts.add("milk is 4 dollars");
+        run.seedAnswer = "milk is 4 dollars";
+        run.seedFromGoal = "find the oat milk price";
+        run.seedFromTrail = "trail-1.jsonl";
+        GoalChains.ChainRun runBack =
+                GoalChains.ChainRun.parse(run.serialize());
+        check("v3.18 chains: the run state round-trips",
+                Boolean.valueOf(runBack != null
+                        && "errands".equals(runBack.chainName)
+                        && runBack.stepIndex == 1
+                        && runBack.stepTrailNames.size() == 1
+                        && runBack.seedFacts.size() == 1
+                        && "find the oat milk price".equals(
+                                runBack.seedFromGoal)),
+                Boolean.TRUE);
+        check("v3.18 chains: a non-object run state is no run",
+                GoalChains.ChainRun.parse("[1,2]"), null);
+        // Seed capture: the card's own rule — added notes only,
+        // deduped, capped with the oldest dropped.
+        Trail capTrail = new Trail(null);
+        for (int i = 0; i < 14; i++) {
+            capTrail.record("note", i, Trail.fields(
+                    "fact", "fact number " + i, "status", "added",
+                    "url", "", "title", ""));
+        }
+        capTrail.record("note", 20, Trail.fields(
+                "fact", "a duplicate status fact",
+                "status", "duplicate", "url", "", "title", ""));
+        java.util.List<String> captured =
+                GoalChains.captureSeedFacts(capTrail.events());
+        check("v3.18 chains: capture keeps the card's rule + cap",
+                Boolean.valueOf(captured.size()
+                                == Scratchpad.MAX_FACTS
+                        && "fact number 2".equals(captured.get(0))
+                        && !captured.contains(
+                                "a duplicate status fact")),
+                Boolean.TRUE);
+        java.util.List<String[]> pairs = GoalChains.seedPairs(run);
+        check("v3.18 chains: seed pairs carry the provenance stamp",
+                Boolean.valueOf(pairs.size() == 1
+                        && "milk is 4 dollars".equals(pairs.get(0)[0])
+                        && "previous step: find the oat milk price"
+                                .equals(pairs.get(0)[1])),
+                Boolean.TRUE);
+
+        // ---- Scratchpad.seedIn --------------------------------
+        Scratchpad pad = new Scratchpad();
+        String s1 = pad.seedIn("The river is 337 miles long",
+                "previous step: find the river length");
+        String s2 = pad.seedIn("The river is 337 miles long",
+                "previous step: find the river length");
+        check("v3.18 seed: seedIn adds under its stamp",
+                Boolean.valueOf(Scratchpad.ADDED.equals(s1)
+                        && pad.render().contains(
+                                "previous step: find the river length")),
+                Boolean.TRUE);
+        check("v3.18 seed: seedIn dedupes like a note",
+                s2, Scratchpad.DUPLICATE);
+
+        // ---- AnswerCard: the previous-step group ---------------
+        Trail seededTrail = cardTrail318("second goal",
+                "The river is 337 miles long",
+                new String[]{"The river is 337 miles long"},
+                new String[]{"A dam holds it back"});
+        AnswerCard seededCard = AnswerCard.fromEvents(
+                seededTrail.events(), "");
+        check("v3.18 card: seeded facts render in their own group",
+                Boolean.valueOf(seededCard != null
+                        && seededCard.seededFacts.size() == 1
+                        && seededCard.cardText().contains(
+                                "From the previous step:")
+                        && seededCard.shareText("d").contains(
+                                "From the previous step:")),
+                Boolean.TRUE);
+        check("v3.18 card: seeded facts never merge into facts",
+                Boolean.valueOf(seededCard != null
+                        && seededCard.facts.size() == 1
+                        && seededCard.facts.get(0).contains(
+                                "A dam holds it back")),
+                Boolean.TRUE);
+        Trail plainTrail = cardTrail318("second goal",
+                "The river is 337 miles long", null,
+                new String[]{"A dam holds it back"});
+        AnswerCard plainCard = AnswerCard.fromEvents(
+                plainTrail.events(), "");
+        check("v3.18 card: a seedless card has no previous-step group",
+                Boolean.valueOf(plainCard != null
+                        && plainCard.seededFacts.isEmpty()
+                        && !plainCard.cardText().contains(
+                                "previous step")),
+                Boolean.TRUE);
+
+        // ---- ChainCard + spoken form ----------------------------
+        AnswerCard cardA = AnswerCard.fromEvents(cardTrail318(
+                "find the river length",
+                "The river is 337 miles long", null,
+                new String[]{"The river is 337 miles long"})
+                .events(), "");
+        AnswerCard cardB = AnswerCard.fromEvents(cardTrail318(
+                "say what holds it back", "A dam holds it back",
+                new String[]{"The river is 337 miles long"},
+                new String[]{"A dam holds it back"}).events(), "");
+        java.util.List<AnswerCard> stepCards =
+                new java.util.ArrayList<AnswerCard>();
+        stepCards.add(cardA);
+        stepCards.add(cardB);
+        ChainCard chain = ChainCard.fromCards("river chain",
+                stepCards);
+        check("v3.18 chaincard: sections in order, final outcome named",
+                Boolean.valueOf(chain != null
+                        && chain.cardText().startsWith(
+                                "Chain: river chain")
+                        && chain.cardText().indexOf("Step 1 of 2")
+                                < chain.cardText().indexOf(
+                                        "Step 2 of 2")
+                        && chain.cardText().contains(
+                                "Chain outcome: "
+                                        + "A dam holds it back")),
+                Boolean.TRUE);
+        check("v3.18 chaincard: share text carries name + steps",
+                Boolean.valueOf(chain != null
+                        && chain.shareText("Oct 25").contains(
+                                "Chain: river chain")
+                        && chain.shareText("Oct 25").contains(
+                                "Step 2 of 2")),
+                Boolean.TRUE);
+        check("v3.18 chaincard: the spoken form names steps, scrubs urls",
+                Boolean.valueOf(chain != null
+                        && SpeakText.ofChain(chain).contains(
+                                "Chain: river chain")
+                        && SpeakText.ofChain(chain).contains(
+                                "Step 2 of 2")
+                        && !SpeakText.ofChain(chain).contains(
+                                "http")),
+                Boolean.TRUE);
+        // State round-trip rebuild: the same cards from the
+        // trails named in a round-tripped run state compose
+        // the same combined card.
+        GoalChains.ChainRun rr = new GoalChains.ChainRun();
+        rr.chainName = "river chain";
+        rr.stepIndex = 2;
+        rr.stepTrailNames.add("trail-1.jsonl");
+        rr.stepTrailNames.add("trail-2.jsonl");
+        GoalChains.ChainRun rrBack =
+                GoalChains.ChainRun.parse(rr.serialize());
+        java.util.List<AnswerCard> rebuilt =
+                new java.util.ArrayList<AnswerCard>();
+        rebuilt.add(AnswerCard.fromEvents(cardTrail318(
+                "find the river length",
+                "The river is 337 miles long", null,
+                new String[]{"The river is 337 miles long"})
+                .events(), ""));
+        rebuilt.add(AnswerCard.fromEvents(cardTrail318(
+                "say what holds it back", "A dam holds it back",
+                new String[]{"The river is 337 miles long"},
+                new String[]{"A dam holds it back"}).events(), ""));
+        ChainCard chain2 = ChainCard.fromCards(
+                rrBack == null ? "" : rrBack.chainName, rebuilt);
+        check("v3.18 chaincard: rebuild after a state round-trip matches",
+                Boolean.valueOf(chain2 != null && chain != null
+                        && chain2.cardText().equals(chain.cardText())),
+                Boolean.TRUE);
+
+        // ---- CheckConditions: the decision matrix -------------
+        long now = 100000000L;
+        check("v3.18 cond: the cadence and window are pinned",
+                Boolean.valueOf(CheckConditions.RETRY_MS
+                                == 30L * 60L * 1000L
+                        && CheckConditions.MAX_DEFER_MS
+                                == 6L * 60L * 60L * 1000L),
+                Boolean.TRUE);
+        check("v3.18 cond: master off posts despite unmet conditions",
+                Integer.valueOf(CheckConditions.decide(
+                        false, true, true, false, false, 0, now)),
+                Integer.valueOf(CheckConditions.POST));
+        check("v3.18 cond: no conditions posts",
+                Integer.valueOf(CheckConditions.decide(
+                        true, false, false, false, false, 0, now)),
+                Integer.valueOf(CheckConditions.POST));
+        check("v3.18 cond: unproven charging defers",
+                Integer.valueOf(CheckConditions.decide(
+                        true, true, false, false, false, 0, now)),
+                Integer.valueOf(CheckConditions.DEFER));
+        check("v3.18 cond: proven charging posts",
+                Integer.valueOf(CheckConditions.decide(
+                        true, true, false, true, false, 0, now)),
+                Integer.valueOf(CheckConditions.POST));
+        check("v3.18 cond: both required is a conjunction",
+                Integer.valueOf(CheckConditions.decide(
+                        true, true, true, true, false, 0, now)),
+                Integer.valueOf(CheckConditions.DEFER));
+        check("v3.18 cond: the give-up window posts anyway",
+                Integer.valueOf(CheckConditions.decide(
+                        true, true, false, false, false,
+                        now - CheckConditions.MAX_DEFER_MS, now)),
+                Integer.valueOf(CheckConditions.POST_ANYWAY));
+        check("v3.18 cond: just inside the window still defers",
+                Integer.valueOf(CheckConditions.decide(
+                        true, true, false, false, false,
+                        now - CheckConditions.MAX_DEFER_MS + 1000,
+                        now)),
+                Integer.valueOf(CheckConditions.DEFER));
+        check("v3.18 cond: a dead check fires nothing",
+                Integer.valueOf(CheckConditions.judgeFiring(
+                        false, false, true, true, false,
+                        false, false, 0, now)),
+                Integer.valueOf(CheckConditions.NOTHING));
+        check("v3.18 cond: an unscheduled check fires nothing",
+                Integer.valueOf(CheckConditions.judgeFiring(
+                        true, false, true, true, false,
+                        false, false, 0, now)),
+                Integer.valueOf(CheckConditions.NOTHING));
+        check("v3.18 cond: a live check at defaults posts",
+                Integer.valueOf(CheckConditions.judgeFiring(
+                        true, true, false, false, false,
+                        false, false, 0, now)),
+                Integer.valueOf(CheckConditions.POST));
+
+        // ---- CheckDeferrals: the book ---------------------------
+        CheckDeferrals book = new CheckDeferrals();
+        book.record("goal a", 1000L);
+        book.record("page:https://x.test/", 2000L);
+        book.record("goal a", 5000L);
+        CheckDeferrals bookBack =
+                CheckDeferrals.parse(book.serialize());
+        check("v3.18 defer: the book round-trips, first stamp kept",
+                Boolean.valueOf(bookBack.get("goal a") != null
+                        && bookBack.get("goal a").firstDeferredMs
+                                == 1000L
+                        && bookBack.get("goal a").lastDeferredMs
+                                == 5000L
+                        && bookBack.get("goal a").count == 2
+                        && bookBack.size() == 2),
+                Boolean.TRUE);
+        bookBack.clear("goal a");
+        check("v3.18 defer: a posted check's deferral clears",
+                Boolean.valueOf(bookBack.get("goal a") == null
+                        && bookBack.size() == 1),
+                Boolean.TRUE);
+        java.util.Set<String> live =
+                new java.util.HashSet<String>();
+        live.add("someone else");
+        bookBack.prune(live);
+        check("v3.18 defer: prune drops checks that no longer exist",
+                Integer.valueOf(bookBack.size()),
+                Integer.valueOf(0));
+
+        // ---- record conditions: goals + page watches ------------
+        SavedGoals goals = new SavedGoals();
+        SavedGoals.SavedGoal cg = new SavedGoals.SavedGoal(
+                "prices", "check the price", "readonly", 480);
+        cg.condCharging = true;
+        goals.put(cg);
+        SavedGoals goalsBack = SavedGoals.parse(goals.serialize());
+        check("v3.18 records: a goal's conditions round-trip",
+                Boolean.valueOf(goalsBack.find("prices") != null
+                        && goalsBack.find("prices").condCharging
+                        && !goalsBack.find("prices").condWifi),
+                Boolean.TRUE);
+        SavedGoals legacy = SavedGoals.parse("[{\"name\":\"old\","
+                + "\"goal\":\"g\",\"pack\":\"standard\","
+                + "\"sched\":480}]");
+        check("v3.18 records: a legacy goal record reads unconditioned",
+                Boolean.valueOf(legacy.find("old") != null
+                        && !legacy.find("old").condCharging
+                        && !legacy.find("old").condWifi),
+                Boolean.TRUE);
+        SavedGoals.SavedGoal fresh = new SavedGoals.SavedGoal(
+                "prices", "edited goal", "standard",
+                SavedGoals.NO_SCHEDULE);
+        fresh.copyWatchFrom(cg);
+        check("v3.18 records: a re-save carries the conditions",
+                Boolean.valueOf(fresh.condCharging && !fresh.condWifi),
+                Boolean.TRUE);
+        check("v3.18 records: the schedule label names the conditions",
+                Boolean.valueOf(SavedGoals.scheduleLabel(cg)
+                                .endsWith(" · charging")
+                        && SavedGoals.conditionSuffix(true, true)
+                                .equals(" · charging + Wi-Fi")
+                        && SavedGoals.conditionSuffix(false, true)
+                                .equals(" · Wi-Fi")
+                        && SavedGoals.conditionSuffix(false, false)
+                                .equals("")),
+                Boolean.TRUE);
+        PageWatches.PageWatch pw =
+                new PageWatches.PageWatch("https://x.test/p");
+        pw.schedMinutes = 480;
+        pw.condWifi = true;
+        PageWatches.PageWatch pwBack =
+                PageWatches.PageWatch.fromMap(pw.toMap());
+        check("v3.18 records: a page watch's conditions round-trip",
+                Boolean.valueOf(pwBack != null && pwBack.condWifi
+                        && !pwBack.condCharging),
+                Boolean.TRUE);
+
+        // ---- briefing: the log ----------------------------------
+        BriefingLog log = new BriefingLog();
+        for (int i = 0; i < 35; i++) {
+            log.append(new BriefingLog.Entry("check " + i,
+                    BriefingLog.KIND_GOAL, WatchCompare.CHANGED,
+                    "diff " + i, 1000L + i, false));
+        }
+        check("v3.18 brief: the log caps at 30, oldest dropped",
+                Boolean.valueOf(log.size() == BriefingLog.MAX_ENTRIES
+                        && "check 5".equals(log.all().get(0).label)),
+                Boolean.TRUE);
+        BriefingLog logBack = BriefingLog.parse(log.serialize());
+        check("v3.18 brief: the log round-trips with its flags",
+                Boolean.valueOf(logBack.size() == 30
+                        && logBack.unbriefed().size() == 30),
+                Boolean.TRUE);
+        logBack.markBriefed();
+        check("v3.18 brief: delivered entries stop being unbriefed",
+                Integer.valueOf(logBack.unbriefed().size()),
+                Integer.valueOf(0));
+        check("v3.18 brief: a corrupt log parses empty",
+                Integer.valueOf(BriefingLog.parse("!!").size()),
+                Integer.valueOf(0));
+
+        // ---- briefing: the digest --------------------------------
+        BriefingLog dl = new BriefingLog();
+        dl.append(new BriefingLog.Entry("milk prices",
+                BriefingLog.KIND_GOAL, WatchCompare.NO_CHANGE,
+                "", 1L, false));
+        dl.append(new BriefingLog.Entry("river level",
+                BriefingLog.KIND_GOAL, WatchCompare.CHANGED,
+                "level: 12 -> 15", 2L, true));
+        dl.append(new BriefingLog.Entry("shop page",
+                BriefingLog.KIND_PAGE, WatchCompare.NOT_DONE,
+                "", 3L, false));
+        dl.append(new BriefingLog.Entry("new watch",
+                BriefingLog.KIND_PAGE, WatchCompare.BASELINE,
+                "", 4L, false));
+        dl.append(new BriefingLog.Entry("eggs",
+                BriefingLog.KIND_GOAL, WatchCompare.NO_CHANGE,
+                "", 5L, false));
+        String digest = BriefingDigest.compose(dl);
+        check("v3.18 brief: changes lead, with diff + quiet suffix",
+                Boolean.valueOf(digest != null
+                        && digest.startsWith("river level changed: "
+                                + "level: 12 -> 15 "
+                                + "(during quiet hours)")),
+                Boolean.TRUE);
+        check("v3.18 brief: order is changed, not-done, baseline",
+                Boolean.valueOf(digest != null
+                        && digest.indexOf("river level")
+                                < digest.indexOf("couldn't check")
+                        && digest.indexOf("couldn't check")
+                                < digest.indexOf("now watching")),
+                Boolean.TRUE);
+        check("v3.18 brief: unchanged checks are counted, not recited",
+                Boolean.valueOf(digest != null
+                        && digest.contains("2 checks unchanged.")
+                        && !digest.contains("milk prices")),
+                Boolean.TRUE);
+        BriefingLog many = new BriefingLog();
+        for (int i = 0; i < 7; i++) {
+            many.append(new BriefingLog.Entry("change " + i,
+                    BriefingLog.KIND_GOAL, WatchCompare.CHANGED,
+                    "d" + i, i, false));
+        }
+        String manyDigest = BriefingDigest.compose(many);
+        int itemised = 0;
+        if (manyDigest != null) {
+            String[] dlines = manyDigest.split("\n");
+            for (int i = 0; i < dlines.length; i++) {
+                if (dlines[i].contains(" changed: ")) itemised++;
+            }
+        }
+        check("v3.18 brief: at most five itemised, the rest folded",
+                Boolean.valueOf(itemised == 5 && manyDigest != null
+                        && manyDigest.contains(
+                                "and 2 more changes/checks.")),
+                Boolean.TRUE);
+        BriefingLog quiet = new BriefingLog();
+        quiet.append(new BriefingLog.Entry("a",
+                BriefingLog.KIND_GOAL, WatchCompare.NO_CHANGE,
+                "", 1L, false));
+        check("v3.18 brief: an all-quiet digest is the count line alone",
+                BriefingDigest.compose(quiet), "1 check unchanged.");
+        check("v3.18 brief: nothing unbriefed composes to null",
+                BriefingDigest.compose(logBack), null);
+        check("v3.18 brief: due-ness is setting + a later day",
+                Boolean.valueOf(!BriefingDigest.due(false, 1, 2)
+                        && !BriefingDigest.due(true, 2, 2)
+                        && BriefingDigest.due(true, 1, 2)),
+                Boolean.TRUE);
+
+        // ---- settings: the two keys ------------------------------
+        Settings defs = new Settings();
+        check("v3.18 settings: both default off",
+                Boolean.valueOf(!defs.checkConditionsOn
+                        && !defs.briefingOn),
+                Boolean.TRUE);
+        int ccCount = 0;
+        int brCount = 0;
+        for (int i = 0; i < Settings.ALL_KEYS.length; i++) {
+            if (Settings.KEY_CHECK_CONDITIONS.equals(
+                    Settings.ALL_KEYS[i])) ccCount++;
+            if (Settings.KEY_BRIEFING.equals(
+                    Settings.ALL_KEYS[i])) brCount++;
+        }
+        check("v3.18 settings: both keys ride ALL_KEYS exactly once",
+                Boolean.valueOf(ccCount == 1 && brCount == 1),
+                Boolean.TRUE);
+        java.util.Map<String, String> sm =
+                new java.util.HashMap<String, String>();
+        sm.put(Settings.KEY_CHECK_CONDITIONS, "on");
+        sm.put(Settings.KEY_BRIEFING, "on");
+        Settings on = Settings.fromMap(sm);
+        java.util.Map<String, String> smBack = on.toMap();
+        Settings onBack = Settings.fromMap(smBack);
+        check("v3.18 settings: both round-trip through the map",
+                Boolean.valueOf(on.checkConditionsOn && on.briefingOn
+                        && onBack.checkConditionsOn
+                        && onBack.briefingOn),
+                Boolean.TRUE);
+        java.util.Map<String, String> junk =
+                new java.util.HashMap<String, String>();
+        junk.put(Settings.KEY_CHECK_CONDITIONS, "banana");
+        junk.put(Settings.KEY_BRIEFING, "banana");
+        Settings junkBack = Settings.fromMap(junk);
+        check("v3.18 settings: junk reads as the default (off)",
+                Boolean.valueOf(!junkBack.checkConditionsOn
+                        && !junkBack.briefingOn),
+                Boolean.TRUE);
+
+        // ---- source pins ------------------------------------------
+        if (args == null || args.length == 0) return;
+        java.io.File shimF = new java.io.File(args[0]);
+        java.io.File shimDirF = shimF.getParentFile();
+        java.io.File v1DirF = shimDirF == null ? null
+                : shimDirF.getParentFile() == null ? null
+                : shimDirF.getParentFile().getParentFile();
+        if (v1DirF == null) return;
+        String manifest = readTestFile(new java.io.File(v1DirF,
+                "app/src/main/AndroidManifest.xml"));
+        String mainSrc = readTestFile(new java.io.File(v1DirF,
+                "app/src/main/java/com/ghosthands/app/MainActivity.java"));
+        String recvSrc = readTestFile(new java.io.File(v1DirF,
+                "app/src/main/java/com/ghosthands/app/CheckReceiver.java"));
+        String alertSrc = readTestFile(new java.io.File(v1DirF,
+                "app/src/main/java/com/ghosthands/app/Alerts.java"));
+        String agentSrc = readTestFile(new java.io.File(v1DirF,
+                "app/src/main/java/com/ghosthands/app/Agent.java"));
+        if (manifest == null || mainSrc == null || recvSrc == null
+                || alertSrc == null || agentSrc == null) return;
+        // v3.27: this pin MOVES — unattended mode brings the
+        // spike's named set (ten permissions). The half that
+        // still binds: USE_EXACT_ALARM stays absent — the
+        // spike's §2 rejects it for this app outright.
+        check("v3.18 pin, as moved by v3.27: the permission set "
+                        + "is the spike's ten, USE_EXACT_ALARM absent",
+                Boolean.valueOf(countOccurrences(manifest,
+                                "<uses-permission") == 10
+                        && manifest.contains("SCHEDULE_EXACT_ALARM")
+                        && !manifest.contains("USE_EXACT_ALARM")),
+                Boolean.TRUE);
+        check("v3.18 pin: the gate lives in the receiver, retry in Alerts",
+                Boolean.valueOf(recvSrc.contains(
+                                "CheckConditions.judgeFiring")
+                        && recvSrc.contains("EXTRA_RETRY")
+                        && alertSrc.contains("armCheckRetry")),
+                Boolean.TRUE);
+        check("v3.18 pin: the briefing appends at all three verdict sites",
+                Boolean.valueOf(countOccurrences(mainSrc,
+                        "appendBriefingEntry(") >= 4),
+                Boolean.TRUE);
+        check("v3.18 pin: seeding rides the one new Agent seam",
+                Boolean.valueOf(agentSrc.contains("\"chain_seed\"")
+                        && agentSrc.contains("scratchpad.seedIn(")
+                        && mainSrc.contains("GoalChains.seedPairs(")),
+                Boolean.TRUE);
+    }
+
+    /** v3.18: a scripted run through the NEW fullest
+     *  constructor — seeds and chain stamps handed in. */
+    private static com.ghosthands.app.Trail run318(
+            DocHands316 hands, ScriptEngine315 engine, String goal,
+            java.util.List<String[]> seeds, String chainName,
+            int chainStep, int chainTotal) {
+        com.ghosthands.app.Trail trail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(hands, engine, PolicyPacks.loadPack("standard"),
+                trail, ui315(), "q5_k_m", false, 25, false, true,
+                Settings.CHUNK_AUTO, 4, "duckduckgo", false, false,
+                false, false, Settings.END_CARD, false, false,
+                Settings.STYLE_BALANCED, null, null, null, null,
+                false, seeds, chainName, chainStep, chainTotal,
+                "trail-prev.jsonl").run(goal);
+        return trail;
+    }
+
+    /** v3.18: collect a run's chain facts in one pass. */
+    private static class Facts318 {
+        String stop = null;
+        final java.util.List<String> types =
+                new java.util.ArrayList<String>();
+        java.util.Map<String, Object> runEv = null;
+        java.util.Map<String, Object> seedEv = null;
+        int decidesBeforeSeed = -1;
+
+        Facts318(com.ghosthands.app.Trail trail) {
+            int decideSeen = 0;
+            for (java.util.Map<String, Object> ev
+                    : trail.events()) {
+                String t = String.valueOf(ev.get("type"));
+                types.add(t);
+                if ("run".equals(t)) runEv = ev;
+                if ("chain_seed".equals(t)) {
+                    seedEv = ev;
+                    decidesBeforeSeed = decideSeen;
+                }
+                if ("decide".equals(t)) decideSeen++;
+                if ("stop".equals(t)) {
+                    stop = String.valueOf(ev.get("reason"));
+                }
+            }
+        }
+    }
+
+    private static void v318RunTests() {
+        // SEED-GROUNDS: a step-2 run whose only evidence for
+        // its answer is the seed completes its done — the
+        // grounding guard sees the seeded fact as evidence.
+        java.util.List<String[]> seeds =
+                new java.util.ArrayList<String[]>();
+        seeds.add(new String[]{"The river is 337 miles long",
+                "previous step: find the river length"});
+        ScriptEngine315 engSeed = new ScriptEngine315(
+                "{\"action\":\"done\",\"summary\":"
+                        + "\"The river is 337 miles long\"}");
+        Facts318 fSeed = new Facts318(run318(new DocHands316(),
+                engSeed, "how long is the river", seeds,
+                "river chain", 2, 2));
+        check("v3.18 run: a seeded done is grounded by the seed",
+                fSeed.stop, "done");
+        check("v3.18 run: chain_seed recorded before the first decide",
+                Boolean.valueOf(fSeed.seedEv != null
+                        && fSeed.decidesBeforeSeed == 0),
+                Boolean.TRUE);
+        check("v3.18 run: the run record carries the chain stamps",
+                Boolean.valueOf(fSeed.runEv != null
+                        && "river chain".equals(
+                                String.valueOf(
+                                        fSeed.runEv.get("chain_name")))
+                        && Long.valueOf(2).equals(
+                                fSeed.runEv.get("chain_step"))
+                        && Long.valueOf(2).equals(
+                                fSeed.runEv.get("chain_total"))),
+                Boolean.TRUE);
+        check("v3.18 run: the seed event names facts, stamps, source",
+                Boolean.valueOf(fSeed.seedEv != null
+                        && String.valueOf(fSeed.seedEv.get("facts"))
+                                .contains("337")
+                        && String.valueOf(fSeed.seedEv.get("stamps"))
+                                .contains("previous step")
+                        && "find the river length".equals(
+                                String.valueOf(
+                                        fSeed.seedEv.get("from_goal")))
+                        && "trail-prev.jsonl".equals(
+                                String.valueOf(
+                                        fSeed.seedEv.get("from_trail")))),
+                Boolean.TRUE);
+        // SEED-PROVENANCE in the prompt itself.
+        check("v3.18 run: the prompt labels the seed's provenance",
+                Boolean.valueOf(!engSeed.prompts.isEmpty()
+                        && engSeed.prompts.get(0).contains(
+                                "previous step: find the river length")
+                        && engSeed.prompts.get(0).contains(
+                                "The river is 337 miles long")),
+                Boolean.TRUE);
+        // NO-SEED control: the same done with no seed is NOT
+        // grounded — the guard refuses it and the run ends
+        // any way but done.
+        ScriptEngine315 engBare = new ScriptEngine315(
+                "{\"action\":\"done\",\"summary\":"
+                        + "\"The river is 337 miles long\"}");
+        Facts318 fBare = new Facts318(run318(new DocHands316(),
+                engBare, "how long is the river", null, null,
+                0, 0));
+        check("v3.18 run: the same done unseeded is not grounded",
+                Boolean.valueOf(!"done".equals(fBare.stop)
+                        && fBare.seedEv == null),
+                Boolean.TRUE);
+        check("v3.18 run: an ordinary run record has no chain stamps",
+                Boolean.valueOf(fBare.runEv != null
+                        && fBare.runEv.get("chain_name") == null),
+                Boolean.TRUE);
+        // NO-SEED-ON-FAILURE is a capture rule: a failed run's
+        // trail yields its OWN notes to captureSeedFacts only
+        // when a caller asks — the Activity asks only for done
+        // runs (pinned in source); here the capture over a
+        // done run's events returns exactly its added notes.
+        // v3.31 fixture repair (disclosed): the run's page read
+        // now serves the bolt price, so the note states a figure
+        // the run has actually read (the loop's thin-map
+        // fallback reads this zero-element page before the
+        // first decide) — the discipline the fact-grounding
+        // guard requires of every note. The script and the
+        // assertion below are unchanged; only the world gained
+        // the read.
+        DocHands316 boltHands = new DocHands316() {
+            @Override public String read(int chunkChars) {
+                return Eyes.formatReadChunk(0,
+                        "Bolts cost 12 dollars", 21);
+            }
+        };
+        ScriptEngine315 engNote = new ScriptEngine315(
+                "{\"action\":\"note\",\"fact\":"
+                        + "\"Bolts cost 12 dollars\"}",
+                "{\"action\":\"done\",\"summary\":"
+                        + "\"Bolts cost 12 dollars\"}");
+        com.ghosthands.app.Trail noteTrail = run318(
+                boltHands, engNote, "price the bolts",
+                null, null, 0, 0);
+        java.util.List<String> fromRun =
+                GoalChains.captureSeedFacts(noteTrail.events());
+        check("v3.18 run: capture over a done run takes its notes",
+                Boolean.valueOf(fromRun.size() == 1
+                        && fromRun.get(0).contains("12 dollars")),
+                Boolean.TRUE);
+        // REGRESSION: an ordinary run through the new seam
+        // (null seeds) is the v3.17 run — same event types,
+        // same first prompt — as through the pre-R9 seam.
+        String[] script = {
+                "{\"action\":\"note\",\"fact\":"
+                        + "\"Bolts cost 12 dollars\"}",
+                "{\"action\":\"done\",\"summary\":"
+                        + "\"Bolts cost 12 dollars\"}"};
+        ScriptEngine315 engOld = new ScriptEngine315(script);
+        com.ghosthands.app.Trail oldTrail = run316(
+                new DocHands316(), engOld, "price the bolts",
+                "standard");
+        ScriptEngine315 engNew = new ScriptEngine315(script);
+        com.ghosthands.app.Trail newTrail = run318(
+                new DocHands316(), engNew, "price the bolts",
+                null, null, 0, 0);
+        java.util.List<String> oldTypes =
+                new java.util.ArrayList<String>();
+        for (java.util.Map<String, Object> ev : oldTrail.events()) {
+            oldTypes.add(String.valueOf(ev.get("type")));
+        }
+        java.util.List<String> newTypes =
+                new java.util.ArrayList<String>();
+        for (java.util.Map<String, Object> ev : newTrail.events()) {
+            newTypes.add(String.valueOf(ev.get("type")));
+        }
+        check("v3.18 run: an ordinary run's trail is unchanged",
+                Boolean.valueOf(oldTypes.equals(newTypes)
+                        && !newTypes.contains("chain_seed")),
+                Boolean.TRUE);
+        check("v3.18 run: an ordinary run's prompt is unchanged",
+                Boolean.valueOf(!engOld.prompts.isEmpty()
+                        && !engNew.prompts.isEmpty()
+                        && engOld.prompts.get(0).equals(
+                                engNew.prompts.get(0))),
+                Boolean.TRUE);
+    }
+
+    // ---------------------------------------------------------------
+    // v3.19 — the mascot animation upgrade (ANIMATED_GHOST_PLAN).
+    // v3.21 RECONCILIATION (Art Ghost + Blink): the drawn ghost
+    // is RETIRED — Ryan liked the painted art — so the checks
+    // that pinned the drawn figure (the figure table, frame
+    // determinism, the tail, breathing, squash-and-stretch,
+    // the droop morph and its blink cap, the glance, the path
+    // budget, the one-clock parity, the drawn stills, and the
+    // source pins on the drawn surface's construction) were
+    // removed with the face they pinned; every removal is
+    // listed individually in BUILD_NOTES v3.21.0. What
+    // survives here UNCHANGED is the blink scheduler — the
+    // one piece of the drawn ghost that carried over, now
+    // driving the bitmap swap — plus the two pins that
+    // remain literally true (the header bitmap's bundled
+    // bytes; the permission set). The blink checks below are
+    // v3.19's own, unedited.
+    // ---------------------------------------------------------------
+    private static void v319Tests(String[] args) {
+        // The blink scheduler: deterministic cadence in the
+        // 2.8-4.6 s band (scaled for waiting states), the
+        // 70/90 ms shape, every fifth a double.
+        int intervalOut = 0;
+        for (int k = 0; k < 60; k++) {
+            long iv = GhostFigure.blinkIntervalMs(k, 1f);
+            if (iv < 2800 || iv > 4600) intervalOut++;
+            long ivw = GhostFigure.blinkIntervalMs(k, 1.6f);
+            if (ivw < 4480 || ivw > 7360) intervalOut++;
+        }
+        check("v319 blink: intervals stay in the band",
+                Integer.valueOf(intervalOut), Integer.valueOf(0));
+        check("v319 blink: the shape closes in 70 ms",
+                Float.valueOf(GhostFigure.blinkShape(70)),
+                Float.valueOf(0.08f));
+        check("v319 blink: the shape reopens by 160 ms",
+                Float.valueOf(GhostFigure.blinkShape(160)),
+                Float.valueOf(1f));
+        float openMin = 2f, openMax = 0f;
+        for (long t = 0; t < 60000; t += 37) {
+            float o = GhostFigure.blinkOpenness(t, 1f);
+            openMin = Math.min(openMin, o);
+            openMax = Math.max(openMax, o);
+        }
+        check("v319 blink: openness never leaves its range",
+                Boolean.valueOf(openMin >= 0.08f - 0.001f
+                        && openMax <= 1f), Boolean.TRUE);
+        int firstDouble = -1, firstSingle = -1;
+        for (int k = 0; k < 100
+                && (firstDouble < 0 || firstSingle < 0); k++) {
+            if (GhostFigure.isDoubleBlink(k)) {
+                if (firstDouble < 0) firstDouble = k;
+            } else if (firstSingle < 0) {
+                firstSingle = k;
+            }
+        }
+        check("v319 blink: doubles exist and are not universal",
+                Boolean.valueOf(firstDouble >= 0
+                        && firstSingle >= 0), Boolean.TRUE);
+        check("v319 blink: a double event dips twice",
+                Integer.valueOf(countBlinkDips(firstDouble)),
+                Integer.valueOf(2));
+        check("v319 blink: a single event dips once",
+                Integer.valueOf(countBlinkDips(firstSingle)),
+                Integer.valueOf(1));
+
+        if (args == null || args.length == 0) return;
+        String v1Dir = new java.io.File(args[0]).getParentFile()
+                .getParentFile().getParentFile().getPath();
+        java.io.File headerPng = new java.io.File(v1Dir,
+                "app/src/main/res/drawable-nodpi/mascot_header.png");
+        check("v319 pins: the header bitmap is still bundled",
+                Long.valueOf(headerPng.length()),
+                Long.valueOf(146404L));
+        String manifest = readTestFile(new java.io.File(v1Dir,
+                "app/src/main/AndroidManifest.xml"));
+        int permCount = 0, pIdx = 0;
+        while ((pIdx = manifest.indexOf("<uses-permission",
+                pIdx)) >= 0) {
+            permCount++;
+            pIdx += 4;
+        }
+        check("v319 pins, as moved by v3.27: the permission set "
+                        + "is ten",
+                Integer.valueOf(permCount), Integer.valueOf(10));
+    }
+
+    // ---------------------------------------------------------------
+    // v3.20 — EVERYTHING TRAIN R10: MISSION BOARD + RUN-COMPARE +
+    // ASK-ABOUT-A-RUN (R10_BUILD_PLAN §9). The three readers are
+    // all derived/read-only: the board recomputes from the two
+    // watch stores + retained trails, the compare distills two
+    // closed trails without judging them, and the Q&A judges
+    // answers host-side against a digest that is the whole
+    // evidence universe. The pins close the release: no new
+    // event types, a Q&A session writes nowhere, and an ordinary
+    // run is byte-identical to the pre-R10 build's.
+    // ---------------------------------------------------------------
+
+    /** A watch event in production shape (ts in SECONDS, as
+     *  Trail.record stamps it; since_ms only on completed
+     *  checks; the page_watch flag discriminates the rosters). */
+    private static java.util.Map<String, Object> v320WatchEv(
+            String name, String verdict, double tsSec, long sinceMs,
+            boolean pageWatch, String diffFirst, boolean quiet) {
+        java.util.Map<String, Object> m =
+                new java.util.HashMap<String, Object>();
+        m.put("type", "watch");
+        m.put("step", Long.valueOf(9));
+        m.put("ts", Double.valueOf(tsSec));
+        m.put("goal_name", name);
+        m.put("verdict", verdict);
+        if (!WatchCompare.NOT_DONE.equals(verdict)) {
+            m.put("since_ms", Long.valueOf(sinceMs));
+        }
+        if (pageWatch) {
+            m.put("page_watch", Boolean.TRUE);
+            m.put("url", "https://shop.test/prices");
+        }
+        if (diffFirst != null) {
+            java.util.List<Object> d =
+                    new java.util.ArrayList<Object>();
+            d.add(diffFirst);
+            m.put("diff", d);
+        }
+        if (quiet) m.put("quiet", Boolean.TRUE);
+        return m;
+    }
+
+    private static MissionBoard.TrailEvents v320Trail(String name,
+            java.util.List<java.util.Map<String, Object>> evs) {
+        return new MissionBoard.TrailEvents(name, evs);
+    }
+
+    @SafeVarargs
+    private static java.util.List<java.util.Map<String, Object>>
+            v320Evs(java.util.Map<String, Object>... evs) {
+        java.util.List<java.util.Map<String, Object>> out =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        for (int i = 0; i < evs.length; i++) out.add(evs[i]);
+        return out;
+    }
+
+    private static SavedGoals.SavedGoal v320Goal(String name,
+            int schedMinutes, boolean watched) {
+        SavedGoals.SavedGoal g = new SavedGoals.SavedGoal(name,
+                "goal text for " + name, "standard", schedMinutes);
+        g.watched = watched;
+        return g;
+    }
+
+    private static void v320Tests(String[] args) {
+        java.util.TimeZone ny =
+                java.util.TimeZone.getTimeZone("America/New_York");
+        java.util.Calendar cal =
+                java.util.Calendar.getInstance(ny);
+        cal.set(2026, 9, 25, 6, 0, 0);
+        cal.set(java.util.Calendar.MILLISECOND, 0);
+        final long nowMs = cal.getTimeInMillis();
+
+        // ---- 1. NavState: the sixth screen -------------------
+        NavState nav320 = new NavState();
+        nav320.goTo(NavState.MISSION);
+        check("v320 nav: MISSION is a valid sixth screen",
+                Boolean.valueOf(nav320.screen() == NavState.MISSION
+                        && NavState.MISSION == 5
+                        && NavState.SCREEN_COUNT == 6),
+                Boolean.TRUE);
+        NavState nav320b = new NavState();
+        nav320b.goTo(99);
+        check("v320 nav: an unknown id still lands on AGENT",
+                Integer.valueOf(nav320b.screen()),
+                Integer.valueOf(NavState.AGENT));
+        NavState nav320c = new NavState();
+        nav320c.goTo(NavState.MISSION);
+        int back320 = nav320c.back();
+        check("v320 nav: Back from MISSION returns to AGENT",
+                Boolean.valueOf(back320 == NavState.BACK_TO_AGENT
+                        && nav320c.screen() == NavState.AGENT),
+                Boolean.TRUE);
+
+        // ---- 2. Board roster composition ---------------------
+        SavedGoals roster = new SavedGoals();
+        roster.put(v320Goal("sched watched", 450, true));
+        roster.put(v320Goal("manual watched",
+                SavedGoals.NO_SCHEDULE, true));
+        roster.put(v320Goal("sched unwatched", 450, false));
+        roster.put(v320Goal("manual unwatched",
+                SavedGoals.NO_SCHEDULE, false));
+        PageWatches rosterPw = new PageWatches();
+        rosterPw.put(new PageWatches.PageWatch(
+                "https://shop.test/prices"));
+        java.util.List<MissionBoard.Row> rosterRows =
+                MissionBoard.derive(roster, rosterPw,
+                        new java.util.ArrayList<MissionBoard.TrailEvents>(),
+                        nowMs, ny);
+        check("v320 board: watched goals + page watches form the roster",
+                Boolean.valueOf(rosterRows.size() == 3
+                        && MissionBoard.KIND_GOAL.equals(
+                                rosterRows.get(0).kind)
+                        && MissionBoard.KIND_GOAL.equals(
+                                rosterRows.get(1).kind)
+                        && MissionBoard.KIND_PAGE.equals(
+                                rosterRows.get(2).kind)
+                        && "sched watched".equals(
+                                rosterRows.get(0).label)
+                        && "manual watched".equals(
+                                rosterRows.get(1).label)),
+                Boolean.TRUE);
+
+        // ---- 3. Latest verdict: newest trail wins ------------
+        SavedGoals riverGoals = new SavedGoals();
+        riverGoals.put(v320Goal("River", SavedGoals.NO_SCHEDULE,
+                true));
+        java.util.List<MissionBoard.TrailEvents> riverTrails =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        riverTrails.add(v320Trail("trail-new.jsonl", v320Evs(
+                v320WatchEv("River", WatchCompare.NO_CHANGE,
+                        300.0, 100000L, false, null, false))));
+        riverTrails.add(v320Trail("trail-old.jsonl", v320Evs(
+                v320WatchEv("River", WatchCompare.CHANGED,
+                        200.0, 100000L, false, "level: 12 -> 15",
+                        false))));
+        MissionBoard.Row riverRow = MissionBoard.derive(riverGoals,
+                new PageWatches(), riverTrails, nowMs, ny).get(0);
+        check("v320 board: the newest trail's verdict wins",
+                Boolean.valueOf(WatchCompare.NO_CHANGE.equals(
+                                riverRow.verdictState)
+                        && riverRow.verdictTsMs == 300000L
+                        && "trail-new.jsonl".equals(
+                                riverRow.evidenceTrail)),
+                Boolean.TRUE);
+        // Same-trail order: events walk newest-first within a
+        // trail too, so a later changed beats an earlier
+        // no_change in the SAME trail.
+        java.util.List<MissionBoard.TrailEvents> sameTrail =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        sameTrail.add(v320Trail("trail-one.jsonl", v320Evs(
+                v320WatchEv("River", WatchCompare.NO_CHANGE,
+                        200.0, 100000L, false, null, false),
+                v320WatchEv("River", WatchCompare.CHANGED,
+                        300.0, 100000L, false, "level: 12 -> 15",
+                        false))));
+        MissionBoard.Row sameRow = MissionBoard.derive(riverGoals,
+                new PageWatches(), sameTrail, nowMs, ny).get(0);
+        check("v320 board: within one trail the later verdict wins",
+                Boolean.valueOf(WatchCompare.CHANGED.equals(
+                                sameRow.verdictState)
+                        && sameRow.verdictTsMs == 300000L),
+                Boolean.TRUE);
+
+        // ---- 4. The page_watch flag discriminates ------------
+        String pageLabel = PageWatches.label(
+                "https://shop.test/prices");
+        SavedGoals clashGoals = new SavedGoals();
+        clashGoals.put(v320Goal(pageLabel,
+                SavedGoals.NO_SCHEDULE, true));
+        PageWatches clashPw = new PageWatches();
+        clashPw.put(new PageWatches.PageWatch(
+                "https://shop.test/prices"));
+        java.util.List<MissionBoard.TrailEvents> clashTrails =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        clashTrails.add(v320Trail("trail-clash.jsonl", v320Evs(
+                v320WatchEv(pageLabel, WatchCompare.NO_CHANGE,
+                        200.0, 100000L, false, null, false),
+                v320WatchEv(pageLabel, WatchCompare.CHANGED,
+                        300.0, 100000L, true, "price: $10 -> $12",
+                        false))));
+        java.util.List<MissionBoard.Row> clashRows =
+                MissionBoard.derive(clashGoals, clashPw, clashTrails,
+                        nowMs, ny);
+        check("v320 board: a page verdict never satisfies the goal",
+                Boolean.valueOf(clashRows.size() == 2
+                        && WatchCompare.NO_CHANGE.equals(
+                                clashRows.get(0).verdictState)),
+                Boolean.TRUE);
+        check("v320 board: a goal verdict never satisfies the page",
+                Boolean.valueOf(WatchCompare.CHANGED.equals(
+                                clashRows.get(1).verdictState)
+                        && "price: $10 -> $12".equals(
+                                clashRows.get(1).firstDiff)),
+                Boolean.TRUE);
+
+        // ---- 5. Baseline fallback / no checks yet ------------
+        SavedGoals fbGoals = new SavedGoals();
+        SavedGoals.SavedGoal fb = v320Goal("Fares",
+                SavedGoals.NO_SCHEDULE, true);
+        fb.baseline = new WatchCompare.Signature();
+        fb.baselineSummary = "Kahului $698";
+        fb.baselineTsMs = 1761000000000L;
+        fbGoals.put(fb);
+        fbGoals.put(v320Goal("Bare", SavedGoals.NO_SCHEDULE, true));
+        java.util.List<MissionBoard.Row> fbRows =
+                MissionBoard.derive(fbGoals, new PageWatches(),
+                        new java.util.ArrayList<MissionBoard.TrailEvents>(),
+                        nowMs, ny);
+        check("v320 board: no event -> the record's baseline renders",
+                Boolean.valueOf(fbRows.get(0).baselineFromRecord
+                        && !fbRows.get(0).hasCompletedVerdict
+                        && "Kahului $698".equals(
+                                fbRows.get(0).baselineSummary)
+                        && fbRows.get(0).baselineTsMs
+                                == 1761000000000L),
+                Boolean.TRUE);
+        check("v320 board: no event, no baseline -> no checks yet",
+                Boolean.valueOf(fbRows.get(1).noChecksYet
+                        && !fbRows.get(1).baselineFromRecord),
+                Boolean.TRUE);
+
+        // ---- 6. Streaks: count, change ends, first diff ------
+        SavedGoals streakGoals = new SavedGoals();
+        streakGoals.put(v320Goal("Calm", SavedGoals.NO_SCHEDULE,
+                true));
+        java.util.List<MissionBoard.TrailEvents> streakTrails =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        streakTrails.add(v320Trail("t3.jsonl", v320Evs(
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        300.0, 100000L, false, null, false))));
+        streakTrails.add(v320Trail("t2.jsonl", v320Evs(
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        200.0, 100000L, false, null, false))));
+        streakTrails.add(v320Trail("t1.jsonl", v320Evs(
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        100.0, 90000L, false, null, false))));
+        MissionBoard.Row calmRow = MissionBoard.derive(streakGoals,
+                new PageWatches(), streakTrails, nowMs, ny).get(0);
+        check("v320 board: a no_change chain counts its streak",
+                Boolean.valueOf(calmRow.streak == 3),
+                Boolean.TRUE);
+        java.util.List<MissionBoard.TrailEvents> changedTrails =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        changedTrails.add(v320Trail("t2.jsonl", v320Evs(
+                v320WatchEv("Calm", WatchCompare.CHANGED,
+                        300.0, 100000L, false, "level: 12 -> 15",
+                        false))));
+        changedTrails.add(v320Trail("t1.jsonl", v320Evs(
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        200.0, 100000L, false, null, false))));
+        MissionBoard.Row changedRow = MissionBoard.derive(
+                streakGoals, new PageWatches(), changedTrails,
+                nowMs, ny).get(0);
+        check("v320 board: a changed newest verdict zeroes the streak",
+                Boolean.valueOf(changedRow.streak == 0
+                        && WatchCompare.CHANGED.equals(
+                                changedRow.verdictState)
+                        && "level: 12 -> 15".equals(
+                                changedRow.firstDiff)),
+                Boolean.TRUE);
+
+        // ---- 7. not_done: skipped, and surfaced --------------
+        java.util.List<MissionBoard.TrailEvents> ndTrails =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        ndTrails.add(v320Trail("t1.jsonl", v320Evs(
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        100.0, 90000L, false, null, false),
+                v320WatchEv("Calm", WatchCompare.NOT_DONE,
+                        200.0, 0L, false, null, false),
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        300.0, 100000L, false, null, false))));
+        MissionBoard.Row ndRow = MissionBoard.derive(streakGoals,
+                new PageWatches(), ndTrails, nowMs, ny).get(0);
+        check("v320 board: a not_done between no_changes is skipped",
+                Boolean.valueOf(ndRow.streak == 2
+                        && ndRow.couldntRunTsMs == 0L),
+                Boolean.TRUE);
+        java.util.List<MissionBoard.TrailEvents> ndNewTrails =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        ndNewTrails.add(v320Trail("t1.jsonl", v320Evs(
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        100.0, 90000L, false, null, false),
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        200.0, 100000L, false, null, false),
+                v320WatchEv("Calm", WatchCompare.NOT_DONE,
+                        300.0, 0L, false, null, false))));
+        MissionBoard.Row ndNewRow = MissionBoard.derive(streakGoals,
+                new PageWatches(), ndNewTrails, nowMs, ny).get(0);
+        check("v320 board: a newest not_done surfaces, streak intact",
+                Boolean.valueOf(ndNewRow.couldntRunTsMs == 300000L
+                        && ndNewRow.streak == 2
+                        && WatchCompare.NO_CHANGE.equals(
+                                ndNewRow.verdictState)),
+                Boolean.TRUE);
+
+        // ---- 8. A baseline verdict starts no streak ----------
+        java.util.List<MissionBoard.TrailEvents> baseTrails =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        baseTrails.add(v320Trail("t1.jsonl", v320Evs(
+                v320WatchEv("Calm", WatchCompare.BASELINE,
+                        100.0, 0L, false, null, false),
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        200.0, 100000L, false, null, false),
+                v320WatchEv("Calm", WatchCompare.NO_CHANGE,
+                        300.0, 100000L, false, null, false))));
+        MissionBoard.Row baseRow = MissionBoard.derive(streakGoals,
+                new PageWatches(), baseTrails, nowMs, ny).get(0);
+        check("v320 board: baseline then two no_change -> streak 2",
+                Boolean.valueOf(baseRow.streak == 2),
+                Boolean.TRUE);
+
+        // ---- 9. Retention edge: N+ vs plain N ----------------
+        SavedGoals edgeGoals = new SavedGoals();
+        edgeGoals.put(v320Goal("Edge", SavedGoals.NO_SCHEDULE,
+                true));
+        edgeGoals.put(v320Goal("Other", SavedGoals.NO_SCHEDULE,
+                true));
+        java.util.List<MissionBoard.TrailEvents> edgeTrails =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        edgeTrails.add(v320Trail("t-new.jsonl", v320Evs(
+                v320WatchEv("Other", WatchCompare.NO_CHANGE,
+                        300.0, 100000L, false, null, false))));
+        edgeTrails.add(v320Trail("t-old.jsonl", v320Evs(
+                v320WatchEv("Edge", WatchCompare.NO_CHANGE,
+                        100.0, 90000L, false, null, false),
+                v320WatchEv("Edge", WatchCompare.NO_CHANGE,
+                        200.0, 100000L, false, null, false))));
+        MissionBoard.Row edgeRow = MissionBoard.derive(edgeGoals,
+                new PageWatches(), edgeTrails, nowMs, ny).get(0);
+        check("v320 board: a streak reaching the oldest trail is N+",
+                Boolean.valueOf(edgeRow.streak == 2
+                        && edgeRow.streakOpen),
+                Boolean.TRUE);
+        java.util.List<MissionBoard.TrailEvents> insideTrails =
+                new java.util.ArrayList<MissionBoard.TrailEvents>();
+        insideTrails.add(v320Trail("t-new.jsonl", v320Evs(
+                v320WatchEv("Edge", WatchCompare.NO_CHANGE,
+                        200.0, 100000L, false, null, false),
+                v320WatchEv("Edge", WatchCompare.NO_CHANGE,
+                        300.0, 100000L, false, null, false))));
+        insideTrails.add(v320Trail("t-old.jsonl", v320Evs(
+                v320WatchEv("Other", WatchCompare.CHANGED,
+                        100.0, 90000L, false, "x: 1 -> 2", false))));
+        MissionBoard.Row insideRow = MissionBoard.derive(edgeGoals,
+                new PageWatches(), insideTrails, nowMs, ny).get(0);
+        check("v320 board: a streak ending inside the record is plain",
+                Boolean.valueOf(insideRow.streak == 2
+                        && !insideRow.streakOpen),
+                Boolean.TRUE);
+
+        // ---- 10. Page row from the store record alone --------
+        PageWatches storePw = new PageWatches();
+        PageWatches.PageWatch sw = new PageWatches.PageWatch(
+                "https://shop.test/prices");
+        sw.baseline = new WatchCompare.Signature();
+        sw.baselineTsMs = 111000L;
+        sw.lastVerdict = WatchCompare.CHANGED;
+        sw.lastCheckTsMs = 222000L;
+        sw.lastDiff.add("price: $10 -> $12");
+        storePw.put(sw);
+        MissionBoard.Row storeRow = MissionBoard.derive(
+                new SavedGoals(), storePw,
+                new java.util.ArrayList<MissionBoard.TrailEvents>(),
+                nowMs, ny).get(0);
+        check("v320 board: a page row reads its store record",
+                Boolean.valueOf(MissionBoard.KIND_PAGE.equals(
+                                storeRow.kind)
+                        && WatchCompare.CHANGED.equals(
+                                storeRow.verdictState)
+                        && storeRow.verdictTsMs == 222000L
+                        && storeRow.lastCheckTsMs == 222000L
+                        && "price: $10 -> $12".equals(
+                                storeRow.firstDiff)),
+                Boolean.TRUE);
+
+        // ---- 11. Next check ----------------------------------
+        SavedGoals nextGoals = new SavedGoals();
+        nextGoals.put(v320Goal("Daily", 450, true));
+        SavedGoals.SavedGoal cond = v320Goal("Cond", 450, true);
+        cond.condCharging = true;
+        nextGoals.put(cond);
+        nextGoals.put(v320Goal("Manual",
+                SavedGoals.NO_SCHEDULE, true));
+        java.util.List<MissionBoard.Row> nextRows =
+                MissionBoard.derive(nextGoals, new PageWatches(),
+                        new java.util.ArrayList<MissionBoard.TrailEvents>(),
+                        nowMs, ny);
+        check("v320 board: a scheduled item names its next fire",
+                Boolean.valueOf("next: today 07:30".equals(
+                        nextRows.get(0).nextCheck)),
+                Boolean.TRUE);
+        check("v320 board: an R9 condition suffix rides the label",
+                Boolean.valueOf("next: today 07:30 \u00b7 charging"
+                        .equals(nextRows.get(1).nextCheck)),
+                Boolean.TRUE);
+        check("v320 board: an unscheduled watch renders the manual line",
+                Boolean.valueOf("manual \u2014 checks when you run it"
+                        .equals(nextRows.get(2).nextCheck)),
+                Boolean.TRUE);
+
+        // ---- 12. Empty stores -> empty roster ----------------
+        check("v320 board: empty stores derive an empty roster",
+                Integer.valueOf(MissionBoard.derive(new SavedGoals(),
+                        new PageWatches(),
+                        new java.util.ArrayList<MissionBoard.TrailEvents>(),
+                        nowMs, ny).size()),
+                Integer.valueOf(0));
+
+        // ---- RunCompare fixtures ------------------------------
+        // A full mixed trail: every counted family present, a
+        // live-stats summary, a changed watch verdict.
+        java.util.List<java.util.Map<String, Object>> fullTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        fullTrail.add(Trail.fields(
+                "type", "run", "goal", "find the river length",
+                "pack", "standard", "model", "Q5_K_M",
+                "grammar_setting", Boolean.FALSE,
+                "max_steps", Long.valueOf(25)));
+        fullTrail.add(Trail.fields(
+                "type", "perceive",
+                "url", "https://en.wikipedia.org/wiki/Clinch_River",
+                "title", "Clinch River"));
+        fullTrail.add(Trail.fields(
+                "type", "execute",
+                "action", Trail.fields("action", "tap",
+                        "el", Long.valueOf(3)),
+                "element", Trail.fields("number", Long.valueOf(3),
+                        "name", "Clinch River")));
+        fullTrail.add(Trail.fields(
+                "type", "result", "ok", Boolean.TRUE,
+                "result", "ok: tapped"));
+        fullTrail.add(Trail.fields(
+                "type", "read",
+                "result", "The Clinch River is a river."));
+        fullTrail.add(Trail.fields(
+                "type", "execute",
+                "action", Trail.fields("action", "read",
+                        "el", Long.valueOf(1)),
+                "element", Trail.fields("number", Long.valueOf(1),
+                        "name", "article")));
+        fullTrail.add(Trail.fields(
+                "type", "result", "ok", Boolean.TRUE,
+                "result", "ok: read chars 0-100 of 900"));
+        fullTrail.add(Trail.fields(
+                "type", "note",
+                "fact", "The river is 337 miles long",
+                "url", "https://en.wikipedia.org/wiki/Clinch_River",
+                "title", "Clinch River",
+                "status", Scratchpad.ADDED));
+        fullTrail.add(Trail.fields(
+                "type", "note",
+                "fact", "The river is 337 miles long",
+                "status", Scratchpad.DUPLICATE));
+        fullTrail.add(Trail.fields(
+                "type", "ask", "question", "Which dam?"));
+        fullTrail.add(Trail.fields(
+                "type", "answer", "question", "Which dam?",
+                "answer", "The one by the lake",
+                "provenance", "USER"));
+        fullTrail.add(Trail.fields(
+                "type", "approval", "phase", "decision",
+                "action", Trail.fields("action", "tap"),
+                "approved", Boolean.TRUE));
+        fullTrail.add(Trail.fields(
+                "type", "approval", "phase", "decision",
+                "action", Trail.fields("action", "tap"),
+                "approved", Boolean.FALSE));
+        fullTrail.add(Trail.fields(
+                "type", "guard",
+                "action", Trail.fields("action", "tap"),
+                "outcome", "correct",
+                "reason", "already done this run"));
+        fullTrail.add(Trail.fields(
+                "type", "download", "filename", "river.pdf",
+                "status", "saved"));
+        fullTrail.add(Trail.fields("type", "tab_opened"));
+        fullTrail.add(Trail.fields(
+                "type", "screenshot", "file", "shot-final.png"));
+        fullTrail.add(Trail.fields(
+                "type", "watch", "goal_name", "River",
+                "verdict", "changed",
+                "since_ms", Long.valueOf(1761000000000L),
+                "diff", v320StrList("level: 12 -> 15")));
+        fullTrail.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "The river is 337 miles long"));
+        fullTrail.add(Trail.fields(
+                "type", "run_summary", "outcome", "done",
+                "steps", Long.valueOf(12),
+                "seconds", Long.valueOf(83),
+                "prompt_tokens", Long.valueOf(5000),
+                "reused_tokens", Long.valueOf(2000),
+                "gen_tokens", Long.valueOf(300),
+                "reuse_percent", Long.valueOf(40)));
+        RunCompare.Side fullSide = RunCompare.distill(fullTrail, null);
+
+        // ---- 13. Side distillation ----------------------------
+        check("v320 compare: a side distills from the right events",
+                Boolean.valueOf("find the river length".equals(
+                                fullSide.goal)
+                        && "standard".equals(fullSide.pack)
+                        && "Q5_K_M".equals(fullSide.model)
+                        && Boolean.FALSE.equals(fullSide.grammar)
+                        && fullSide.finished
+                        && Long.valueOf(12).equals(fullSide.steps)
+                        && Long.valueOf(83).equals(fullSide.seconds)),
+                Boolean.TRUE);
+
+        // ---- 14. Token tallies: present vs not recorded -------
+        java.util.List<java.util.Map<String, Object>> bareSummary =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        bareSummary.add(Trail.fields(
+                "type", "run", "goal", "find the river length",
+                "pack", "standard", "model", "Q5_K_M",
+                "grammar_setting", Boolean.FALSE));
+        bareSummary.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "done"));
+        bareSummary.add(Trail.fields(
+                "type", "run_summary", "outcome", "done",
+                "steps", Long.valueOf(9),
+                "seconds", Long.valueOf(50),
+                "prompt_tokens", Long.valueOf(4000),
+                "reused_tokens", Long.valueOf(1000),
+                "reuse_percent", Long.valueOf(25)));
+        RunCompare.Side bareSide = RunCompare.distill(bareSummary,
+                null);
+        java.util.List<RunCompare.Row> tallyRows =
+                RunCompare.diff(fullSide, bareSide);
+        RunCompare.Row genRow = v320Row(tallyRows,
+                "Generated tokens");
+        RunCompare.Row promptRow = v320Row(tallyRows,
+                "Prompt tokens");
+        check("v320 compare: live-stats tallies render their values",
+                Boolean.valueOf("300".equals(genRow.a)
+                        && "5000".equals(promptRow.a)),
+                Boolean.TRUE);
+        check("v320 compare: an absent tally is not recorded, never 0",
+                Boolean.valueOf(RunCompare.NOT_RECORDED.equals(
+                                genRow.b)
+                        && !"0".equals(genRow.b)
+                        && "4000".equals(promptRow.b)),
+                Boolean.TRUE);
+
+        // ---- 15. Family counts --------------------------------
+        check("v320 compare: each family counts its own events",
+                Boolean.valueOf(fullSide.reads == 2
+                        && fullSide.notes == 1
+                        && fullSide.asks == 1
+                        && fullSide.answers == 1
+                        && fullSide.approvalsAsked == 2
+                        && fullSide.approvalsDenied == 1
+                        && fullSide.guardCorrections == 1
+                        && fullSide.downloads == 1
+                        && fullSide.tabsOpened == 1),
+                Boolean.TRUE);
+
+        // ---- 16. Diff rows: order, flags, signed deltas -------
+        java.util.List<RunCompare.Row> sameRows =
+                RunCompare.diff(fullSide,
+                        RunCompare.distill(fullTrail, null));
+        int differsCount = 0;
+        for (int i = 0; i < sameRows.size(); i++) {
+            if (sameRows.get(i).differs) differsCount++;
+        }
+        check("v320 compare: identical sides differ nowhere",
+                Boolean.valueOf(differsCount == 0
+                        && sameRows.size() == 22
+                        && "Outcome".equals(sameRows.get(0).label)
+                        && "Steps".equals(sameRows.get(4).label)
+                        && "Watch".equals(sameRows.get(19).label)
+                        && "Screenshot".equals(
+                                sameRows.get(21).label)),
+                Boolean.TRUE);
+        java.util.List<java.util.Map<String, Object>> longerTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>(
+                        fullTrail);
+        longerTrail.set(longerTrail.size() - 1, Trail.fields(
+                "type", "run_summary", "outcome", "done",
+                "steps", Long.valueOf(15),
+                "seconds", Long.valueOf(73),
+                "prompt_tokens", Long.valueOf(5000),
+                "reused_tokens", Long.valueOf(2000),
+                "gen_tokens", Long.valueOf(300),
+                "reuse_percent", Long.valueOf(40)));
+        java.util.List<RunCompare.Row> deltaRows = RunCompare.diff(
+                fullSide, RunCompare.distill(longerTrail, null));
+        check("v320 compare: steps and seconds deltas are signed B-A",
+                Boolean.valueOf("+3".equals(v320Row(deltaRows,
+                                "Steps").delta)
+                        && "-10".equals(v320Row(deltaRows,
+                                "Seconds").delta)
+                        && v320Row(deltaRows, "Steps").differs
+                        && v320Row(deltaRows, "Seconds").differs),
+                Boolean.TRUE);
+
+        // ---- 17. Same-goal fact sets (the Scratchpad rule) ----
+        RunCompare.Side factsA = RunCompare.distill(v320Evs(
+                Trail.fields("type", "note", "fact", "Alpha fact",
+                        "status", Scratchpad.ADDED),
+                Trail.fields("type", "note", "fact", "Beta fact",
+                        "status", Scratchpad.ADDED),
+                Trail.fields("type", "note", "fact", "Delta fact",
+                        "status", Scratchpad.ADDED)), null);
+        RunCompare.Side factsB = RunCompare.distill(v320Evs(
+                Trail.fields("type", "note", "fact", " Beta fact ",
+                        "status", Scratchpad.ADDED),
+                Trail.fields("type", "note", "fact", "delta fact",
+                        "status", Scratchpad.ADDED),
+                Trail.fields("type", "note", "fact", "Gamma fact",
+                        "status", Scratchpad.ADDED)), null);
+        factsA.goal = "same goal";
+        factsB.goal = "same goal";
+        RunCompare.FactSets sets = RunCompare.factSets(factsA, factsB);
+        check("v320 compare: fact sets follow the normalisation rule",
+                Boolean.valueOf(sets.both.size() == 1
+                        && "Beta fact".equals(sets.both.get(0))
+                        && sets.onlyA.size() == 2
+                        && sets.onlyA.contains("Alpha fact")
+                        && sets.onlyA.contains("Delta fact")
+                        && sets.onlyB.size() == 2
+                        && sets.onlyB.contains("delta fact")
+                        && sets.onlyB.contains("Gamma fact")),
+                Boolean.TRUE);
+
+        // ---- 18. Different goals: per-side lists --------------
+        factsB.goal = "another goal";
+        String diffGoalShare = RunCompare.shareText("a.jsonl",
+                factsA, "b.jsonl", factsB);
+        check("v320 compare: different goals list facts per side",
+                Boolean.valueOf(!RunCompare.sameGoal(factsA, factsB)
+                        && diffGoalShare.contains("Facts from A")
+                        && diffGoalShare.contains("Facts from B")
+                        && !diffGoalShare.contains("Facts only in")),
+                Boolean.TRUE);
+
+        // ---- 19. An unfinished side ---------------------------
+        java.util.List<java.util.Map<String, Object>> openTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        openTrail.add(Trail.fields(
+                "type", "run", "goal", "find the river length",
+                "pack", "standard", "model", "Q5_K_M",
+                "grammar_setting", Boolean.FALSE));
+        openTrail.add(Trail.fields(
+                "type", "note", "fact", "A partial fact",
+                "status", Scratchpad.ADDED));
+        RunCompare.Side openSide = RunCompare.distill(openTrail, null);
+        java.util.List<RunCompare.Row> openRows =
+                RunCompare.diff(fullSide, openSide);
+        check("v320 compare: an unfinished side still distills",
+                Boolean.valueOf(!openSide.finished
+                        && "unfinished".equals(openSide.outcomeLine)
+                        && openSide.notes == 1
+                        && v320Row(openRows, "Outcome").differs),
+                Boolean.TRUE);
+
+        // ---- 20. A pre-v3.0 trail ------------------------------
+        java.util.List<java.util.Map<String, Object>> legacyTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        legacyTrail.add(Trail.fields(
+                "type", "perceive",
+                "url", "https://example.test/page",
+                "title", "Old Page"));
+        legacyTrail.add(Trail.fields(
+                "type", "note", "fact", "An old fact",
+                "status", Scratchpad.ADDED));
+        legacyTrail.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "An old fact"));
+        RunCompare.Side legacySide = RunCompare.distill(legacyTrail,
+                "legacy goal");
+        check("v320 compare: a pre-run-record trail falls back for its goal",
+                Boolean.valueOf("legacy goal".equals(legacySide.goal)
+                        && legacySide.finished
+                        && !legacySide.hasRunEvent
+                        && RunCompare.NOT_RECORDED.equals(
+                                v320Row(RunCompare.diff(legacySide,
+                                        fullSide), "Model").a)),
+                Boolean.TRUE);
+
+        // ---- 21. Watch rows: vocabulary and absence ------------
+        java.util.List<RunCompare.Row> watchRows =
+                RunCompare.diff(fullSide, legacySide);
+        check("v320 compare: watch verdicts render, absence by name",
+                Boolean.valueOf(v320Row(watchRows, "Watch").a
+                                .startsWith("changed")
+                        && "not watched".equals(
+                                v320Row(watchRows, "Watch").b)),
+                Boolean.TRUE);
+
+        // ---- 22. Share text: no raw URL anywhere ---------------
+        java.util.List<java.util.Map<String, Object>> urlTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        urlTrail.add(Trail.fields(
+                "type", "run", "goal", "open the page",
+                "pack", "readonly", "model", "Q5_K_M",
+                "grammar_setting", Boolean.TRUE));
+        urlTrail.add(Trail.fields(
+                "type", "perceive",
+                "url", "https://en.wikipedia.org/wiki/Clinch_River",
+                "title", ""));
+        urlTrail.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "opened"));
+        urlTrail.add(Trail.fields(
+                "type", "run_summary", "outcome", "done",
+                "steps", Long.valueOf(3),
+                "seconds", Long.valueOf(20),
+                "prompt_tokens", Long.valueOf(900),
+                "reused_tokens", Long.valueOf(0),
+                "reuse_percent", Long.valueOf(0)));
+        String share = RunCompare.shareText("trail-a.jsonl",
+                RunCompare.distill(urlTrail, null),
+                "trail-b.jsonl", fullSide);
+        check("v320 compare: share names sources by host, no raw URL",
+                Boolean.valueOf(share.contains("en.wikipedia.org")
+                        && !share.contains("https://")
+                        && !share.contains("Clinch_River")
+                        && share.startsWith("Run comparison")),
+                Boolean.TRUE);
+        check("v320 compare: no winner vocabulary anywhere",
+                Boolean.valueOf(!share.contains("better")
+                        && !share.contains("worse")
+                        && !share.contains("winner")
+                        && !share.contains("faster")
+                        && !share.contains("score")),
+                Boolean.TRUE);
+
+        // ---- 23. Digest: the header is complete ---------------
+        RunDigest.Digest fullDigest = RunDigest.build(fullTrail, null);
+        check("v320 digest: header carries goal, outcome, source, size",
+                Boolean.valueOf(fullDigest.text.contains(
+                                "Goal: find the river length")
+                        && fullDigest.text.contains("Outcome:")
+                        && fullDigest.text.contains(
+                                "Source: Clinch River "
+                                + "(en.wikipedia.org)")
+                        && fullDigest.text.contains("Steps: 12")
+                        && fullDigest.text.contains("Seconds: 83")),
+                Boolean.TRUE);
+        check("v320 digest: header carries model, grammar, pack, watch",
+                Boolean.valueOf(fullDigest.text.contains(
+                                "Model: Q5_K_M")
+                        && fullDigest.text.contains("Grammar: off")
+                        && fullDigest.text.contains("Pack: standard")
+                        && fullDigest.text.contains(
+                                "Watch: changed")),
+                Boolean.TRUE);
+
+        // ---- 24. Facts verbatim; asks quoted -------------------
+        check("v320 digest: facts render verbatim with their stamps",
+                Boolean.valueOf(fullDigest.text.contains(
+                        "- The river is 337 miles long "
+                        + "(from: Clinch River)")),
+                Boolean.TRUE);
+        check("v320 digest: ask and answer quote the recorded words",
+                Boolean.valueOf(fullDigest.text.contains(
+                                "Q: Which dam?")
+                        && fullDigest.text.contains(
+                                "You: The one by the lake")),
+                Boolean.TRUE);
+
+        // ---- 25. Step lines; results capped at 120 -------------
+        check("v320 digest: step lines distill the spine and evidence",
+                Boolean.valueOf(fullDigest.text.contains(
+                                "tap #3 'Clinch River'")
+                        && fullDigest.text.contains(
+                                "approval asked (tap) -> approved")
+                        && fullDigest.text.contains(
+                                "approval asked (tap) -> denied")
+                        && fullDigest.text.contains(
+                                "guard corrected tap")),
+                Boolean.TRUE);
+        StringBuilder longResult = new StringBuilder();
+        for (int i = 0; i < 300; i++) longResult.append('x');
+        java.util.List<java.util.Map<String, Object>> capTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        capTrail.add(Trail.fields(
+                "type", "run", "goal", "cap test"));
+        capTrail.add(Trail.fields(
+                "type", "execute", "step", Long.valueOf(1),
+                "action", Trail.fields("action", "tap",
+                        "el", Long.valueOf(1)),
+                "element", Trail.fields("number", Long.valueOf(1),
+                        "name", "thing")));
+        capTrail.add(Trail.fields(
+                "type", "result", "ok", Boolean.TRUE,
+                "result", longResult.toString()));
+        capTrail.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "capped"));
+        String capDigest = RunDigest.build(capTrail, null).text;
+        StringBuilder x120 = new StringBuilder();
+        for (int i = 0; i < 120; i++) x120.append('x');
+        StringBuilder x121 = new StringBuilder();
+        for (int i = 0; i < 121; i++) x121.append('x');
+        check("v320 digest: a step result caps at 120 chars",
+                Boolean.valueOf(capDigest.contains(x120.toString())
+                        && !capDigest.contains(x121.toString())),
+                Boolean.TRUE);
+
+        // ---- 26. The ladder fires in order ----------------------
+        // (a) only: 30 long-result steps fit once tails shorten.
+        java.util.List<java.util.Map<String, Object>> rungATrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        rungATrail.add(Trail.fields("type", "run", "goal", "rung a"));
+        StringBuilder tailA = new StringBuilder();
+        for (int i = 0; i < 60; i++) tailA.append('y');
+        tailA.append("ZZZ");
+        for (int i = 0; i < 237; i++) tailA.append('y');
+        for (int s = 1; s <= 30; s++) {
+            rungATrail.add(Trail.fields(
+                    "type", "execute", "step", Long.valueOf(s),
+                    "action", Trail.fields("action", "tap",
+                            "el", Long.valueOf(1)),
+                    "element", Trail.fields("number",
+                            Long.valueOf(1), "name", "thing")));
+            rungATrail.add(Trail.fields(
+                    "type", "result", "ok", Boolean.TRUE,
+                    "result", tailA.toString()));
+        }
+        rungATrail.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "rung a done"));
+        RunDigest.Digest rungA = RunDigest.build(rungATrail, null);
+        check("v320 digest: rung (a) shortens tails and suffices",
+                Boolean.valueOf(rungA.condensed && !rungA.chunked
+                        && RunDigest.estTokens(rungA.text)
+                                <= RunDigest.DIGEST_TOKEN_BUDGET
+                        && !rungA.text.contains("ZZZ")
+                        && !rungA.text.contains("reads)")
+                        && !rungA.text.contains(
+                                "step lines condensed")),
+                Boolean.TRUE);
+        // (b): 80 same-page reads with short results — (a) can
+        // change nothing, the collapse is what fits it.
+        java.util.List<java.util.Map<String, Object>> rungBTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        rungBTrail.add(Trail.fields("type", "run", "goal", "rung b"));
+        rungBTrail.add(Trail.fields(
+                "type", "perceive",
+                "url", "https://tides.test/table",
+                "title", "Tide Table"));
+        for (int s = 1; s <= 80; s++) {
+            rungBTrail.add(Trail.fields(
+                    "type", "execute", "step", Long.valueOf(s),
+                    "action", Trail.fields("action", "read",
+                            "el", Long.valueOf(1)),
+                    "element", Trail.fields("number",
+                            Long.valueOf(1), "name", "article")));
+            rungBTrail.add(Trail.fields(
+                    "type", "result", "ok", Boolean.TRUE,
+                    "result", "ok: read chars 0-40 of 4000"));
+        }
+        rungBTrail.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "rung b done"));
+        RunDigest.Digest rungB = RunDigest.build(rungBTrail, null);
+        check("v320 digest: rung (b) collapses same-page reads",
+                Boolean.valueOf(rungB.condensed && !rungB.chunked
+                        && rungB.text.contains("(80 reads)")
+                        && !rungB.text.contains(
+                                "step lines condensed")
+                        && RunDigest.estTokens(rungB.text)
+                                <= RunDigest.DIGEST_TOKEN_BUDGET),
+                Boolean.TRUE);
+
+        // ---- 27. Rung (c): evidence survives, middle goes -------
+        java.util.List<java.util.Map<String, Object>> rungCTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        rungCTrail.add(Trail.fields("type", "run", "goal", "rung c"));
+        for (int s = 1; s <= 40; s++) {
+            rungCTrail.add(Trail.fields(
+                    "type", "execute", "step", Long.valueOf(s),
+                    "action", Trail.fields("action", "tap",
+                            "el", Long.valueOf(2)),
+                    "element", Trail.fields("number",
+                            Long.valueOf(2), "name",
+                            "the long named element number twenty")));
+            StringBuilder res = new StringBuilder();
+            res.append("R").append(s).append("UNIQUE ");
+            for (int i = 0; i < 290; i++) res.append('z');
+            rungCTrail.add(Trail.fields(
+                    "type", "result", "ok", Boolean.TRUE,
+                    "result", res.toString()));
+            if (s == 20) {
+                rungCTrail.add(Trail.fields(
+                        "type", "note", "step", Long.valueOf(s),
+                        "fact", "A mid-run fact",
+                        "status", Scratchpad.ADDED));
+            }
+            if (s == 21) {
+                rungCTrail.add(Trail.fields(
+                        "type", "ask", "step", Long.valueOf(s),
+                        "question", "Keep going?"));
+            }
+            if (s == 22) {
+                rungCTrail.add(Trail.fields(
+                        "type", "approval", "step", Long.valueOf(s),
+                        "phase", "decision",
+                        "action", Trail.fields("action", "tap"),
+                        "approved", Boolean.FALSE));
+            }
+            if (s == 23) {
+                rungCTrail.add(Trail.fields(
+                        "type", "guard", "step", Long.valueOf(s),
+                        "action", Trail.fields("action", "tap"),
+                        "outcome", "correct",
+                        "reason", "already done this run"));
+            }
+        }
+        rungCTrail.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "rung c done"));
+        RunDigest.Digest rungC = RunDigest.build(rungCTrail, null);
+        check("v320 digest: rung (c) lands inside the budget",
+                Boolean.valueOf(rungC.condensed && !rungC.chunked
+                        && RunDigest.estTokens(rungC.text)
+                                <= RunDigest.DIGEST_TOKEN_BUDGET),
+                Boolean.TRUE);
+        check("v320 digest: evidence lines survive rung (c)",
+                Boolean.valueOf(rungC.text.contains("note -> noted")
+                        && rungC.text.contains("asked you:")
+                        && rungC.text.contains(
+                                "approval asked (tap) -> denied")
+                        && rungC.text.contains("guard corrected")
+                        && rungC.text.contains("Stop:")),
+                Boolean.TRUE);
+        check("v320 digest: middle lines drop, first and last keep",
+                Boolean.valueOf(!rungC.text.contains("R20UNIQUE")
+                        && rungC.text.contains("R40UNIQUE")
+                        && rungC.text.contains("Step 1:")
+                        && rungC.text.contains("Step 40:")),
+                Boolean.TRUE);
+
+        // ---- 28. condensed: false ordinary, true on a rung -----
+        check("v320 digest: an ordinary trail is not condensed",
+                Boolean.valueOf(!fullDigest.condensed
+                        && !fullDigest.chunked),
+                Boolean.TRUE);
+        check("v320 digest: a laddered trail is marked condensed",
+                Boolean.valueOf(rungA.condensed && rungB.condensed
+                        && rungC.condensed),
+                Boolean.TRUE);
+
+        // ---- 29. The chunked path -------------------------------
+        java.util.List<java.util.Map<String, Object>> hugeTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        hugeTrail.add(Trail.fields("type", "run", "goal", "huge"));
+        StringBuilder wTail = new StringBuilder();
+        for (int i = 0; i < 200; i++) wTail.append('w');
+        for (int s = 1; s <= 80; s++) {
+            hugeTrail.add(Trail.fields(
+                    "type", "approval", "step", Long.valueOf(s),
+                    "phase", "decision",
+                    "action", Trail.fields("action", "tap"),
+                    "approved", Boolean.TRUE));
+            hugeTrail.add(Trail.fields(
+                    "type", "execute", "step", Long.valueOf(s),
+                    "action", Trail.fields("action", "tap",
+                            "el", Long.valueOf(1)),
+                    "element", Trail.fields("number",
+                            Long.valueOf(1), "name", "thing")));
+            hugeTrail.add(Trail.fields(
+                    "type", "result", "ok", Boolean.TRUE,
+                    "result", wTail.toString()));
+        }
+        hugeTrail.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "huge done"));
+        RunDigest.Digest huge = RunDigest.build(hugeTrail, null);
+        java.util.List<String> chunkNotes =
+                new java.util.ArrayList<String>();
+        chunkNotes.add("note alpha");
+        chunkNotes.add("note beta");
+        RunDigest.Digest assembled = RunDigest.assemble(huge,
+                chunkNotes);
+        check("v320 digest: the over-cap path plans a few chunks",
+                Boolean.valueOf(huge.chunked && huge.condensed
+                        && huge.chunks.size() >= 1
+                        && huge.chunks.size()
+                                <= RunDigest.MAX_QA_CHUNKS
+                        && huge.chunks.get(0).contains("Step 1")),
+                Boolean.TRUE);
+        check("v320 digest: the assembled digest stays in budget",
+                Boolean.valueOf(assembled.text.contains(
+                                "Step notes (compressed")
+                        && assembled.text.contains("note alpha")
+                        && RunDigest.estTokens(assembled.text)
+                                <= RunDigest.DIGEST_TOKEN_BUDGET),
+                Boolean.TRUE);
+
+        // ---- 30. A stop-only trail -------------------------------
+        RunDigest.Digest stopOnly = RunDigest.build(v320Evs(
+                Trail.fields("type", "run", "goal", "tiny"),
+                Trail.fields("type", "stop", "reason", "done",
+                        "summary", "tiny done")), null);
+        check("v320 digest: a stop-only trail is header + stop",
+                Boolean.valueOf(stopOnly.text.contains("Run record")
+                        && stopOnly.text.contains("Stop:")
+                        && !stopOnly.text.contains("Steps:")
+                        && !stopOnly.text.contains("Facts noted:")),
+                Boolean.TRUE);
+
+        // ---- 31. Prompt assembly --------------------------------
+        String qaDigestText = fullDigest.text;
+        String qaPrompt = RunQa.buildPrompt(qaDigestText, null,
+                "How long is the river?");
+        check("v320 qa: the prompt is standing + digest + question",
+                Boolean.valueOf(qaPrompt.contains(
+                                "Answer ONLY from the run record")
+                        && qaPrompt.contains("337 miles long")
+                        && qaPrompt.contains(
+                                "Question: How long is the river?")
+                        && qaPrompt.endsWith("Answer:")),
+                Boolean.TRUE);
+        check("v320 qa: the whole prompt measures within budget",
+                Boolean.valueOf(RunDigest.estTokens(qaPrompt)
+                        <= Agent.PROMPT_TOKEN_BUDGET),
+                Boolean.TRUE);
+
+        // ---- 32. Priors: the oldest drops first ------------------
+        StringBuilder padA = new StringBuilder();
+        for (int i = 0; i < 420; i++) padA.append('a');
+        java.util.List<RunQa.Pair> priors =
+                new java.util.ArrayList<RunQa.Pair>();
+        priors.add(new RunQa.Pair("First?", padA.toString()));
+        priors.add(new RunQa.Pair("Second?", padA.toString()));
+        priors.add(new RunQa.Pair("Third?", padA.toString()));
+        java.util.List<RunQa.Pair> kept = RunQa.trimPriors(priors);
+        check("v320 qa: past the allowance the oldest pair drops",
+                Boolean.valueOf(kept.size() == 2
+                        && "Second?".equals(kept.get(0).question)
+                        && "Third?".equals(kept.get(1).question)),
+                Boolean.TRUE);
+        String followPrompt = RunQa.buildPrompt(qaDigestText,
+                priors, "Fourth?");
+        check("v320 qa: surviving pairs ride after the digest",
+                Boolean.valueOf(followPrompt.contains("Third?")
+                        && !followPrompt.contains("First?")
+                        && followPrompt.indexOf("Third?")
+                                > followPrompt.indexOf("run record")),
+                Boolean.TRUE);
+
+        // ---- 33. Grounding pass ----------------------------------
+        RunQa.Verdict grounded = RunQa.judge(qaDigestText, null,
+                "How long is the river?",
+                "The river is 337 miles long (fact).");
+        check("v320 qa: a grounded answer is an ANSWER",
+                Boolean.valueOf(grounded.kind
+                                == RunQa.Verdict.ANSWER
+                        && "The river is 337 miles long (fact)."
+                                .equals(grounded.text)),
+                Boolean.TRUE);
+        RunQa.Verdict refusalAnswer = RunQa.judge(qaDigestText,
+                null, "What is the capital?",
+                "That is not in the trail.");
+        check("v320 qa: the verbatim refusal is a first-class ANSWER",
+                Boolean.valueOf(refusalAnswer.kind
+                                == RunQa.Verdict.ANSWER
+                        && RunQa.REFUSAL.equals(refusalAnswer.text)),
+                Boolean.TRUE);
+
+        // ---- 34. Grounding fail + the tokenizer ------------------
+        java.util.List<java.util.Map<String, Object>> numTrail =
+                new java.util.ArrayList<java.util.Map<String, Object>>();
+        numTrail.add(Trail.fields("type", "run", "goal", "numbers"));
+        numTrail.add(Trail.fields(
+                "type", "note",
+                "fact", "The file is 1117 bytes and 43.5 wide",
+                "status", Scratchpad.ADDED));
+        numTrail.add(Trail.fields(
+                "type", "stop", "reason", "done",
+                "summary", "counted"));
+        String numDigest = RunDigest.build(numTrail, null).text;
+        RunQa.Verdict commaOk = RunQa.judge(numDigest, null, "Size?",
+                "It is 1,117 bytes and 43.5 wide.");
+        check("v320 qa: grouping commas and decimals tokenize as the guard's",
+                Boolean.valueOf(commaOk.kind == RunQa.Verdict.ANSWER),
+                Boolean.TRUE);
+        RunQa.Verdict invented = RunQa.judge(numDigest, null,
+                "Size?", "It is 999 bytes.");
+        check("v320 qa: one invented number fails, named exactly",
+                Boolean.valueOf(invented.kind
+                                == RunQa.Verdict.CORRECT
+                        && invented.offenders.size() == 1
+                        && "999".equals(invented.offenders.get(0))),
+                Boolean.TRUE);
+
+        // ---- 35. The correction flow ends at REFUSED -------------
+        check("v320 qa: the correction prompt names the offender",
+                Boolean.valueOf(invented.prompt != null
+                        && invented.prompt.contains("Correction:")
+                        && invented.prompt.contains("999")),
+                Boolean.TRUE);
+        java.util.Set<String> numEvidence =
+                RunQa.evidenceTokens(numDigest);
+        RunQa.Verdict secondFail = RunQa.judgeCorrection(
+                numEvidence, "Still 999 bytes, honestly.");
+        check("v320 qa: a second failure is REFUSED, text not carried",
+                Boolean.valueOf(secondFail.kind
+                                == RunQa.Verdict.REFUSED
+                        && secondFail.text == null),
+                Boolean.TRUE);
+        RunQa.Verdict secondOk = RunQa.judgeCorrection(numEvidence,
+                "It is 1117 bytes.");
+        check("v320 qa: a grounded correction is an ANSWER",
+                Boolean.valueOf(secondOk.kind
+                        == RunQa.Verdict.ANSWER),
+                Boolean.TRUE);
+
+        // ---- 36/37-40 + source pins ------------------------------
+        v320Pins(args);
+    }
+
+    /** A one-string list in the shape trail diffs ride in. */
+    private static java.util.List<Object> v320StrList(
+            String... items) {
+        java.util.List<Object> out =
+                new java.util.ArrayList<Object>();
+        for (int i = 0; i < items.length; i++) out.add(items[i]);
+        return out;
+    }
+
+    /** Find a diff row by label (null when absent). */
+    private static RunCompare.Row v320Row(
+            java.util.List<RunCompare.Row> rows, String label) {
+        for (int i = 0; i < rows.size(); i++) {
+            if (label.equals(rows.get(i).label)) return rows.get(i);
+        }
+        return null;
+    }
+
+    /** v3.20 tests 36-40 + the drawer-order pin: source-level
+     *  and round-trip pins, read from the tree the harness was
+     *  pointed at (silently skipped when the sources are not
+     *  there, the standing convention). */
+    private static void v320Pins(String[] args) {
+        // ---- 37. The event registry is unchanged -------------
+        StringBuilder joined = new StringBuilder();
+        for (int i = 0; i < Trail.EVENT_TYPES.length; i++) {
+            if (i > 0) joined.append(",");
+            joined.append(Trail.EVENT_TYPES[i]);
+        }
+        check("v320 pin: the trail registry is R9's, unchanged",
+                Boolean.valueOf(Trail.EVENT_TYPES.length == 33
+                        && joined.toString().equals(
+                                "perceive,decide,govern,approval,"
+                                + "execute,result,stop,dialog,"
+                                + "download,guard,read,recover,race,"
+                                + "detour,run_summary,stale_stash,"
+                                + "fit,run,note,watch,route,"
+                                + "screenshot,assist,step_screenshot,"
+                                + "ask,answer,tab_opened,tab_switched,"
+                                + "tab_closed,page_watch,chain_seed,"
+                                + "thin_map,a11y_perception")),
+                Boolean.TRUE);
+
+        // ---- 38. A Q&A session leaves the trail byte-identical -
+        boolean qaBytesOk = false;
+        try {
+            java.io.File dir = java.nio.file.Files
+                    .createTempDirectory("gh320qa").toFile();
+            java.io.File tf = new java.io.File(dir, "trail-qa.jsonl");
+            Trail qaTrail = new Trail(tf);
+            qaTrail.record("run", 0, Trail.fields(
+                    "goal", "find the river length",
+                    "pack", "standard", "model", "Q5_K_M",
+                    "grammar_setting", Boolean.FALSE));
+            qaTrail.record("note", 1, Trail.fields(
+                    "fact", "The river is 337 miles long",
+                    "status", Scratchpad.ADDED));
+            qaTrail.record("stop", 2, Trail.fields(
+                    "reason", "done",
+                    "summary", "The river is 337 miles long"));
+            byte[] before = java.nio.file.Files.readAllBytes(
+                    tf.toPath());
+            // The session, exactly the panel's pure path:
+            // parse -> digest -> prompt -> judged answer.
+            String text = new String(before, "UTF-8");
+            java.util.List<java.util.Map<String, Object>> evs =
+                    new java.util.ArrayList<java.util.Map<String, Object>>();
+            String[] lines = text.split("\n");
+            for (int i = 0; i < lines.length; i++) {
+                if (lines[i].trim().length() == 0) continue;
+                Object o = com.ghosthands.app.Json.parse(lines[i]);
+                if (o instanceof java.util.Map) {
+                    @SuppressWarnings("unchecked")
+                    java.util.Map<String, Object> m =
+                            (java.util.Map<String, Object>) o;
+                    evs.add(m);
+                }
+            }
+            RunDigest.Digest d = RunDigest.build(evs, null);
+            String p = RunQa.buildPrompt(d.text, null,
+                    "How long is the river?");
+            RunQa.Verdict v = RunQa.judge(d.text, null,
+                    "How long is the river?",
+                    "The river is 337 miles long.");
+            byte[] after = java.nio.file.Files.readAllBytes(
+                    tf.toPath());
+            qaBytesOk = v.kind == RunQa.Verdict.ANSWER
+                    && java.util.Arrays.equals(before, after);
+        } catch (Exception e) {
+            qaBytesOk = false;
+        }
+        check("v320 pin: a Q&A session leaves the trail byte-identical",
+                Boolean.valueOf(qaBytesOk), Boolean.TRUE);
+
+        // ---- 39. An ordinary run is unchanged -----------------
+        String[] script320 = {
+                "{\"action\":\"note\",\"fact\":"
+                        + "\"Bolts cost 12 dollars\"}",
+                "{\"action\":\"done\",\"summary\":"
+                        + "\"Bolts cost 12 dollars\"}"};
+        ScriptEngine315 engOld320 = new ScriptEngine315(script320);
+        Trail oldTrail320 = run316(new DocHands316(), engOld320,
+                "price the bolts", "standard");
+        ScriptEngine315 engNew320 = new ScriptEngine315(script320);
+        Trail newTrail320 = run318(new DocHands316(), engNew320,
+                "price the bolts", null, null, 0, 0);
+        java.util.List<String> oldTypes320 =
+                new java.util.ArrayList<String>();
+        for (java.util.Map<String, Object> ev
+                : oldTrail320.events()) {
+            oldTypes320.add(String.valueOf(ev.get("type")));
+        }
+        java.util.List<String> newTypes320 =
+                new java.util.ArrayList<String>();
+        boolean allKnown320 = true;
+        java.util.Set<String> registry320 =
+                new java.util.HashSet<String>();
+        for (int i = 0; i < Trail.EVENT_TYPES.length; i++) {
+            registry320.add(Trail.EVENT_TYPES[i]);
+        }
+        for (java.util.Map<String, Object> ev
+                : newTrail320.events()) {
+            String t = String.valueOf(ev.get("type"));
+            newTypes320.add(t);
+            if (!registry320.contains(t)) allKnown320 = false;
+        }
+        check("v320 pin: an ordinary run's trail is unchanged",
+                Boolean.valueOf(oldTypes320.equals(newTypes320)
+                        && allKnown320),
+                Boolean.TRUE);
+        check("v320 pin: an ordinary run's prompt is unchanged",
+                Boolean.valueOf(!engOld320.prompts.isEmpty()
+                        && !engNew320.prompts.isEmpty()
+                        && engOld320.prompts.get(0).equals(
+                                engNew320.prompts.get(0))),
+                Boolean.TRUE);
+
+        // ---- 40. Pre-R10 trails read without error -------------
+        boolean tolerant = false;
+        try {
+            java.util.List<java.util.Map<String, Object>> chainTrail =
+                    new java.util.ArrayList<java.util.Map<String, Object>>();
+            chainTrail.add(Trail.fields(
+                    "type", "run", "goal", "step two goal",
+                    "pack", "standard", "model", "Q5_K_M",
+                    "grammar_setting", Boolean.FALSE,
+                    "chain_name", "river chain",
+                    "chain_step", Long.valueOf(2),
+                    "chain_total", Long.valueOf(2)));
+            chainTrail.add(Trail.fields(
+                    "type", "chain_seed",
+                    "facts", v320StrList(
+                            "The river is 337 miles long"),
+                    "from_goal", "find the river length",
+                    "from_trail", "trail-prev.jsonl"));
+            chainTrail.add(Trail.fields(
+                    "type", "note",
+                    "fact", "Norris Dam is on it",
+                    "status", Scratchpad.ADDED));
+            chainTrail.add(Trail.fields(
+                    "type", "stop", "reason", "done",
+                    "summary", "Norris Dam is on it"));
+            RunDigest.Digest chainDigest = RunDigest.build(
+                    chainTrail, null);
+            RunCompare.Side chainSide = RunCompare.distill(
+                    chainTrail, null);
+            java.util.List<java.util.Map<String, Object>> eraTrail =
+                    new java.util.ArrayList<java.util.Map<String, Object>>();
+            eraTrail.add(Trail.fields(
+                    "type", "run", "goal", "watch the shop page",
+                    "pack", "readonly", "model", "Q5_K_M",
+                    "grammar_setting", Boolean.FALSE));
+            eraTrail.add(Trail.fields(
+                    "type", "page_watch",
+                    "url", "https://shop.test/prices",
+                    "by", "user"));
+            eraTrail.add(Trail.fields(
+                    "type", "download", "filename", "list.pdf",
+                    "status", "saved"));
+            eraTrail.add(Trail.fields(
+                    "type", "stop", "reason", "done",
+                    "summary", "watching"));
+            RunDigest.Digest eraDigest = RunDigest.build(eraTrail,
+                    null);
+            RunCompare.Side eraSide = RunCompare.distill(eraTrail,
+                    null);
+            SavedGoals eraGoals = new SavedGoals();
+            eraGoals.put(v320Goal("watch the shop page",
+                    SavedGoals.NO_SCHEDULE, true));
+            PageWatches eraPw = new PageWatches();
+            eraPw.put(new PageWatches.PageWatch(
+                    "https://shop.test/prices"));
+            java.util.List<MissionBoard.TrailEvents> eraTrails =
+                    new java.util.ArrayList<MissionBoard.TrailEvents>();
+            eraTrails.add(v320Trail("trail-era.jsonl", eraTrail));
+            java.util.List<MissionBoard.Row> eraRows =
+                    MissionBoard.derive(eraGoals, eraPw, eraTrails,
+                            System.currentTimeMillis(),
+                            java.util.TimeZone.getDefault());
+            tolerant = chainDigest.text.contains(
+                            "From the previous step:")
+                    && chainDigest.text.contains(
+                            "- The river is 337 miles long")
+                    && chainSide.finished && eraSide.finished
+                    && eraDigest.text.length() > 0
+                    && eraRows.size() == 2;
+        } catch (Exception e) {
+            tolerant = false;
+        }
+        check("v320 pin: pre-R10 trails board, compare, digest cleanly",
+                Boolean.valueOf(tolerant), Boolean.TRUE);
+
+        // ---- source pins (tree-dependent) ----------------------
+        if (args == null || args.length == 0) return;
+        java.io.File shim320 = new java.io.File(args[0]);
+        java.io.File shimDir320 = shim320.getParentFile();
+        java.io.File v1Dir320 = shimDir320 == null ? null
+                : shimDir320.getParentFile() == null ? null
+                : shimDir320.getParentFile().getParentFile();
+        if (v1Dir320 == null) return;
+        String mainSrc320 = readTestFile(new java.io.File(v1Dir320,
+                "app/src/main/java/com/ghosthands/app/MainActivity.java"));
+        String qaSrc320 = readTestFile(new java.io.File(v1Dir320,
+                "app/src/main/java/com/ghosthands/app/RunQa.java"));
+        String digestSrc320 = readTestFile(new java.io.File(v1Dir320,
+                "app/src/main/java/com/ghosthands/app/RunDigest.java"));
+        if (mainSrc320 == null || qaSrc320 == null
+                || digestSrc320 == null) return;
+        check("v320 nav pin: the drawer lists Mission second",
+                Boolean.valueOf(mainSrc320.contains(
+                        "\"Agent\", \"Mission\", \"Saved Goals\"")),
+                Boolean.TRUE);
+        // ---- 36. The construction pin --------------------------
+        check("v320 qa pin: the Q&A classes reference nothing that acts",
+                Boolean.valueOf(!qaSrc320.contains("Agent")
+                        && !qaSrc320.contains("Governor")
+                        && !qaSrc320.contains("WebView")
+                        && !qaSrc320.contains("startRun")
+                        && !digestSrc320.contains("Agent")
+                        && !digestSrc320.contains("Governor")
+                        && !digestSrc320.contains("WebView")
+                        && !digestSrc320.contains("startRun")),
+                Boolean.TRUE);
+        check("v320 qa: the digest estimator mirrors the loop's",
+                Boolean.valueOf(RunDigest.estTokens("plain text")
+                                == Agent.estTokens("plain text")
+                        && RunDigest.estTokens(
+                                "https://example.com/x 1234567")
+                                == Agent.estTokens(
+                                        "https://example.com/x "
+                                        + "1234567")
+                        && RunDigest.estTokens(
+                                "12 34 56 78 90\nread chars "
+                                + "0-2400 of 9074")
+                                == Agent.estTokens(
+                                        "12 34 56 78 90\nread chars "
+                                        + "0-2400 of 9074")),
+                Boolean.TRUE);
+    }
+
+    // ---------------------------------------------------------------
+    // v3.21 — ART GHOST + BLINK. The painted studio ghost is
+    // the mascot face again (both tiles bitmap, the v3.17
+    // construction) and v3.19's drawn GhostView is retired;
+    // the blink — the drawn run's keeper — swaps each tile
+    // to a closed-eyes cut of the SAME artwork on the
+    // scheduler's cadence. GhostFigure is reduced to that
+    // scheduler (its v3.19 checks survive in v319Tests
+    // above); these checks pin the two adapters the bitmap
+    // swap needs (blinkScaleFor, eyesClosedAt), the assets'
+    // bytes against the prep files, and the construction:
+    // no drawn face in the tree, both tiles wired to blink,
+    // exactly one blink start site behind the pose start,
+    // and reduce motion structurally blink-free (the start
+    // sits after show()'s reduce-motion early return).
+    // ---------------------------------------------------------------
+    private static void v321Tests(String[] args) {
+        // ---- blinkScaleFor: the state's own scale ---------
+        check("v321 blink: the panel waits stare (scale 1.6)",
+                Boolean.valueOf(GhostFigure.blinkScaleFor(
+                                MascotState.APPROVAL_WAITING,
+                                false) == 1.6f
+                        && GhostFigure.blinkScaleFor(
+                                MascotState.ASK_WAITING,
+                                false) == 1.6f),
+                Boolean.TRUE);
+        check("v321 blink: the hero's waits ride the calm scale",
+                Boolean.valueOf(GhostFigure.blinkScaleFor(
+                                MascotState.APPROVAL_WAITING,
+                                true) == 1f
+                        && GhostFigure.blinkScaleFor(
+                                MascotState.ASK_WAITING,
+                                true) == 1f),
+                Boolean.TRUE);
+        check("v321 blink: the droop suspends the blink (scale 0)",
+                Boolean.valueOf(GhostFigure.blinkScaleFor(
+                                MascotState.STOPPED_DENIED,
+                                false) == 0f
+                        && GhostFigure.blinkScaleFor(
+                                MascotState.STOPPED_DENIED,
+                                true) == 0f),
+                Boolean.TRUE);
+        int scaleBad = 0;
+        int[] scaleOnes = { MascotState.IDLE,
+                MascotState.DOWNLOADING, MascotState.RUNNING,
+                MascotState.WATCH_CHANGED, MascotState.FINISHED };
+        for (int i = 0; i < scaleOnes.length; i++) {
+            for (int h = 0; h < 2; h++) {
+                if (GhostFigure.blinkScaleFor(scaleOnes[i],
+                        h == 1) != 1f) scaleBad++;
+            }
+        }
+        check("v321 blink: every other state blinks at scale 1",
+                Integer.valueOf(scaleBad), Integer.valueOf(0));
+
+        // ---- eyesClosedAt: the shape's closed phase -------
+        long start0 = GhostFigure.blinkIntervalMs(0, 1f);
+        check("v321 blink: open before the first blink",
+                Boolean.valueOf(!GhostFigure.eyesClosedAt(0, 1f)
+                        && !GhostFigure.eyesClosedAt(1000, 1f)),
+                Boolean.TRUE);
+        check("v321 blink: shut at the first blink's bottom",
+                Boolean.valueOf(GhostFigure.eyesClosedAt(
+                        start0 + GhostFigure.BLINK_CLOSE_MS, 1f)),
+                Boolean.TRUE);
+        check("v321 blink: open again between blinks",
+                Boolean.valueOf(!GhostFigure.eyesClosedAt(
+                        start0 + GhostFigure.BLINK_TOTAL_MS + 400,
+                        1f)),
+                Boolean.TRUE);
+        int dbl = -1;
+        for (int k = 0; k < 100 && dbl < 0; k++) {
+            if (GhostFigure.isDoubleBlink(k)) dbl = k;
+        }
+        long dblStart = GhostFigure.blinkIntervalMs(0, 1f);
+        for (int i = 0; i < dbl; i++) {
+            dblStart += GhostFigure.blinkIntervalMs(i + 1, 1f);
+        }
+        check("v321 blink: a double shuts twice, open between",
+                Boolean.valueOf(dbl >= 0
+                        && GhostFigure.eyesClosedAt(
+                                dblStart + 70, 1f)
+                        && !GhostFigure.eyesClosedAt(
+                                dblStart + 120, 1f)
+                        && GhostFigure.eyesClosedAt(
+                                dblStart + GhostFigure.DOUBLE_GAP_MS
+                                        + 70, 1f)),
+                Boolean.TRUE);
+        check("v321 blink: the waiting scale delays the first shut",
+                Boolean.valueOf(!GhostFigure.eyesClosedAt(
+                                start0 + GhostFigure.BLINK_CLOSE_MS,
+                                1.6f)
+                        && GhostFigure.eyesClosedAt(
+                                GhostFigure.blinkIntervalMs(0, 1.6f)
+                                        + GhostFigure.BLINK_CLOSE_MS,
+                                1.6f)),
+                Boolean.TRUE);
+        int suspBad = 0;
+        long[] suspTimes = { 0, 70, 1000, 5000, 60000, 3600000 };
+        for (int i = 0; i < suspTimes.length; i++) {
+            if (GhostFigure.eyesClosedAt(suspTimes[i], 0f)) {
+                suspBad++;
+            }
+            if (GhostFigure.eyesClosedAt(suspTimes[i], -1f)) {
+                suspBad++;
+            }
+        }
+        check("v321 blink: a suspended scale never shuts",
+                Integer.valueOf(suspBad), Integer.valueOf(0));
+        int closedSamples = 0, totalSamples = 0;
+        for (long t = 0; t < 120000; t += 37) {
+            totalSamples++;
+            if (GhostFigure.eyesClosedAt(t, 1f)) closedSamples++;
+        }
+        check("v321 blink: the closed phase is a small share",
+                Boolean.valueOf(totalSamples > 0
+                        && closedSamples * 20 < totalSamples),
+                Boolean.TRUE);
+
+        if (args == null || args.length == 0) return;
+        String v1Dir = new java.io.File(args[0]).getParentFile()
+                .getParentFile().getParentFile().getPath();
+        java.io.File appDir = new java.io.File(v1Dir,
+                "app/src/main/java/com/ghosthands/app");
+        java.io.File resDir = new java.io.File(v1Dir,
+                "app/src/main/res/drawable-nodpi");
+        java.io.File prepDir = new java.io.File(v1Dir,
+                "../mascot-prep/blink");
+        String mainSrc = readTestFile(
+                new java.io.File(appDir, "MainActivity.java"));
+        String figureSrc = readTestFile(
+                new java.io.File(appDir, "GhostFigure.java"));
+        if (mainSrc == null || figureSrc == null) return;
+
+        // ---- the assets: bytes pinned to the prep files ---
+        check("v321 art: the header blink cut is the prep file",
+                Boolean.valueOf(sameFileBytes(
+                        new java.io.File(resDir,
+                                "mascot_header_blink.png"),
+                        new java.io.File(prepDir,
+                                "mascot-header-blink.png"))),
+                Boolean.TRUE);
+        check("v321 art: the hero blink cut is the prep file",
+                Boolean.valueOf(sameFileBytes(
+                        new java.io.File(resDir,
+                                "mascot_hero_blink.png"),
+                        new java.io.File(prepDir,
+                                "mascot-hero-blink.png"))),
+                Boolean.TRUE);
+        check("v321 art: all four cuts bundled at their sizes",
+                Boolean.valueOf(new java.io.File(resDir,
+                                "mascot_header.png").length()
+                                        == 146404L
+                        && new java.io.File(resDir,
+                                "mascot_header_blink.png")
+                                        .length() == 152284L
+                        && new java.io.File(resDir,
+                                "mascot_hero.png").length()
+                                        == 510035L
+                        && new java.io.File(resDir,
+                                "mascot_hero_blink.png")
+                                        .length() == 531703L),
+                Boolean.TRUE);
+
+        // ---- source pins: the construction ----------------
+        check("v321 pins: no drawn face in the shipped tree",
+                Boolean.valueOf(!new java.io.File(appDir,
+                                "GhostView.java").exists()
+                        && !mainSrc.contains("GhostView")
+                        && !figureSrc.contains("frameFor")
+                        && !figureSrc.contains("figureFor")),
+                Boolean.TRUE);
+        check("v321 pins: both tiles are bitmap, both wired to blink",
+                Boolean.valueOf(mainSrc.contains(
+                                "ImageView mascotView = mascotBitmapTile();")
+                        && mainSrc.contains(
+                                "mascotDrawableId(\"mascot_header_blink\")")
+                        && mainSrc.contains(
+                                "mascotDrawableId(\"mascot_hero_blink\")")),
+                Boolean.TRUE);
+        check("v321 pins: one blink start, behind the pose start",
+                Boolean.valueOf(countOccurrences(
+                                mainSrc, "startBlink") == 2
+                        && countOccurrences(
+                                mainSrc, "startBlink(state);") == 1
+                        && mainSrc.indexOf("startBlink(state);")
+                                > mainSrc.indexOf(
+                                        "startPose(pose, state);")),
+                Boolean.TRUE);
+        check("v321 pins: reduce motion is blink-free by construction",
+                Boolean.valueOf(mainSrc.indexOf(
+                                "startBlink(state);")
+                                > mainSrc.indexOf("if (reduce) {")
+                        && mainSrc.indexOf("if (reduce) {")
+                                > mainSrc.indexOf(
+                                        "void show(final int displayState")),
+                Boolean.TRUE);
+        check("v321 pins: every stop restores the open cut",
+                Boolean.valueOf(countOccurrences(
+                                mainSrc, "stopBlink();") >= 2
+                        && mainSrc.contains(
+                                "tile.setImageResource(openRes);")),
+                Boolean.TRUE);
+        check("v321 pins: the ticker reads the scheduler at 30 ms",
+                Boolean.valueOf(mainSrc.contains(
+                                "GhostFigure.eyesClosedAt(")
+                        && mainSrc.contains(
+                                "BLINK_TICK_MS = 30")),
+                Boolean.TRUE);
+    }
+
+    // =====================================================================
+    // v3.22 (Everything Train R11): run reports, the templates
+    // shelf, share intake, and the QS tile. The numbered groups
+    // mirror the R11 plan's test list (§9.1–§9.31).
+    // =====================================================================
+
+    /** One scripted finished run's trail, in the loop's own
+     *  record shapes — the report tests' fixture. */
+    private static com.ghosthands.app.Trail v322Trail() {
+        com.ghosthands.app.Trail t =
+                new com.ghosthands.app.Trail(null);
+        t.record("run", 0, com.ghosthands.app.Trail.fields(
+                "goal", "Find the cheapest flight to Denver",
+                "pack", "standard",
+                "model", "qwen25-q5"));
+        t.record("perceive", 1, com.ghosthands.app.Trail.fields(
+                "url", "https://example.com/flights",
+                "title", "Flights"));
+        java.util.Map<String, Object> tap =
+                new java.util.LinkedHashMap<String, Object>();
+        tap.put("action", "tap");
+        tap.put("el", Long.valueOf(3));
+        t.record("decide", 1, com.ghosthands.app.Trail.fields(
+                "action", tap));
+        t.record("govern", 1, com.ghosthands.app.Trail.fields(
+                "classification", "read",
+                "outcome", "allow",
+                "reason", ""));
+        t.record("execute", 1, com.ghosthands.app.Trail.fields(
+                "action", tap));
+        t.record("note", 1, com.ghosthands.app.Trail.fields(
+                "fact", "Denver fare is $212 on Frontier",
+                "url", "https://example.com/flights",
+                "title", "Flights",
+                "status", "added"));
+        java.util.Map<String, Object> rf =
+                new java.util.LinkedHashMap<String, Object>();
+        rf.put("action", "read_file");
+        rf.put("name", "prices.csv");
+        t.record("decide", 2, com.ghosthands.app.Trail.fields(
+                "action", rf));
+        t.record("execute", 2, com.ghosthands.app.Trail.fields(
+                "action", rf));
+        t.record("ask", 3, com.ghosthands.app.Trail.fields(
+                "question", "Which airport?"));
+        t.record("answer", 3, com.ghosthands.app.Trail.fields(
+                "question", "Which airport?",
+                "answer", "DEN",
+                "provenance", "USER"));
+        t.record("govern", 4, com.ghosthands.app.Trail.fields(
+                "classification", "write",
+                "outcome", "ask",
+                "reason", "consequential"));
+        t.record("approval", 4, com.ghosthands.app.Trail.fields(
+                "phase", "decision",
+                "classification", "write",
+                "approved", Boolean.TRUE));
+        t.record("download", 4, com.ghosthands.app.Trail.fields(
+                "filename", "fares.pdf",
+                "mime", "application/pdf",
+                "bytes", Long.valueOf(2048),
+                "url", "https://example.com/fares.pdf",
+                "class", "write",
+                "outcome", "allow",
+                "status", "saved"));
+        t.record("assist", 4, com.ghosthands.app.Trail.fields(
+                "phase", "offered",
+                "reason", "stuck"));
+        t.record("assist", 4, com.ghosthands.app.Trail.fields(
+                "phase", "declined",
+                "reason", "stuck"));
+        t.record("step_screenshot", 2,
+                com.ghosthands.app.Trail.fields(
+                        "file", "trail-x-step2.jpg"));
+        t.record("screenshot", 0,
+                com.ghosthands.app.Trail.fields(
+                        "file", "trail-x.jpg"));
+        t.record("stop", 4, com.ghosthands.app.Trail.fields(
+                "reason", "done",
+                "summary", "Cheapest is $212 on Frontier."));
+        t.record("run_summary", 4,
+                com.ghosthands.app.Trail.fields(
+                        "steps", Long.valueOf(4),
+                        "seconds", Long.valueOf(95),
+                        "reuse_percent", Long.valueOf(40)));
+        return t;
+    }
+
+    private static void v322Tests(String[] args) {
+        long now = 1792800000000L;
+
+        // ---- §9.1: a scripted done trail renders in full ----
+        com.ghosthands.app.Trail t1 = v322Trail();
+        java.util.List<java.util.Map<String, Object>> evs1 =
+                t1.events();
+        AnswerCard card1 = AnswerCard.fromEvents(evs1, null);
+        String html1 = RunReport.render(card1, evs1,
+                new java.util.ArrayList<RunReport.Image>(),
+                new java.util.ArrayList<String>(), now);
+        check("v322 report: the header carries goal, outcome, stats",
+                Boolean.valueOf(html1.contains(
+                                "Find the cheapest flight to Denver")
+                        && html1.contains(
+                                "Answer: Cheapest is $212 on Frontier.")
+                        && html1.contains("4 steps")
+                        && html1.contains("95 s")
+                        && html1.contains("Policy: standard")
+                        && html1.contains("Model: qwen25-q5")),
+                Boolean.TRUE);
+        check("v322 report: the header counts approvals and downloads",
+                Boolean.valueOf(html1.contains("1 approval asked")
+                        && html1.contains("1 download")),
+                Boolean.TRUE);
+        check("v322 report: facts carry their page stamps, source links",
+                Boolean.valueOf(html1.contains(
+                                "Denver fare is $212 on Frontier")
+                        && html1.contains(
+                                "href=\"https://example.com/flights\"")
+                        && html1.contains("Flights")),
+                Boolean.TRUE);
+        check("v322 report: no JavaScript anywhere in the document",
+                Boolean.valueOf(!html1.contains("<script")
+                        && !html1.contains("javascript:")),
+                Boolean.TRUE);
+
+        // ---- §9.2: escaping — trail text is hostile ----
+        com.ghosthands.app.Trail t2 =
+                new com.ghosthands.app.Trail(null);
+        t2.record("run", 0, com.ghosthands.app.Trail.fields(
+                "goal", "x <script>alert(1)</script> & \"q\"",
+                "pack", "standard", "model", "m"));
+        t2.record("perceive", 1, com.ghosthands.app.Trail.fields(
+                "url", "https://example.com/",
+                "title", "T <b>bold</b>"));
+        t2.record("note", 1, com.ghosthands.app.Trail.fields(
+                "fact", "fact <script>bad()</script> & 'quotes'",
+                "url", "https://example.com/",
+                "title", "T <b>bold</b>",
+                "status", "added"));
+        t2.record("stop", 1, com.ghosthands.app.Trail.fields(
+                "reason", "done", "summary", "ok"));
+        AnswerCard card2 = AnswerCard.fromEvents(t2.events(), null);
+        String html2 = RunReport.render(card2, t2.events(),
+                new java.util.ArrayList<RunReport.Image>(),
+                new java.util.ArrayList<String>(), now);
+        check("v322 report: markup in goal, fact, title renders inert",
+                Boolean.valueOf(!html2.contains("<script")
+                        && html2.contains("&lt;script&gt;")
+                        && html2.contains("&amp;")
+                        && html2.contains("&quot;q&quot;")
+                        && html2.contains("&#39;quotes&#39;")
+                        && html2.contains("&lt;b&gt;bold&lt;/b&gt;")),
+                Boolean.TRUE);
+        check("v322 esc: the five, in one pass",
+                RunReport.esc("<a & \"b\" 'c'>"),
+                "&lt;a &amp; &quot;b&quot; &#39;c&#39;&gt;");
+
+        // ---- §9.3: href discipline ----
+        check("v322 report: only parsed http(s) with a host links",
+                Boolean.valueOf(RunReport.linkable(
+                                "https://example.com/x")
+                        && RunReport.linkable(
+                                "http://example.com")
+                        && !RunReport.linkable(
+                                "javascript:alert(1)")
+                        && !RunReport.linkable(
+                                "file:///etc/passwd")
+                        && !RunReport.linkable("example.com")
+                        && !RunReport.linkable("https://")
+                        && !RunReport.linkable("")),
+                Boolean.TRUE);
+        com.ghosthands.app.Trail t3 =
+                new com.ghosthands.app.Trail(null);
+        t3.record("perceive", 1, com.ghosthands.app.Trail.fields(
+                "url", "javascript:alert(1)",
+                "title", "x"));
+        t3.record("stop", 1, com.ghosthands.app.Trail.fields(
+                "reason", "done", "summary", "ok"));
+        AnswerCard card3 = AnswerCard.fromEvents(t3.events(), "g");
+        String html3 = RunReport.render(card3, t3.events(),
+                new java.util.ArrayList<RunReport.Image>(),
+                new java.util.ArrayList<String>(), now);
+        check("v322 report: a javascript: source renders as text",
+                Boolean.valueOf(!html3.contains("href=\"javascript:")
+                        && html3.contains("javascript:alert(1)")),
+                Boolean.TRUE);
+
+        // ---- §9.4: timeline coverage, order, skipping ----
+        check("v322 report: the timeline lines appear in trail order",
+                Boolean.valueOf(html1.indexOf("Run started") >= 0
+                        && html1.indexOf("Run started")
+                                < html1.indexOf("decided: tap #3")
+                        && html1.indexOf("decided: tap #3")
+                                < html1.indexOf("noted: Denver fare")
+                        && html1.indexOf("noted: Denver fare")
+                                < html1.indexOf("asked you: Which airport?")
+                        && html1.indexOf("asked you: Which airport?")
+                                < html1.indexOf("You answered: DEN")
+                        && html1.indexOf("You answered: DEN")
+                                < html1.indexOf("policy: write")
+                        && html1.indexOf("policy: write")
+                                < html1.indexOf("you approved this step")
+                        && html1.indexOf("you approved this step")
+                                < html1.indexOf("Download: fares.pdf")
+                        && html1.contains(
+                                "read file &quot;prices.csv&quot;")
+                        && html1.contains("co-pilot offered")
+                        && html1.contains("co-pilot declined")
+                        && html1.indexOf("Download: fares.pdf")
+                                < html1.indexOf("Run ended:")),
+                Boolean.TRUE);
+        com.ghosthands.app.Trail t4 = v322Trail();
+        t4.record("fit", 1, com.ghosthands.app.Trail.fields(
+                "rungs", "ZZFITMARKER"));
+        java.util.List<java.util.Map<String, Object>> evs4 =
+                new java.util.ArrayList<java.util.Map<String, Object>>(
+                        t4.events());
+        java.util.Map<String, Object> future =
+                new java.util.LinkedHashMap<String, Object>();
+        future.put("type", "future_thing");
+        future.put("step", Long.valueOf(9));
+        future.put("marker", "ZZFUTUREMARKER");
+        evs4.add(future);
+        AnswerCard card4 = AnswerCard.fromEvents(evs4, null);
+        String html4 = RunReport.render(card4, evs4,
+                new java.util.ArrayList<RunReport.Image>(),
+                new java.util.ArrayList<String>(), now);
+        check("v322 report: internals and unknown types print nothing",
+                Boolean.valueOf(!html4.contains("ZZFITMARKER")
+                        && !html4.contains("ZZFUTUREMARKER")
+                        && html4.contains("Run ended:")),
+                Boolean.TRUE);
+
+        // ---- §9.5: tab events collapse ----
+        com.ghosthands.app.Trail t5 = v322Trail();
+        t5.record("tab_opened", 2, com.ghosthands.app.Trail.fields(
+                "tab", Long.valueOf(2),
+                "url", "https://example.com/a", "via", "planner"));
+        t5.record("tab_switched", 2,
+                com.ghosthands.app.Trail.fields(
+                        "tab", Long.valueOf(2),
+                        "url", "https://example.com/a"));
+        t5.record("tab_opened", 3, com.ghosthands.app.Trail.fields(
+                "tab", Long.valueOf(3),
+                "url", "https://example.com/b", "via", "planner"));
+        t5.record("tab_closed", 3, com.ghosthands.app.Trail.fields(
+                "tab", Long.valueOf(3),
+                "url", "https://example.com/b",
+                "active", Long.valueOf(1)));
+        AnswerCard card5 = AnswerCard.fromEvents(t5.events(), null);
+        String html5 = RunReport.render(card5, t5.events(),
+                new java.util.ArrayList<RunReport.Image>(),
+                new java.util.ArrayList<String>(), now);
+        check("v322 report: tab events fold into one counts line",
+                Boolean.valueOf(countOccurrences(html5, "Tabs:") == 1
+                        && html5.contains(
+                                "Tabs: 2 opened, 1 switched, 1 closed")),
+                Boolean.TRUE);
+
+        // ---- §9.6: the watch section ----
+        com.ghosthands.app.Trail t6 = v322Trail();
+        java.util.List<Object> diff6 = new java.util.ArrayList<Object>();
+        diff6.add("Denver fare: $212 → $198");
+        t6.record("watch", 4, com.ghosthands.app.Trail.fields(
+                "goal_name", "Fare watch",
+                "verdict", "changed",
+                "since_ms", Long.valueOf(1792700000000L),
+                "diff", diff6,
+                "page_watch", Boolean.TRUE));
+        AnswerCard card6 = AnswerCard.fromEvents(t6.events(), null);
+        String html6 = RunReport.render(card6, t6.events(),
+                new java.util.ArrayList<RunReport.Image>(),
+                new java.util.ArrayList<String>(), now);
+        check("v322 report: the watch section renders verdict and diff",
+                Boolean.valueOf(html6.contains("<h2>Watch</h2>")
+                        && html6.contains("Watch: changed")
+                        && html6.contains(
+                                "Denver fare: $212 → $198")),
+                Boolean.TRUE);
+        com.ghosthands.app.Trail t6b = v322Trail();
+        java.util.List<Object> diff6b =
+                new java.util.ArrayList<Object>();
+        diff6b.add("Denver fare: $212 → $198");
+        t6b.record("watch", 4, com.ghosthands.app.Trail.fields(
+                "goal_name", "Fare watch",
+                "verdict", "changed",
+                "since_ms", Long.valueOf(1792700000000L),
+                "diff", diff6b,
+                "quiet", Boolean.TRUE));
+        AnswerCard card6b = AnswerCard.fromEvents(t6b.events(), null);
+        String html6b = RunReport.render(card6b, t6b.events(),
+                new java.util.ArrayList<RunReport.Image>(),
+                new java.util.ArrayList<String>(), now);
+        check("v322 report: a quiet-hours verdict is worded as the card words it",
+                Boolean.valueOf(html6b.contains(
+                        "Arrived during quiet hours")),
+                Boolean.TRUE);
+        check("v322 report: no watch event, no watch section",
+                Boolean.valueOf(!html1.contains("<h2>Watch</h2>")),
+                Boolean.TRUE);
+
+        // ---- §9.7: seeded facts keep their own group ----
+        com.ghosthands.app.Trail t7 =
+                new com.ghosthands.app.Trail(null);
+        t7.record("run", 0, com.ghosthands.app.Trail.fields(
+                "goal", "Step two", "pack", "standard",
+                "model", "m"));
+        java.util.List<Object> seeds =
+                new java.util.ArrayList<Object>();
+        seeds.add("Seed fact A");
+        t7.record("chain_seed", 0,
+                com.ghosthands.app.Trail.fields(
+                        "from_goal", "Step one goal",
+                        "facts", seeds));
+        t7.record("perceive", 1, com.ghosthands.app.Trail.fields(
+                "url", "https://example.com/", "title", "P"));
+        t7.record("note", 1, com.ghosthands.app.Trail.fields(
+                "fact", "Own fact B",
+                "url", "https://example.com/", "title", "P",
+                "status", "added"));
+        t7.record("stop", 1, com.ghosthands.app.Trail.fields(
+                "reason", "done", "summary", "ok"));
+        AnswerCard card7 = AnswerCard.fromEvents(t7.events(), null);
+        String html7 = RunReport.render(card7, t7.events(),
+                new java.util.ArrayList<RunReport.Image>(),
+                new java.util.ArrayList<String>(), now);
+        check("v322 report: seeded facts render under their own heading",
+                Boolean.valueOf(html7.contains(
+                                "From the previous step:")
+                        && html7.indexOf("Own fact B")
+                                < html7.indexOf(
+                                        "From the previous step:")
+                        && html7.indexOf(
+                                        "From the previous step:")
+                                < html7.indexOf("Seed fact A")),
+                Boolean.TRUE);
+        check("v322 report: a chain-free trail has no seeded group",
+                Boolean.valueOf(!html1.contains(
+                        "From the previous step:")),
+                Boolean.TRUE);
+
+        // ---- §9.8: sparse trails render with the fallbacks ----
+        com.ghosthands.app.Trail t8 =
+                new com.ghosthands.app.Trail(null);
+        t8.record("stop", 2, com.ghosthands.app.Trail.fields(
+                "reason", "stuck", "summary", "no way forward"));
+        AnswerCard card8 = AnswerCard.fromEvents(t8.events(),
+                "Fallback goal");
+        String html8 = RunReport.render(card8, t8.events(),
+                new java.util.ArrayList<RunReport.Image>(),
+                new java.util.ArrayList<String>(), now);
+        check("v322 report: a sparse trail renders, sections absent",
+                Boolean.valueOf(html8.contains("Fallback goal")
+                        && html8.contains("Outcome: Got stuck")
+                        && !html8.contains("Facts noted:")
+                        && !html8.contains("<h2>Watch</h2>")
+                        && !html8.contains("<h2>Screenshots</h2>")),
+                Boolean.TRUE);
+
+        // ---- §9.9–9.11: the image plan and its ladder ----
+        RunReport.ImagePlan planA = RunReport.planImages(3,
+                new long[]{100, 100, 100},
+                new long[]{50, 50, 50}, 1000);
+        check("v322 plan: order kept — end first, steps in order, under cap",
+                Boolean.valueOf(planA.includedCount == 3
+                        && planA.rung == 0
+                        && planA.notes.isEmpty()),
+                Boolean.TRUE);
+        RunReport.ImagePlan planB = RunReport.planImages(10,
+                new long[]{100, 100, 100, 100, 100, 100, 100,
+                        100, 100, 100},
+                null, 1000);
+        check("v322 plan: beyond the cap the tail drops, the note names the count",
+                Boolean.valueOf(planB.includedCount
+                                == RunReport.MAX_IMAGES
+                        && planB.rung == 1
+                        && planB.notes.size() == 1
+                        && planB.notes.get(0).contains(
+                                "2 step screenshots omitted")),
+                Boolean.TRUE);
+        RunReport.ImagePlan planC = RunReport.planImages(2,
+                new long[]{3000000, 3000000},
+                new long[]{1000000, 1000000}, 1000);
+        check("v322 plan: rung 2 re-encodes smaller before anything drops",
+                Boolean.valueOf(planC.includedCount == 2
+                        && planC.rung == 2
+                        && planC.notes.size() == 1),
+                Boolean.TRUE);
+        RunReport.ImagePlan planD = RunReport.planImages(3,
+                new long[]{4000000, 4000000, 4000000},
+                new long[]{4500000, 400000, 400000}, 1000);
+        check("v322 plan: rung 3 drops the steps, keeping the end shot",
+                Boolean.valueOf(planD.includedCount == 1
+                        && planD.rung == 3
+                        && planD.notes.size() == 2),
+                Boolean.TRUE);
+        RunReport.ImagePlan planE = RunReport.planImages(1,
+                new long[]{9000000},
+                new long[]{9000000}, 1000);
+        check("v322 plan: rung 4 drops the end shot and still ships",
+                Boolean.valueOf(planE.includedCount == 0
+                        && planE.rung == 4
+                        && planE.notes.get(planE.notes.size() - 1)
+                                .contains("Screenshots omitted")),
+                Boolean.TRUE);
+        check("v322 plan: a shot the store pruned is omitted silently",
+                Boolean.valueOf(html1.contains(
+                                "End-of-run screenshot taken "
+                                        + "(not in this report)")
+                        && !html1.contains(
+                                "<h2>Screenshots</h2>")),
+                Boolean.TRUE);
+        java.util.List<RunReport.Image> imgs =
+                new java.util.ArrayList<RunReport.Image>();
+        imgs.add(new RunReport.Image("trail-x.jpg", 0, true,
+                "QUJD"));
+        String htmlImg = RunReport.render(card1, evs1, imgs,
+                new java.util.ArrayList<String>(), now);
+        check("v322 plan: an embedded shot is captioned and marked embedded",
+                Boolean.valueOf(htmlImg.contains(
+                                "<h2>Screenshots</h2>")
+                        && htmlImg.contains(
+                                "data:image/jpeg;base64,QUJD")
+                        && htmlImg.contains("End of run")
+                        && htmlImg.contains(
+                                "End-of-run screenshot taken "
+                                        + "(embedded below)")),
+                Boolean.TRUE);
+
+        // ---- §9.12: naming + retention ----
+        check("v322 report: the file name rides the trail's name",
+                Boolean.valueOf("report-trail-20261025-123456.html"
+                        .equals(RunReport.fileNameForTrail(
+                                "trail-20261025-123456.jsonl"))
+                        && "report-trail-a.html".equals(
+                                RunReport.fileNameForTrail(
+                                        "/x/trail-a.jsonl"))
+                        && RunReport.fileNameForTrail(null)
+                                == null
+                        && RunReport.fileNameForTrail("")
+                                == null),
+                Boolean.TRUE);
+        java.util.List<String> names25 =
+                new java.util.ArrayList<String>();
+        for (int i = 1; i <= 25; i++) {
+            names25.add("report-"
+                    + (i < 10 ? "0" : "") + i + ".html");
+        }
+        java.util.List<String> excess25 = RunReport.excess(names25);
+        check("v322 report: retention keeps the newest 20",
+                Boolean.valueOf(excess25.size() == 5
+                        && "report-01.html".equals(excess25.get(0))
+                        && RunReport.excess(names25.subList(0, 20))
+                                .isEmpty()),
+                Boolean.TRUE);
+
+        // ---- §9.13–9.15: the DlProvider's second root ----
+        java.util.List<String> segDl =
+                new java.util.ArrayList<String>();
+        segDl.add("fares.pdf");
+        java.util.List<String> segRep =
+                new java.util.ArrayList<String>();
+        segRep.add("reports");
+        segRep.add("report-x.html");
+        java.util.List<String> segBareReports =
+                new java.util.ArrayList<String>();
+        segBareReports.add("reports");
+        check("v322 provider: a reports URI routes to the reports root",
+                Boolean.valueOf(DlProvider.rootForSegments(segRep)
+                                == DlProvider.ROOT_REPORTS
+                        && DlProvider.rootForSegments(segDl)
+                                == DlProvider.ROOT_DOWNLOADS
+                        && DlProvider.rootForSegments(
+                                        segBareReports)
+                                == DlProvider.ROOT_DOWNLOADS),
+                Boolean.TRUE);
+        java.util.List<java.util.List<String>> badShapes =
+                new java.util.ArrayList<java.util.List<String>>();
+        badShapes.add(new java.util.ArrayList<String>());
+        badShapes.add(null);
+        java.util.List<String> b2 = new java.util.ArrayList<String>();
+        b2.add("downloads");
+        b2.add("x.html");
+        badShapes.add(b2);
+        java.util.List<String> b3 = new java.util.ArrayList<String>();
+        b3.add("reports");
+        b3.add("a");
+        b3.add("b.html");
+        badShapes.add(b3);
+        java.util.List<String> b4 = new java.util.ArrayList<String>();
+        b4.add("..");
+        badShapes.add(b4);
+        java.util.List<String> b5 = new java.util.ArrayList<String>();
+        b5.add("reports");
+        b5.add("..");
+        badShapes.add(b5);
+        int badOk = 0;
+        for (int i = 0; i < badShapes.size(); i++) {
+            if (DlProvider.rootForSegments(badShapes.get(i)) < 0) {
+                badOk++;
+            }
+        }
+        check("v322 provider: the traversal table names nothing",
+                Boolean.valueOf(badOk == badShapes.size()
+                        && !DlProvider.bareName("..")
+                        && !DlProvider.bareName("a/b")
+                        && !DlProvider.bareName("a\\b")
+                        && !DlProvider.bareName("a..b")
+                        && !DlProvider.bareName("")
+                        && DlProvider.bareName("report-x.html")),
+                Boolean.TRUE);
+        check("v322 provider: a report name's type is text/html",
+                Downloads.mimeForName("report-x.html"),
+                "text/html");
+
+        // Source files for the manifest / provider / seam pins.
+        java.io.File shimF = (args == null || args.length == 0)
+                ? null : new java.io.File(args[0]);
+        java.io.File shimDirF = (shimF == null) ? null
+                : shimF.getParentFile();
+        java.io.File v1DirF = (shimDirF == null) ? null
+                : shimDirF.getParentFile() == null ? null
+                : shimDirF.getParentFile().getParentFile();
+        String manifest = (v1DirF == null) ? null
+                : readTestFile(new java.io.File(v1DirF,
+                        "app/src/main/AndroidManifest.xml"));
+        String mainSrc = (v1DirF == null) ? null
+                : readTestFile(new java.io.File(v1DirF,
+                        "app/src/main/java/com/ghosthands/app/"
+                                + "MainActivity.java"));
+        String providerSrc = (v1DirF == null) ? null
+                : readTestFile(new java.io.File(v1DirF,
+                        "app/src/main/java/com/ghosthands/app/"
+                                + "DlProvider.java"));
+        if (providerSrc != null) {
+            check("v322 provider: write modes are refused on both roots",
+                    Boolean.valueOf(providerSrc.contains(
+                                    "the file store is read-only")
+                            && providerSrc.contains(
+                                    "ROOT_REPORTS")),
+                    Boolean.TRUE);
+        }
+
+        // ---- §9.16–9.20: the templates catalogue ----
+        java.util.List<GoalTemplates.Template> cat =
+                GoalTemplates.all();
+        check("v322 templates: exactly four, ids unique",
+                Boolean.valueOf(cat.size() == 4
+                        && GoalTemplates.find("fare_watch") != null
+                        && GoalTemplates.find("forecast") != null
+                        && GoalTemplates.find("restock") != null
+                        && GoalTemplates.find("headlines") != null),
+                Boolean.TRUE);
+        int sweepBad = 0;
+        for (int i = 0; i < cat.size(); i++) {
+            GoalTemplates.Template t = cat.get(i);
+            String text = GoalTemplates.KIND_PAGE_WATCH
+                    .equals(t.kind) ? "{url}" : t.goalText;
+            for (int j = 0; j < t.slots.length; j++) {
+                if (!text.contains("{" + t.slots[j].key + "}")) {
+                    sweepBad++;
+                }
+            }
+            // every placeholder has a slot definition
+            int open = 0;
+            while ((open = text.indexOf('{', open)) >= 0) {
+                int close = text.indexOf('}', open);
+                if (close < 0) { sweepBad++; break; }
+                String key = text.substring(open + 1, close);
+                if (t.slot(key) == null) sweepBad++;
+                open = close + 1;
+            }
+        }
+        check("v322 templates: every placeholder has a slot, every slot is used",
+                Integer.valueOf(sweepBad), Integer.valueOf(0));
+        java.util.Map<String, String> fareVals =
+                new java.util.LinkedHashMap<String, String>();
+        fareVals.put("from", "Knoxville");
+        fareVals.put("to", "Denver");
+        fareVals.put("date", "Nov 14");
+        check("v322 templates: the fare watch substitutes golden",
+                GoalTemplates.substitute(
+                        GoalTemplates.find("fare_watch"), fareVals),
+                "Search for flights from Knoxville to Denver "
+                        + "for around Nov 14. Report the cheapest "
+                        + "fares you find, with the airline and "
+                        + "departure times for each.");
+        java.util.Map<String, String> fcVals =
+                new java.util.LinkedHashMap<String, String>();
+        fcVals.put("place", "Oakdale, TN");
+        check("v322 templates: the forecast substitutes golden",
+                GoalTemplates.substitute(
+                        GoalTemplates.find("forecast"), fcVals),
+                "Open the weather forecast for Oakdale, TN and "
+                        + "report today's high, low, and chance "
+                        + "of rain.");
+        java.util.Map<String, String> rsVals =
+                new java.util.LinkedHashMap<String, String>();
+        rsVals.put("url", " https://shop.example.com/widget ");
+        check("v322 templates: the restock watch URL substitutes golden",
+                GoalTemplates.watchUrl(
+                        GoalTemplates.find("restock"), rsVals),
+                "https://shop.example.com/widget");
+        java.util.Map<String, String> hlVals =
+                new java.util.LinkedHashMap<String, String>();
+        hlVals.put("site", "https://news.example.com");
+        check("v322 templates: the headlines goal substitutes golden",
+                GoalTemplates.substitute(
+                        GoalTemplates.find("headlines"), hlVals),
+                "Open https://news.example.com and list the top "
+                        + "headlines right now, with a one-line "
+                        + "summary of each.");
+        java.util.Map<String, String> blankVals =
+                new java.util.LinkedHashMap<String, String>();
+        blankVals.put("from", "  ");
+        blankVals.put("to", "Denver");
+        blankVals.put("date", "Nov 14");
+        check("v322 templates: a blank required slot is refused per-slot",
+                GoalTemplates.validate(
+                        GoalTemplates.find("fare_watch"), blankVals),
+                "From is needed.");
+        StringBuilder longSite = new StringBuilder();
+        for (int i = 0; i < 61; i++) longSite.append("x");
+        java.util.Map<String, String> longVals =
+                new java.util.LinkedHashMap<String, String>();
+        longVals.put("site", longSite.toString());
+        check("v322 templates: an over-cap value is refused",
+                GoalTemplates.validate(
+                        GoalTemplates.find("headlines"), longVals),
+                "Site is too long (max 60 characters).");
+        GoalTemplates.Template fare = GoalTemplates.find("fare_watch");
+        GoalTemplates.Template fc = GoalTemplates.find("forecast");
+        GoalTemplates.Template rs = GoalTemplates.find("restock");
+        GoalTemplates.Template hl = GoalTemplates.find("headlines");
+        check("v322 templates: the suggestions are pinned",
+                Boolean.valueOf(fare.watchSuggested
+                        && fare.schedSuggested == 420
+                        && fc.watchSuggested
+                        && fc.schedSuggested == 420
+                        && !hl.watchSuggested
+                        && hl.schedSuggested
+                                == SavedGoals.NO_SCHEDULE
+                        && GoalTemplates.KIND_PAGE_WATCH
+                                .equals(rs.kind)
+                        && rs.schedSuggested
+                                == SavedGoals.NO_SCHEDULE),
+                Boolean.TRUE);
+        GoalTemplates.EditorBundle bundle =
+                GoalTemplates.editorBundle(fare, fareVals,
+                        "strict");
+        check("v322 templates: the editor bundle maps, storing nothing",
+                Boolean.valueOf(bundle != null
+                        && "Fare watch".equals(bundle.name)
+                        && bundle.goal.contains("Knoxville")
+                        && "strict".equals(bundle.packId)
+                        && bundle.watched
+                        && bundle.schedMinutes == 420
+                        && GoalTemplates.editorBundle(rs, rsVals,
+                                "strict") == null
+                        && GoalTemplates.editorBundle(fare,
+                                blankVals, "strict") == null),
+                Boolean.TRUE);
+
+        // ---- §9.21–9.23: pending-baseline page watches ----
+        PageWatches store = new PageWatches();
+        PageWatches.PageWatch pending =
+                new PageWatches.PageWatch(
+                        "https://shop.example.com/widget");
+        store.put(pending);
+        PageWatches back = PageWatches.parse(store.serialize());
+        check("v322 watch: a pending watch round-trips pending",
+                Boolean.valueOf(back.size() == 1
+                        && !back.all().get(0).hasBaseline()
+                        && back.all().get(0).schedMinutes
+                                == PageWatches.NO_SCHEDULE),
+                Boolean.TRUE);
+        PageWatches.PageWatch pw =
+                new PageWatches.PageWatch(
+                        "https://shop.example.com/widget");
+        WatchCompare.Verdict firstVerdict =
+                PageWatches.verdictFor(pw, "Widget $25 in stock");
+        PageWatches.applyCompletedCheck(pw,
+                "Widget $25 in stock", 1792800000000L);
+        check("v322 watch: the first completed check sets the baseline",
+                Boolean.valueOf(WatchCompare.BASELINE.equals(
+                                firstVerdict.state)
+                        && pw.hasBaseline()
+                        && WatchCompare.BASELINE.equals(
+                                pw.lastVerdict)
+                        && pw.lastCheckTsMs == 1792800000000L),
+                Boolean.TRUE);
+        PageWatches.PageWatch pw2 =
+                new PageWatches.PageWatch(
+                        "https://shop.example.com/gadget");
+        PageWatches.recordNotDone(pw2, 1792800000000L);
+        check("v322 watch: a not-done check leaves the watch pending",
+                Boolean.valueOf(!pw2.hasBaseline()
+                        && WatchCompare.NOT_DONE.equals(
+                                pw2.lastVerdict)),
+                Boolean.TRUE);
+        PageWatches.PageWatch pw3 =
+                new PageWatches.PageWatch(
+                        "https://shop.example.com/gadget");
+        pw3.condCharging = true;
+        check("v322 watch: the pending suffix rides beside the condition suffix",
+                Boolean.valueOf(PageWatches.PENDING_SUFFIX.equals(
+                                PageWatches.pendingSuffix(pw3))
+                        && " · charging".equals(
+                                SavedGoals.conditionSuffix(
+                                        true, false))
+                        && "".equals(
+                                PageWatches.pendingSuffix(pw))),
+                Boolean.TRUE);
+
+        // ---- §9.24–9.25: the ShareIntake parser ----
+        check("v322 intake: a bare URL parses as URL_TEXT",
+                Boolean.valueOf(ShareIntake.parse(
+                                "https://example.com/x").kind
+                                == ShareIntake.URL_TEXT
+                        && "https://example.com/x".equals(
+                                ShareIntake.parse(
+                                        "https://example.com/x")
+                                        .url)),
+                Boolean.TRUE);
+        ShareIntake.Parsed prose = ShareIntake.parse(
+                "look at this https://example.com/a, please");
+        check("v322 intake: a URL inside prose, punctuation stripped",
+                Boolean.valueOf(prose.kind == ShareIntake.URL_TEXT
+                        && "https://example.com/a".equals(prose.url)
+                        && prose.goalText.startsWith("look at this")),
+                Boolean.TRUE);
+        check("v322 intake: bracket closers strip, the first URL wins",
+                Boolean.valueOf("https://a.example.com/1".equals(
+                        ShareIntake.parse("(see https://a.example"
+                                + ".com/1) and https://b.example"
+                                + ".com/2").url)),
+                Boolean.TRUE);
+        check("v322 intake: an uppercase scheme is found",
+                Boolean.valueOf("HTTPS://EXAMPLE.COM/X".equals(
+                        ShareIntake.parse("go HTTPS://EXAMPLE"
+                                + ".COM/X now").url)),
+                Boolean.TRUE);
+        check("v322 intake: a host-less fragment is text, blank is empty",
+                Boolean.valueOf(ShareIntake.parse(
+                                "try https:// later").kind
+                                == ShareIntake.TEXT
+                        && ShareIntake.parse("   ").kind
+                                == ShareIntake.EMPTY
+                        && ShareIntake.parse(null).kind
+                                == ShareIntake.EMPTY
+                        && ShareIntake.parse("just words").kind
+                                == ShareIntake.TEXT),
+                Boolean.TRUE);
+        StringBuilder longText = new StringBuilder();
+        for (int i = 0; i < 2100; i++) longText.append("a");
+        longText.append(" https://late.example.com/page");
+        ShareIntake.Parsed late = ShareIntake.parse(
+                longText.toString());
+        check("v322 intake: the cap truncates the goal, never the URL scan",
+                Boolean.valueOf(late.goalText.length()
+                                == ShareIntake.GOAL_CAP
+                        && "https://late.example.com/page"
+                                .equals(late.url)
+                        && late.kind == ShareIntake.URL_TEXT),
+                Boolean.TRUE);
+        check("v322 intake: the goal text is verbatim-trimmed",
+                ShareIntake.parse("  hello   world  ").goalText,
+                "hello   world");
+
+        // ---- §9.26–9.27: the launch-extra seam ----
+        check("v322 seam: the prefill decision table",
+                Boolean.valueOf(ShareIntake.prefillDecision(
+                                false, true) == ShareIntake.LOAD
+                        && ShareIntake.prefillDecision(
+                                true, true)
+                                == ShareIntake.IGNORE_WITH_NOTE
+                        && ShareIntake.prefillDecision(
+                                false, false)
+                                == ShareIntake.EMPTY_NOTE
+                        && ShareIntake.prefillDecision(
+                                true, false)
+                                == ShareIntake.EMPTY_NOTE),
+                Boolean.TRUE);
+        if (mainSrc != null) {
+            check("v322 seam: extras are consumed exactly once",
+                    Boolean.valueOf(mainSrc.contains(
+                                    "removeExtra(EXTRA_PREFILL_GOAL)")
+                            && mainSrc.contains(
+                                    "removeExtra(EXTRA_CLIPBOARD_GOAL)")
+                            && mainSrc.contains(
+                                    "removeExtra(EXTRA_OPEN_GOALS)")
+                            && mainSrc.contains(
+                                    "consumeLaunchExtras(intent)")),
+                    Boolean.TRUE);
+            check("v322 seam: both cards carry the Report chip, one path",
+                    Boolean.valueOf(mainSrc.contains(
+                                    "shareLiveReport()")
+                            && mainSrc.contains(
+                                    "shareHistoryReport()")
+                            && mainSrc.contains(
+                                    "buildAndShareReport(")),
+                    Boolean.TRUE);
+            check("v322 seam: the shelf and the template paths are wired",
+                    Boolean.valueOf(mainSrc.contains(
+                                    "refreshTemplatesShelf()")
+                            && mainSrc.contains(
+                                    "showTemplateSaveDialog(")
+                            && mainSrc.contains(
+                                    "createPendingPageWatch(")),
+                    Boolean.TRUE);
+        }
+
+        // ---- §9.28–9.29: manifest + resource pins ----
+        if (manifest != null) {
+            int permCount = 0;
+            int idx = 0;
+            while ((idx = manifest.indexOf(
+                    "<uses-permission", idx)) >= 0) {
+                permCount++;
+                idx += 4;
+            }
+            check("v322 pin, as moved by v3.27: the uses-permission "
+                            + "set is ten",
+                    Integer.valueOf(permCount), Integer.valueOf(10));
+            check("v322 pin: the intake is exported, one SEND text filter",
+                    Boolean.valueOf(manifest.contains(
+                                    ".ShareIntakeActivity")
+                            && manifest.contains(
+                                    "android.intent.action.SEND")
+                            && manifest.contains(
+                                    "android:mimeType="
+                                            + "\"text/plain\"")
+                            && manifest.contains(
+                                    "android:excludeFromRecents"
+                                            + "=\"true\"")),
+                    Boolean.TRUE);
+            check("v322 pin: the tile is exported, system-bound, active",
+                    Boolean.valueOf(manifest.contains(
+                                    ".GhostTileService")
+                            && manifest.contains(
+                                    "android.permission."
+                                            + "BIND_QUICK_SETTINGS_TILE")
+                            && manifest.contains(
+                                    "android.service.quicksettings"
+                                            + ".action.QS_TILE")
+                            && manifest.contains(
+                                    "android.service.quicksettings"
+                                            + ".ACTIVE_TILE")),
+                    Boolean.TRUE);
+            check("v322 pin: MainActivity keeps only the launcher filter",
+                    Boolean.valueOf(countOccurrences(manifest,
+                                    "android.intent.action.MAIN")
+                                    == 1
+                            && !manifest.contains(
+                                    "android.intent.action.VIEW")),
+                    Boolean.TRUE);
+            check("v322 pin: the provider declaration is unchanged",
+                    Boolean.valueOf(manifest.contains(".DlProvider")
+                            && manifest.contains(
+                                    "android:authorities="
+                                            + "\"com.ghosthands.app.files\"")
+                            && manifest.contains(
+                                    "android:grantUriPermissions"
+                                            + "=\"true\"")),
+                    Boolean.TRUE);
+        }
+        if (v1DirF != null) {
+            check("v322 pin: the tile icon and all four mascot cuts exist",
+                    Boolean.valueOf(new java.io.File(v1DirF,
+                                    "app/src/main/res/"
+                                            + "drawable-nodpi/"
+                                            + "mascot_header.png")
+                                    .isFile()
+                            && new java.io.File(v1DirF,
+                                    "app/src/main/res/"
+                                            + "drawable-nodpi/"
+                                            + "mascot_header_blink.png")
+                                    .isFile()
+                            && new java.io.File(v1DirF,
+                                    "app/src/main/res/"
+                                            + "drawable-nodpi/"
+                                            + "mascot_hero.png")
+                                    .isFile()
+                            && new java.io.File(v1DirF,
+                                    "app/src/main/res/"
+                                            + "drawable-nodpi/"
+                                            + "mascot_hero_blink.png")
+                                    .isFile()
+                            && manifest != null
+                            && manifest.contains(
+                                    "@drawable/mascot_header")),
+                    Boolean.TRUE);
+        }
+
+        // ---- §9.30–9.31: regression pins ----
+        StringBuilder reg = new StringBuilder();
+        for (int i = 0; i < Trail.EVENT_TYPES.length; i++) {
+            if (i > 0) reg.append(",");
+            reg.append(Trail.EVENT_TYPES[i]);
+        }
+        check("v322 pin: the trail registry is unchanged",
+                reg.toString(),
+                "perceive,decide,govern,approval,execute,result,"
+                        + "stop,dialog,download,guard,read,recover,"
+                        + "race,detour,run_summary,stale_stash,fit,"
+                        + "run,note,watch,route,screenshot,assist,"
+                        + "step_screenshot,ask,answer,tab_opened,"
+                        + "tab_switched,tab_closed,page_watch,"
+                        + "chain_seed,thin_map,a11y_perception");
+        check("v322 pin: the card's share text is unchanged by the report",
+                card1.shareText("Sun Oct 26"),
+                "Ghost Hands — Sun Oct 26\n"
+                        + "Goal: Find the cheapest flight to Denver\n"
+                        + "Answer: Cheapest is $212 on Frontier.\n"
+                        + "Source: Flights (https://example.com/"
+                        + "flights)\n"
+                        + "Run: 4 steps, 95 s, 40% of prompt reused\n"
+                        + "Facts noted:\n"
+                        + "- Denver fare is $212 on Frontier "
+                        + "(from: Flights)");
+        check("v322 pin: reports live in their own store, not downloads",
+                Boolean.valueOf("reports".equals(RunReport.DIR_NAME)
+                        && !RunReport.DIR_NAME.equals(
+                                Downloads.DIR_NAME)
+                        && RunReport.fileNameForTrail(
+                                "trail-x.jsonl")
+                                .startsWith("report-")),
+                Boolean.TRUE);
+    }
+
+    /** Byte equality of two files (v3.21's asset pins). */
+    private static boolean sameFileBytes(java.io.File a,
+                                         java.io.File b) {
+        try {
+            byte[] x = java.nio.file.Files.readAllBytes(
+                    a.toPath());
+            byte[] y = java.nio.file.Files.readAllBytes(
+                    b.toPath());
+            return java.util.Arrays.equals(x, y);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** How many times the blink openness dips below half in
+     *  event k's window — one for a single blink, two for a
+     *  double (the second close follows DOUBLE_GAP_MS later). */
+    private static int countBlinkDips(int k) {
+        long start = GhostFigure.blinkIntervalMs(0, 1f);
+        for (int i = 0; i < k; i++) {
+            start += GhostFigure.blinkIntervalMs(i + 1, 1f);
+        }
+        int dips = 0;
+        boolean below = false;
+        for (long t = start - 10; t < start + 700; t += 5) {
+            boolean now = GhostFigure.blinkOpenness(t, 1f) < 0.5f;
+            if (now && !below) dips++;
+            below = now;
+        }
+        return dips;
+    }
+
+    // =====================================================================
+    // v3.23 (Everything Train R12): the home-screen widget +
+    // the voice conversation loop. The numbered groups mirror
+    // the R12 plan's test list (§8, items 1–28).
+    // =====================================================================
+
+    /** A scripted slice latch for the RunControl waits: fires
+     *  on the Nth slice (or never), and can land a RunControl
+     *  stop mid-wait exactly the way a widget tap would. */
+    private static final class ScriptLatch
+            implements RunControl.SliceLatch {
+        final int fireOnSlice;
+        final int stopOnSlice;
+        int slices = 0;
+        ScriptLatch(int fireOnSlice, int stopOnSlice) {
+            this.fireOnSlice = fireOnSlice;
+            this.stopOnSlice = stopOnSlice;
+        }
+        @Override public boolean awaitSlice(long sliceMs) {
+            slices++;
+            if (slices == stopOnSlice) RunControl.requestStop();
+            return slices == fireOnSlice;
+        }
+    }
+
+    private static VoiceLoop armedLoop323() {
+        VoiceLoop l = new VoiceLoop();
+        l.arm(true, true, true, true, true, false, true, true);
+        return l;
+    }
+
+    private static VoiceLoop listeningLoop323() {
+        VoiceLoop l = armedLoop323();
+        l.onSpeechDone();
+        l.onPromptDone();
+        return l;
+    }
+
+    private static void v323Tests(String[] args) {
+        long now = 1792800000000L;
+
+        // ---- §8.1: latch semantics + the stale-stop rule ----
+        RunControl.clear();
+        check("v323 latch: cleared reads unrequested",
+                Boolean.valueOf(RunControl.stopRequested()),
+                Boolean.FALSE);
+        RunControl.requestStop();
+        check("v323 latch: a request is visible to stopRequested",
+                Boolean.valueOf(RunControl.stopRequested()),
+                Boolean.TRUE);
+        RunControl.clear();
+        check("v323 latch: the next start clears a stale request",
+                Boolean.valueOf(RunControl.stopRequested()),
+                Boolean.FALSE);
+
+        // ---- §8.2: approval wait — stop lands within a slice ----
+        RunControl.clear();
+        ScriptLatch neverFires = new ScriptLatch(-1, 3);
+        long t0 = System.nanoTime();
+        boolean appr;
+        try {
+            appr = RunControl.awaitSliced(neverFires, 600000L);
+        } catch (InterruptedException e) {
+            appr = true;
+        }
+        long waitedMs = (System.nanoTime() - t0) / 1000000L;
+        check("v323 sliced approval: an outside stop declines",
+                Boolean.valueOf(appr), Boolean.FALSE);
+        check("v323 sliced approval: it did not wait out the clock",
+                Boolean.valueOf(waitedMs < 5000 && neverFires.slices == 3),
+                Boolean.TRUE);
+        check("v323 sliced approval: the stop reads in the return "
+                        + "expression (decline, never consent)",
+                Boolean.valueOf(appr && !RunControl.stopRequested()),
+                Boolean.FALSE);
+        RunControl.clear();
+
+        // ---- §8.3: ask wait — same road, no-answer outcome ----
+        RunControl.clear();
+        ScriptLatch askLatch = new ScriptLatch(-1, 2);
+        boolean askAnswered;
+        try {
+            askAnswered = RunControl.awaitSliced(askLatch, 600000L);
+        } catch (InterruptedException e) {
+            askAnswered = true;
+        }
+        String askResult = (askAnswered && !RunControl.stopRequested())
+                ? "an answer" : null;
+        check("v323 sliced ask: an outside stop returns no answer",
+                askResult, null);
+        RunControl.clear();
+
+        // ---- §8.4: pause wait — same road, decline outcome ----
+        RunControl.clear();
+        ScriptLatch pauseLatch = new ScriptLatch(-1, 2);
+        boolean pauseAnswered;
+        try {
+            pauseAnswered = RunControl.awaitSliced(pauseLatch, 600000L);
+        } catch (InterruptedException e) {
+            pauseAnswered = true;
+        }
+        check("v323 sliced pause: an outside stop declines the pause",
+                Boolean.valueOf(pauseAnswered
+                        && !RunControl.stopRequested()),
+                Boolean.FALSE);
+        RunControl.clear();
+
+        // ---- §8.5: entry guard — a set latch returns at once ----
+        RunControl.requestStop();
+        ScriptLatch entryLatch = new ScriptLatch(1, -1);
+        boolean entry;
+        try {
+            entry = RunControl.awaitSliced(entryLatch, 600000L);
+        } catch (InterruptedException e) {
+            entry = true;
+        }
+        check("v323 sliced waits: entered stopped, returns at once",
+                Boolean.valueOf(!entry && entryLatch.slices == 0),
+                Boolean.TRUE);
+        RunControl.clear();
+
+        // ---- §8.6: the in-app Stop's road is unchanged ----
+        // (The latch release is instant by construction: a
+        // latch that fires on slice 1 returns true in that
+        // slice; and the return expression's !stopFlag leg is
+        // pinned in MainActivity's source by the pins below.)
+        ScriptLatch firstSlice = new ScriptLatch(1, -1);
+        boolean released;
+        try {
+            released = RunControl.awaitSliced(firstSlice, 600000L);
+        } catch (InterruptedException e) {
+            released = false;
+        }
+        check("v323 sliced waits: a fired latch returns in its slice",
+                Boolean.valueOf(released && firstSlice.slices == 1),
+                Boolean.TRUE);
+        ScriptLatch clockLatch = new ScriptLatch(-1, -1);
+        boolean clockOut;
+        try {
+            clockOut = RunControl.awaitSliced(clockLatch, 500L);
+        } catch (InterruptedException e) {
+            clockOut = true;
+        }
+        check("v323 sliced waits: slices add up to the timeout",
+                Boolean.valueOf(!clockOut && clockLatch.slices == 2),
+                Boolean.TRUE);
+
+        // ---- §8.7: WidgetState round-trip + caps + tolerance ----
+        StringBuilder longGoal = new StringBuilder();
+        for (int i = 0; i < 120; i++) longGoal.append("g");
+        StringBuilder longOutcome = new StringBuilder();
+        for (int i = 0; i < 200; i++) longOutcome.append("o");
+        WidgetState ws = WidgetState.started(longGoal.toString(),
+                "trail-x.jsonl", now);
+        check("v323 widget state: the goal caps at write (80)",
+                Integer.valueOf(ws.goal.length()), Integer.valueOf(80));
+        ws = ws.withStep(7, now).finished(longOutcome.toString(), now);
+        check("v323 widget state: the outcome caps at write (120)",
+                Integer.valueOf(ws.outcomeLine.length()),
+                Integer.valueOf(120));
+        WidgetState rt = WidgetState.parse(ws.serialize());
+        check("v323 widget state: round-trip keeps every field",
+                Boolean.valueOf(rt.phase.equals(ws.phase)
+                        && rt.goal.equals(ws.goal)
+                        && rt.step == ws.step
+                        && rt.outcomeLine.equals(ws.outcomeLine)
+                        && rt.trailName.equals(ws.trailName)
+                        && rt.updatedMs == ws.updatedMs),
+                Boolean.TRUE);
+        check("v323 widget state: null and junk parse to idle",
+                Boolean.valueOf(WidgetState.parse(null).phase
+                                .equals(WidgetState.PHASE_IDLE)
+                        && WidgetState.parse("{not json").phase
+                                .equals(WidgetState.PHASE_IDLE)
+                        && WidgetState.parse("[1,2]").phase
+                                .equals(WidgetState.PHASE_IDLE)),
+                Boolean.TRUE);
+        check("v323 widget state: a phase from the future is idle",
+                WidgetState.parse("{\"phase\":\"hyperdrive\"}").phase,
+                WidgetState.PHASE_IDLE);
+
+        // ---- §8.8: the judge matrix ----
+        WidgetState live = WidgetState.started("Water the plants",
+                "trail-1.jsonl", now);
+        check("v323 judge: live + marker renders live",
+                WidgetState.judge(live, true),
+                WidgetState.PHASE_RUNNING);
+        check("v323 judge: live + no marker is interrupted",
+                WidgetState.judge(live, false),
+                WidgetState.PHASE_INTERRUPTED);
+        check("v323 judge: interrupted keeps the goal named",
+                WidgetState.judged(live, false).goal,
+                "Water the plants");
+        WidgetState stopping = live.withPhase(
+                WidgetState.PHASE_STOPPING, now);
+        check("v323 judge: stopping + no marker is interrupted",
+                WidgetState.judge(stopping, false),
+                WidgetState.PHASE_INTERRUPTED);
+        WidgetState fin = live.finished("Done: watered", now);
+        check("v323 judge: finished renders as-is either way",
+                Boolean.valueOf(WidgetState.judge(fin, false)
+                                .equals(WidgetState.PHASE_FINISHED)
+                        && WidgetState.judge(fin, true)
+                                .equals(WidgetState.PHASE_FINISHED)
+                        && WidgetState.judge(WidgetState.idle(), false)
+                                .equals(WidgetState.PHASE_IDLE)),
+                Boolean.TRUE);
+        check("v323 judge: waiting phases are live phases",
+                Boolean.valueOf(WidgetState.judge(live.withPhase(
+                                        WidgetState.PHASE_WAITING_ASK,
+                                        now), false)
+                                .equals(WidgetState.PHASE_INTERRUPTED)
+                        && WidgetState.judge(live.withPhase(
+                                        WidgetState.PHASE_WAITING_APPROVAL,
+                                        now), true)
+                                .equals(
+                                        WidgetState.PHASE_WAITING_APPROVAL)),
+                Boolean.TRUE);
+
+        // ---- §8.9: WidgetText run lines ----
+        check("v323 widget text: running with its step",
+                WidgetText.runLine(WidgetState.PHASE_RUNNING,
+                        live.withStep(3, now), now),
+                "● Running: Water the plants — step 3");
+        check("v323 widget text: running before the first step",
+                WidgetText.runLine(WidgetState.PHASE_RUNNING,
+                        live, now),
+                "● Running: Water the plants");
+        check("v323 widget text: the two waitings are distinct",
+                Boolean.valueOf(WidgetText.runLine(
+                                        WidgetState.PHASE_WAITING_APPROVAL,
+                                        live, now)
+                                .equals("● Waiting: approval needed")
+                        && WidgetText.runLine(
+                                        WidgetState.PHASE_WAITING_ASK,
+                                        live, now)
+                                .equals("● Waiting: answer needed")),
+                Boolean.TRUE);
+        check("v323 widget text: stopping",
+                WidgetText.runLine(WidgetState.PHASE_STOPPING,
+                        live, now),
+                "■ Stopping…");
+        check("v323 widget text: interrupted names the goal",
+                WidgetText.runLine(WidgetState.PHASE_INTERRUPTED,
+                        live, now),
+                "■ Run interrupted (app closed): Water the plants");
+        check("v323 widget text: finished carries outcome + age",
+                WidgetText.runLine(WidgetState.PHASE_FINISHED,
+                        live.finished("Done: watered", now - 7200000L),
+                        now),
+                "Last: Done: watered · 2h ago");
+        check("v323 widget text: idle and empty",
+                WidgetText.runLine(WidgetState.PHASE_IDLE,
+                        WidgetState.idle(), now),
+                "No runs yet");
+        WidgetState markup = WidgetState.started(
+                "Find <b>bold</b> & \"quoted\"", "t.jsonl", now);
+        check("v323 widget text: markup-ish goal passes as text",
+                WidgetText.runLine(WidgetState.PHASE_RUNNING,
+                        markup, now),
+                "● Running: Find <b>bold</b> & \"quoted\"");
+
+        // ---- §8.10: verdict lines ----
+        BriefingLog log = new BriefingLog();
+        log.append(new BriefingLog.Entry("Price goal",
+                BriefingLog.KIND_GOAL, WatchCompare.NO_CHANGE, "",
+                now - 86400000L, false));
+        log.append(new BriefingLog.Entry("News page",
+                BriefingLog.KIND_PAGE, WatchCompare.BASELINE, "",
+                now - 3600000L, false));
+        BriefingLog.Entry ch = new BriefingLog.Entry("Fare watch",
+                BriefingLog.KIND_GOAL, WatchCompare.CHANGED,
+                "Denver fare is $212", now - 120000L, false);
+        ch.briefed = true; // the widget ignores briefed flags
+        log.append(ch);
+        log.append(new BriefingLog.Entry("Broken watch",
+                BriefingLog.KIND_GOAL, WatchCompare.NOT_DONE, "",
+                now - 60000L, false));
+        java.util.List<String> vl = WidgetText.verdictLines(log, now);
+        check("v323 verdicts: newest three, newest first",
+                Boolean.valueOf(vl.size() == 3
+                        && vl.get(0).startsWith("Broken watch")
+                        && vl.get(1).startsWith("Fare watch")
+                        && vl.get(2).startsWith("News page")),
+                Boolean.TRUE);
+        check("v323 verdicts: the four state wordings",
+                Boolean.valueOf(vl.get(0).equals(
+                                "Broken watch: couldn't check · 1m ago")
+                        && vl.get(1).equals("Fare watch: changed — "
+                                + "Denver fare is $212 · 2m ago")
+                        && vl.get(2).equals(
+                                "News page: now watching · 1h ago")),
+                Boolean.TRUE);
+        check("v323 verdicts: no-change wording",
+                WidgetText.verdictLine(new BriefingLog.Entry("G",
+                        BriefingLog.KIND_GOAL, WatchCompare.NO_CHANGE,
+                        "", now, false), now),
+                "G: no change · just now");
+        check("v323 verdicts: the empty log's quiet line",
+                WidgetText.verdictLines(new BriefingLog(), now).get(0),
+                "No watched checks yet");
+
+        // ---- §8.11: relative times ----
+        check("v323 reltime: just now under a minute",
+                WidgetText.relTime(now - 30000L, now), "just now");
+        check("v323 reltime: minutes",
+                WidgetText.relTime(now - 5L * 60000L, now), "5m ago");
+        check("v323 reltime: hours",
+                WidgetText.relTime(now - 3L * 3600000L, now), "3h ago");
+        check("v323 reltime: days",
+                WidgetText.relTime(now - 2L * 86400000L, now),
+                "2d ago");
+        check("v323 reltime: boundaries (60s, 60m, 24h)",
+                Boolean.valueOf(WidgetText.relTime(now - 60000L, now)
+                                .equals("1m ago")
+                        && WidgetText.relTime(now - 3600000L, now)
+                                .equals("1h ago")
+                        && WidgetText.relTime(now - 86400000L, now)
+                                .equals("1d ago")
+                        && WidgetText.relTime(now + 5000L, now)
+                                .equals("just now")),
+                Boolean.TRUE);
+
+        // ---- §8.12: the Stop-button decision ----
+        check("v323 widget stop: armed exactly on live phases",
+                Boolean.valueOf(WidgetText.stopArmed(
+                                        WidgetState.PHASE_RUNNING)
+                        && WidgetText.stopArmed(
+                                        WidgetState.PHASE_WAITING_ASK)
+                        && WidgetText.stopArmed(
+                                        WidgetState.PHASE_STOPPING)
+                        && !WidgetText.stopArmed(
+                                        WidgetState.PHASE_FINISHED)
+                        && !WidgetText.stopArmed(
+                                        WidgetState.PHASE_IDLE)
+                        && !WidgetText.stopArmed(
+                                        WidgetState.PHASE_INTERRUPTED)),
+                Boolean.TRUE);
+
+        // ---- §8.13: the arm matrix — each leg off in turn ----
+        check("v323 loop arm: all legs on arms",
+                Boolean.valueOf(VoiceLoop.armJudgement(
+                        true, true, true, true, true,
+                        false, true, true)),
+                Boolean.TRUE);
+        boolean[] legs = {true, true, true, true, true,
+                false, true, true};
+        String[] legNames = {"loop", "voice", "speak-on-finish",
+                "done outcome", "foreground", "not loop-started",
+                "agent run", "recognizer"};
+        boolean matrixOk = true;
+        for (int i = 0; i < legs.length; i++) {
+            boolean saved = legs[i];
+            legs[i] = !saved; // flip exactly this leg off
+            if (VoiceLoop.armJudgement(legs[0], legs[1], legs[2],
+                    legs[3], legs[4], legs[5], legs[6], legs[7])) {
+                matrixOk = false;
+            }
+            legs[i] = saved;
+        }
+        check("v323 loop arm: any single leg off refuses ("
+                        + legNames.length + " legs)",
+                Boolean.valueOf(matrixOk), Boolean.TRUE);
+        VoiceLoop refused = new VoiceLoop();
+        check("v323 loop arm: a refused arm leaves the machine idle",
+                Boolean.valueOf(!refused.arm(true, false, true, true,
+                                true, false, true, true)
+                        && refused.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+
+        // ---- §8.14: speech legs ----
+        VoiceLoop l14 = armedLoop323();
+        check("v323 loop: card speech done while ARMED prompts",
+                Boolean.valueOf(l14.state() == VoiceLoop.State.ARMED
+                        && l14.onSpeechDone()
+                        && l14.state() == VoiceLoop.State.PROMPTING),
+                Boolean.TRUE);
+        VoiceLoop l14b = armedLoop323();
+        check("v323 loop: card speech error closes quietly",
+                Boolean.valueOf(l14b.onSpeechError()
+                        && l14b.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+        VoiceLoop l14c = new VoiceLoop();
+        check("v323 loop: speech done while IDLE stays IDLE "
+                        + "(a Listen tap never arms)",
+                Boolean.valueOf(!l14c.onSpeechDone()
+                        && l14c.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+
+        // ---- §8.15: prompt legs ----
+        VoiceLoop l15 = armedLoop323();
+        l15.onSpeechDone();
+        check("v323 loop: prompt done opens the listen",
+                Boolean.valueOf(l15.onPromptDone()
+                        && l15.state() == VoiceLoop.State.LISTENING),
+                Boolean.TRUE);
+        VoiceLoop l15b = armedLoop323();
+        l15b.onSpeechDone();
+        check("v323 loop: prompt error closes quietly",
+                Boolean.valueOf(l15b.onPromptError()
+                        && l15b.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+
+        // ---- §8.16: heard / silence ----
+        VoiceLoop l16 = listeningLoop323();
+        check("v323 loop: a hearing starts, text accepted",
+                Boolean.valueOf("Check the fare again".equals(
+                                l16.onHeard("Check the fare again"))
+                        && l16.state() == VoiceLoop.State.STARTING
+                        && l16.followUpsUsed() == 1),
+                Boolean.TRUE);
+        VoiceLoop l16b = listeningLoop323();
+        int feedLines = 0;
+        if (l16b.onHeard(null) == null
+                && l16b.state() == VoiceLoop.State.IDLE) {
+            feedLines++; // the Activity feeds its one line here
+        }
+        boolean secondClose = l16b.onSilence();
+        check("v323 loop: silence closes once, no second listen",
+                Boolean.valueOf(feedLines == 1 && !secondClose
+                        && l16b.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+        VoiceLoop l16c = listeningLoop323();
+        check("v323 loop: recognizer error is the same quiet close",
+                Boolean.valueOf(l16c.onSilence()
+                        && !l16c.onSilence()
+                        && l16c.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+        check("v323 loop: the prompt text is the pinned line",
+                VoiceLoop.PROMPT_TEXT,
+                "Answer done. Say a follow-up goal, or stay "
+                        + "silent to finish.");
+        check("v323 loop: the cap is one follow-up",
+                Integer.valueOf(VoiceLoop.MAX_FOLLOW_UPS),
+                Integer.valueOf(1));
+
+        // ---- §8.17: the cap, end to end at the machine ----
+        VoiceLoop l17 = new VoiceLoop();
+        check("v323 loop cap: a loop-started run's finish refuses",
+                Boolean.valueOf(!l17.arm(true, true, true, true,
+                        true, true, true, true)),
+                Boolean.TRUE);
+        check("v323 loop cap: a hand-started run after it may arm",
+                Boolean.valueOf(l17.arm(true, true, true, true,
+                        true, false, true, true)),
+                Boolean.TRUE);
+
+        // ---- §8.18: cancel legs ----
+        VoiceLoop l18 = listeningLoop323();
+        l18.closeQuietly();
+        check("v323 loop cancel: onPause closes from LISTENING",
+                Boolean.valueOf(l18.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+        VoiceLoop l18b = listeningLoop323();
+        check("v323 loop cancel: another road's start closes it",
+                Boolean.valueOf(l18b.onSilence()
+                        && l18b.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+
+        // ---- §8.19: end to end — the follow-up run's stamps ----
+        final java.util.List<String> feed323 =
+                new java.util.ArrayList<String>();
+        Agent.Ui ui323 = new Agent.Ui() {
+            @Override public void feed(String line) {
+                feed323.add(line);
+            }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision, String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() { return false; }
+            @Override public boolean foreground() { return true; }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) { return false; }
+        };
+        VoiceLoop e2e = new VoiceLoop();
+        boolean chain = e2e.arm(true, true, true, true, true,
+                false, true, true)
+                && e2e.onSpeechDone() && e2e.onPromptDone();
+        String heard = e2e.onHeard(VoiceGoal.pickHeard(
+                java.util.Arrays.asList("", "  ",
+                        "Check the fare again")));
+        chain = chain && "Check the fare again".equals(heard)
+                && e2e.state() == VoiceLoop.State.STARTING;
+        com.ghosthands.app.Trail followTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(v313Hands("Example button"), v313Engine(),
+                PolicyPacks.loadPack("standard"), followTrail, ui323,
+                "q5_k_m", false, 25, false, true, 0, 4, "duckduckgo",
+                false, false, false, false, 0, false, false,
+                Settings.STYLE_BALANCED, null, null, null, null,
+                true, null, null, 0, 0, null,
+                "trail-20261026-090000.jsonl").run(heard);
+        e2e.onStarted();
+        Object viaStamp = null;
+        Object followsStamp = null;
+        for (java.util.Map<String, Object> ev : followTrail.events()) {
+            if ("run".equals(String.valueOf(ev.get("type")))) {
+                viaStamp = ev.get("via_voice_loop");
+                followsStamp = ev.get("follows_trail");
+            }
+        }
+        check("v323 e2e: arm → prompt → listen → heard, in order",
+                Boolean.valueOf(chain
+                        && e2e.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+        check("v323 e2e: the follow-up's run record carries "
+                        + "via_voice_loop",
+                String.valueOf(viaStamp), "true");
+        check("v323 e2e: ... and follows_trail naming run 1",
+                String.valueOf(followsStamp),
+                "trail-20261026-090000.jsonl");
+        com.ghosthands.app.Trail plainTrail323 =
+                new com.ghosthands.app.Trail(null);
+        new Agent(v313Hands("Example button"), v313Engine(),
+                PolicyPacks.loadPack("standard"), plainTrail323,
+                ui323, "q5_k_m").run("Check the fare again");
+        boolean plainStamped = false;
+        for (java.util.Map<String, Object> ev
+                : plainTrail323.events()) {
+            if (ev.containsKey("via_voice_loop")
+                    || ev.containsKey("follows_trail")) {
+                plainStamped = true;
+            }
+        }
+        check("v323 e2e: an ordinary run carries neither stamp "
+                        + "(the control)",
+                Boolean.valueOf(plainStamped), Boolean.FALSE);
+
+        // ---- §8.20: silence end to end at the machine ----
+        VoiceLoop l20 = listeningLoop323();
+        String heard20 = l20.onHeard(VoiceGoal.pickHeard(
+                java.util.Arrays.asList("", "   ")));
+        check("v323 silence e2e: nothing usable heard, no run, "
+                        + "machine idle, no trail created",
+                Boolean.valueOf(heard20 == null
+                        && l20.state() == VoiceLoop.State.IDLE
+                        && l20.followUpsUsed() == 0),
+                Boolean.TRUE);
+
+        // ---- §§8.21–8.23: wiring pins over MainActivity ----
+        // (The battery seam, the never-request rule, and route
+        // exclusivity live in the Activity's wiring, which the
+        // harness cannot drive; they are pinned by source, the
+        // house way for Activity behaviour.)
+        String main323 = null;
+        String widget323 = null;
+        String layout323 = null;
+        String info323 = null;
+        if (args != null && args.length > 0 && args[0] != null) {
+            java.io.File shim = new java.io.File(args[0]);
+            java.io.File v1Dir = shim.getParentFile() == null ? null
+                    : shim.getParentFile().getParentFile() == null
+                            ? null
+                            : shim.getParentFile().getParentFile()
+                                    .getParentFile();
+            if (v1Dir != null) {
+                main323 = readTestFile(new java.io.File(v1Dir,
+                        "app/src/main/java/com/ghosthands/app/"
+                                + "MainActivity.java"));
+                widget323 = readTestFile(new java.io.File(v1Dir,
+                        "app/src/main/java/com/ghosthands/app/"
+                                + "GhostWidget.java"));
+                layout323 = readTestFile(new java.io.File(v1Dir,
+                        "app/src/main/res/layout/ghost_widget.xml"));
+                info323 = readTestFile(new java.io.File(v1Dir,
+                        "app/src/main/res/xml/"
+                                + "ghost_widget_info.xml"));
+            }
+        }
+        if (main323 != null && widget323 != null) {
+            check("v323 wiring: the Ui ORs RunControl into "
+                            + "stopRequested",
+                    Boolean.valueOf(main323.contains(
+                            "return stopFlag || "
+                                    + "RunControl.stopRequested();")),
+                    Boolean.TRUE);
+            check("v323 wiring: both start paths clear the latch",
+                    Boolean.valueOf(countOccurrences(main323,
+                            "RunControl.clear();") >= 2),
+                    Boolean.TRUE);
+            check("v323 wiring: all three waits sit in slices",
+                    Boolean.valueOf(countOccurrences(main323,
+                            "RunControl.awaitSliced(") >= 3),
+                    Boolean.TRUE);
+            check("v323 wiring: the waits' returns consult the latch",
+                    Boolean.valueOf(countOccurrences(main323,
+                                    "!RunControl.stopRequested()")
+                            + countOccurrences(main323,
+                                    "|| RunControl.stopRequested()) "
+                                            + "return") >= 3),
+                    Boolean.TRUE);
+            check("v323 wiring §21: the follow-up start goes "
+                            + "through startAgent (the battery gate's "
+                            + "own road)",
+                    Boolean.valueOf(main323.contains(
+                                    "startFollowUpRun")
+                            && main323.contains("startAgent();")),
+                    Boolean.TRUE);
+            check("v323 wiring §22: the loop never requests the "
+                            + "mic — its open judges the grant and "
+                            + "asks for nothing",
+                    Boolean.valueOf(main323.contains(
+                                    "openFollowUpListening")
+                            && countOccurrences(main323,
+                                    "requestPermissions(") == 2),
+                    Boolean.TRUE);
+            check("v323 wiring §23: the routes are mutually "
+                            + "exclusive (setting one clears the "
+                            + "other)",
+                    Boolean.valueOf(main323.contains(
+                                    "voiceForAsk = false;\n"
+                                            + "        voiceForFollowUp = true;")
+                            || (main323.contains("voiceForFollowUp = false;")
+                                    && main323.contains(
+                                            "voiceForFollowUp = true;"))),
+                    Boolean.TRUE);
+            check("v323 wiring: the arm sits in autoSpeakCard's "
+                            + "speak branches only",
+                    Boolean.valueOf(countOccurrences(main323,
+                            "armVoiceLoop(card);") == 2),
+                    Boolean.TRUE);
+            check("v323 wiring: the widget writes ride the "
+                            + "transitions the plan pins",
+                    Boolean.valueOf(main323.contains(
+                                    "widgetRunStarted(goal, "
+                                            + "trailFile.getName())")
+                            && main323.contains("widgetRunFinished(")
+                            && main323.contains(
+                                    "correctWidgetAtLaunch()")),
+                    Boolean.TRUE);
+        }
+
+        // ---- §8.24: the settings key ----
+        Settings s24 = new Settings();
+        check("v323 settings: voice_loop defaults OFF",
+                Boolean.valueOf(s24.voiceLoopOn), Boolean.FALSE);
+        boolean inRegistry = false;
+        for (int i = 0; i < Settings.ALL_KEYS.length; i++) {
+            if (Settings.KEY_VOICE_LOOP.equals(
+                    Settings.ALL_KEYS[i])) {
+                inRegistry = true;
+            }
+        }
+        check("v323 settings: voice_loop is in the registry",
+                Boolean.valueOf(inRegistry
+                        && "voice_loop".equals(Settings.KEY_VOICE_LOOP)),
+                Boolean.TRUE);
+        java.util.Map<String, String> m24 =
+                new java.util.HashMap<String, String>();
+        m24.put(Settings.KEY_VOICE_LOOP, "on");
+        Settings on24 = Settings.fromMap(m24);
+        check("v323 settings: round-trip on, junk resolves off",
+                Boolean.valueOf(on24.voiceLoopOn
+                        && "on".equals(on24.toMap().get(
+                                Settings.KEY_VOICE_LOOP))
+                        && !Settings.fromMap(
+                                java.util.Collections.singletonMap(
+                                        Settings.KEY_VOICE_LOOP,
+                                        "junk")).voiceLoopOn),
+                Boolean.TRUE);
+
+        // ---- §8.25: no new trail types ----
+        // v3.25 moves this pin, disclosed in its notes: the
+        // accessibility eyes register "a11y_perception"
+        // (33 types; v3.24's move registered "thin_map").
+        check("v325 registry: EVENT_TYPES (33 types, "
+                        + "a11y_perception added)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
+
+        // ---- §8.26: byte-identical regression (machine level) ----
+        VoiceLoop l26 = new VoiceLoop();
+        check("v323 regression: loop off, a finish never arms",
+                Boolean.valueOf(!l26.arm(false, true, true, true,
+                        true, false, true, true)),
+                Boolean.TRUE);
+        VoiceLoop l26b = new VoiceLoop();
+        check("v323 regression: speak-on-finish on, loop off — "
+                        + "the finish speaks and no prompt follows",
+                Boolean.valueOf(!l26b.arm(false, true, true, true,
+                                true, false, true, true)
+                        && !l26b.onSpeechDone()
+                        && l26b.state() == VoiceLoop.State.IDLE),
+                Boolean.TRUE);
+
+        // ---- §§8.27–8.28: build gates pinned by source ----
+        if (layout323 != null && info323 != null) {
+            check("v323 build: the widget info is pinned (no "
+                            + "polling, mascot preview, 4x2 cells)",
+                    Boolean.valueOf(info323.contains(
+                                    "updatePeriodMillis=\"0\"")
+                            && info323.contains(
+                                    "@layout/ghost_widget")
+                            && info323.contains(
+                                    "@drawable/mascot_header")
+                            && info323.contains(
+                                    "targetCellWidth=\"4\"")),
+                    Boolean.TRUE);
+            boolean legalOnly = !layout323.contains("WebView")
+                    && !layout323.contains("ScrollView")
+                    && !layout323.contains("ImageView")
+                    && !layout323.contains("EditText")
+                    && layout323.contains("<LinearLayout")
+                    && layout323.contains("<TextView")
+                    && layout323.contains("<Button");
+            check("v323 build §28: the layout is RemoteViews-legal "
+                            + "classes only",
+                    Boolean.valueOf(legalOnly), Boolean.TRUE);
+            check("v323 build: the layout carries the three ids "
+                            + "the provider resolves by name",
+                    Boolean.valueOf(layout323.contains(
+                                    "@+id/widget_body")
+                            && layout323.contains(
+                                    "@+id/widget_run_line")
+                            && layout323.contains(
+                                    "@+id/widget_verdicts")
+                            && layout323.contains(
+                                    "@+id/widget_stop")),
+                    Boolean.TRUE);
+        }
+        if (widget323 != null) {
+            check("v323 build: the provider renders only, acts "
+                            + "only on its own stop action",
+                    Boolean.valueOf(widget323.contains(
+                                    "ACTION_WIDGET_STOP")
+                            && widget323.contains(
+                                    "RunControl.requestStop()")
+                            && !widget323.contains("startActivity")
+                            && widget323.contains(
+                                    "WidgetState.judge(")),
+                    Boolean.TRUE);
+        }
+    }
+
+    /** v3.24 tests: the thin-map policy (pure), the map
+     *  budget (selection, rendering, measured savings), and
+     *  scripted loop runs for the recovery, the fallback,
+     *  and the auto-read-off gate. */
+    private static void v324Tests(String[] args) {
+        // ================= ThinMap (pure) =================
+        check("v324 thin: an empty map is thin",
+                Boolean.valueOf(ThinMap.isThin(
+                        mdPage("https://x.test/empty"))),
+                Boolean.TRUE);
+        check("v324 thin: two elements is still thin",
+                Boolean.valueOf(ThinMap.isThin(mdPage(
+                        "https://x.test/two",
+                        elx(1, "a", "Home", "/"),
+                        elx(2, "a", "About", "/about")))),
+                Boolean.TRUE);
+        check("v324 thin: three elements is not thin",
+                Boolean.valueOf(!ThinMap.isThin(mdPage(
+                        "https://x.test/three",
+                        elx(1, "a", "Home", "/"),
+                        elx(2, "a", "About", "/about"),
+                        elx(3, "a", "Contact", "/contact")))),
+                Boolean.TRUE);
+        check("v324 thin: a full page is not thin; null is thin",
+                Boolean.valueOf(!ThinMap.isThin(accuPage(""))
+                        && ThinMap.isThin(null)),
+                Boolean.TRUE);
+        check("v324 thin: the policy constants stand",
+                Boolean.valueOf(ThinMap.THIN_ELEMENT_LIMIT == 3
+                        && ThinMap.MAX_ATTEMPTS == 3),
+                Boolean.TRUE);
+        check("v324 thin: the backoff schedule is 500/1000/2000, capped",
+                Boolean.valueOf(ThinMap.backoffMs(1) == 500
+                        && ThinMap.backoffMs(2) == 1000
+                        && ThinMap.backoffMs(3) == 2000
+                        && ThinMap.backoffMs(4) == 2000
+                        && ThinMap.backoffMs(0) == 500),
+                Boolean.TRUE);
+        check("v324 thin: the sleep seam scales only the slept wait",
+                Boolean.valueOf(ThinMap.backoffSleepMs(3) == 0),
+                Boolean.TRUE);
+        ThinMap.BACKOFF_DIVISOR = 1L;
+        boolean seamOff = ThinMap.backoffSleepMs(3) == 2000;
+        ThinMap.BACKOFF_DIVISOR = 1000000L;
+        check("v324 thin: divisor 1 sleeps the full schedule",
+                Boolean.valueOf(seamOff), Boolean.TRUE);
+
+        // ================= the map budget =================
+        final String goal324 = "Will it rain tomorrow?";
+        java.util.List<ElementInfo> portalEls =
+                new java.util.ArrayList<ElementInfo>();
+        ElementInfo pSearch = elx(1, "input", "Search", null);
+        pSearch.type = "search";
+        portalEls.add(pSearch);
+        for (int i = 2; i <= 31; i++) {
+            portalEls.add(elx(i, "a", "Filler link " + i,
+                    "https://example.test/f" + i));
+        }
+        portalEls.add(elx(32, "a", "Rain forecast for Oakdale",
+                "https://example.test/rain"));
+        portalEls.add(el(33, "button", "Check rain radar"));
+        java.util.List<ElementInfo> kept = MapDelta.budgetSelect(
+                portalEls, goal324, MapDelta.MAP_BUDGET_TOKENS);
+        java.util.List<Integer> keptNums =
+                new java.util.ArrayList<Integer>();
+        int keptEst = 0;
+        for (ElementInfo e : kept) {
+            keptNums.add(Integer.valueOf(e.number));
+            keptEst += Agent.estTokens(MapDelta.lineOf(e, goal324));
+        }
+        boolean ascending = true;
+        for (int i = 1; i < keptNums.size(); i++) {
+            if (keptNums.get(i).intValue()
+                    <= keptNums.get(i - 1).intValue()) {
+                ascending = false;
+            }
+        }
+        check("v324 budget: the floor survives from the tail "
+                        + "(search box, goal link, goal button)",
+                Boolean.valueOf(keptNums.contains(Integer.valueOf(1))
+                        && keptNums.contains(Integer.valueOf(32))
+                        && keptNums.contains(Integer.valueOf(33))),
+                Boolean.TRUE);
+        check("v324 budget: the kept set stays in map order, "
+                        + "never renumbered",
+                Boolean.valueOf(ascending), Boolean.TRUE);
+        check("v324 budget: something was dropped and the kept "
+                        + "lines fit the budget",
+                Boolean.valueOf(kept.size() < portalEls.size()
+                        && keptEst <= MapDelta.MAP_BUDGET_TOKENS),
+                Boolean.TRUE);
+        java.util.List<ElementInfo> floorOnly = MapDelta.budgetSelect(
+                portalEls, goal324, 10);
+        boolean allFloor = floorOnly.size() == 3;
+        for (ElementInfo e : floorOnly) {
+            if (!MapDelta.isContractFloor(e,
+                    MapDelta.goalOverlap(e, goal324))) {
+                allFloor = false;
+            }
+        }
+        check("v324 budget: a starved budget returns exactly "
+                        + "the contract floor",
+                Boolean.valueOf(allFloor), Boolean.TRUE);
+        java.util.List<ElementInfo> noGoal = MapDelta.budgetSelect(
+                portalEls, null, MapDelta.MAP_BUDGET_TOKENS);
+        java.util.List<Integer> noGoalNums =
+                new java.util.ArrayList<Integer>();
+        for (ElementInfo e : noGoal) {
+            noGoalNums.add(Integer.valueOf(e.number));
+        }
+        check("v324 budget: no goal ranks by document order "
+                        + "behind the floor",
+                Boolean.valueOf(noGoalNums.get(0).intValue() == 1
+                        && noGoalNums.contains(Integer.valueOf(2))
+                        && !noGoalNums.contains(
+                                Integer.valueOf(32))),
+                Boolean.TRUE);
+        Eyes.Perception portalP = mdPage(
+                "https://example.test/portal",
+                portalEls.toArray(new ElementInfo[0]));
+        portalP.title = "Portal";
+        String br = MapDelta.budgetRender(portalP, goal324);
+        check("v324 budget: the render shows the tail goal-match "
+                        + "and names the dropped count",
+                Boolean.valueOf(br.contains("Rain forecast")
+                        && br.contains("... truncated: "
+                                + (portalEls.size() - kept.size())
+                                + " more element(s) not shown")),
+                Boolean.TRUE);
+        Eyes.Perception smallP = mdPage("https://example.test/small",
+                elx(1, "a", "Home", "/"),
+                elx(2, "a", "About", "/about"),
+                elx(3, "a", "Products", "/products"),
+                elx(4, "a", "Services", "/services"),
+                elx(5, "a", "Contact", "/contact"),
+                elx(6, "a", "Support", "/support"));
+        check("v324 budget: a small page renders byte-identical "
+                        + "to the standing render",
+                MapDelta.budgetRender(smallP, goal324),
+                smallP.render(goal324));
+        java.util.List<Integer> sentNums =
+                new java.util.ArrayList<Integer>();
+        for (ElementInfo e : MapDelta.sentSet(portalP, goal324)) {
+            sentNums.add(Integer.valueOf(e.number));
+        }
+        check("v324 budget: sentSet is the budget selection",
+                sentNums.toString(), keptNums.toString());
+
+        // ================= the savings, measured ==========
+        Eyes.Perception wx324 = accuPage(
+                "Currently 68 degrees and clear in Oakdale.");
+        int oldWx = Agent.estTokens(wx324.render(goal324));
+        int newWx = Agent.estTokens(
+                MapDelta.budgetRender(wx324, goal324));
+        int savedWx = (oldWx - newWx) * 100 / oldWx;
+        System.out.println("MAP-TRIM-MEASUREMENT accu fixture "
+                + "(40 elements, rain goal): full render est "
+                + oldWx + " vs budget render est " + newWx
+                + " - saved " + savedWx + "%");
+        check("v324 savings: the accu fixture saves at least 20%",
+                Boolean.valueOf(savedWx >= 20), Boolean.TRUE);
+        int oldP = Agent.estTokens(portalP.render(goal324));
+        int newP = Agent.estTokens(
+                MapDelta.budgetRender(portalP, goal324));
+        int savedP = (oldP - newP) * 100 / oldP;
+        System.out.println("MAP-TRIM-MEASUREMENT portal fixture "
+                + "(33 elements, rain goal): full render est "
+                + oldP + " vs budget render est " + newP
+                + " - saved " + savedP + "%");
+        check("v324 savings: the portal fixture saves at least 20%",
+                Boolean.valueOf(savedP >= 20), Boolean.TRUE);
+
+        // ================= scripted runs ==================
+        Agent.Ui ui324 = new Agent.Ui() {
+            @Override public void feed(String line) { }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision, String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() { return false; }
+            @Override public boolean foreground() { return false; }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) { return false; }
+        };
+
+        // -- RECOVERY: the map fills in on the second retry --
+        final Eyes.Perception thinOne = mdPage(
+                "https://wx.test/forecast",
+                elx(1, "a", "Home", "/"));
+        thinOne.title = "Forecast";
+        final Eyes.Perception fullSix = mdPage(
+                "https://wx.test/forecast",
+                elx(1, "a", "Home", "/"),
+                elx(2, "a", "Hourly", "/hourly"),
+                elx(3, "a", "Daily", "/daily"),
+                elx(4, "a", "Radar", "/radar"),
+                elx(5, "a", "Alerts", "/alerts"),
+                elx(6, "a", "About", "/about"));
+        fullSix.title = "Forecast";
+        final int[] percR = {0};
+        Agent.Hands recHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                percR[0]++;
+                return percR[0] <= 2 ? thinOne : fullSix;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) { return "ok"; }
+            @Override public String read(int chunk) {
+                return "ok: read chars 0-40 of 500:\n"
+                        + "The recovered page lists six links.";
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] recCalls = {0};
+        ModelEngine recEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                recCalls[0]++;
+                if (recCalls[0] == 1) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"The recovered page lists six links.\"}";
+            }
+        };
+        com.ghosthands.app.Trail recTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(recHands, recEngine,
+                PolicyPacks.loadPack("standard"), recTrail, ui324,
+                "q5_k_m").run("Open the forecast page and list "
+                        + "its links.");
+        int recRetry = 0;
+        int recRecovered = 0;
+        int recFallback = 0;
+        String recStop = null;
+        for (java.util.Map<String, Object> ev : recTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("thin_map".equals(t)) {
+                String ph = String.valueOf(ev.get("phase"));
+                if ("retry".equals(ph)) recRetry++;
+                if ("recovered".equals(ph)) recRecovered++;
+                if ("fallback_read".equals(ph)) recFallback++;
+            }
+            if ("stop".equals(t)) {
+                recStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v324 run RECOVERY: two retries, then the map "
+                        + "filled in; no fallback; the run finishes",
+                recRetry + "|" + recRecovered + "|" + recFallback
+                        + "|" + percR[0] + "|" + recStop,
+                "2|1|0|4|done");
+
+        // -- FALLBACK: the map never fills in ----------------
+        final Eyes.Perception thinTwo = mdPage(
+                "https://wx.test/today",
+                elx(1, "a", "Home", "/"),
+                elx(2, "a", "About", "/about"));
+        thinTwo.title = "Today";
+        final String fcText = "Sunny and clear, high of 72 today.";
+        final int[] percF = {0};
+        final int[] readF = {0};
+        Agent.Hands fbHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                percF[0]++;
+                return thinTwo;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) { return "ok"; }
+            @Override public String read(int chunk) {
+                readF[0]++;
+                return Eyes.formatReadChunk(0, fcText,
+                        fcText.length());
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] fbCalls = {0};
+        final java.util.List<String> fbPrompts =
+                new java.util.ArrayList<String>();
+        ModelEngine fbEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                fbCalls[0]++;
+                fbPrompts.add(prompt);
+                if (fbCalls[0] == 1) {
+                    return "{\"action\":\"note\",\"fact\":"
+                            + "\"Forecast seen in the page text\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Sunny and clear, high of 72 today.\"}";
+            }
+        };
+        com.ghosthands.app.Trail fbTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(fbHands, fbEngine,
+                PolicyPacks.loadPack("standard"), fbTrail, ui324,
+                "q5_k_m").run("What is the weather today?");
+        int fbRetry = 0;
+        int fbRead = 0;
+        int fbUnread = 0;
+        int fbThinReads = 0;
+        String fbStop = null;
+        for (java.util.Map<String, Object> ev : fbTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("thin_map".equals(t)) {
+                String ph = String.valueOf(ev.get("phase"));
+                if ("retry".equals(ph)) fbRetry++;
+                if ("fallback_read".equals(ph)) fbRead++;
+                if ("fallback_unread".equals(ph)) fbUnread++;
+            }
+            if ("read".equals(t)
+                    && "thin_fallback".equals(
+                            String.valueOf(ev.get("phase")))) {
+                fbThinReads++;
+            }
+            if ("stop".equals(t)) {
+                fbStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v324 run FALLBACK: three retries, one fallback "
+                        + "read, the text in the first prompt, and "
+                        + "the settled URL never re-runs the ritual",
+                fbRetry + "|" + fbRead + "|" + fbUnread + "|"
+                        + fbThinReads + "|" + readF[0] + "|"
+                        + percF[0] + "|" + fbStop + "|"
+                        + Boolean.valueOf(fbPrompts.get(0)
+                                .contains("Sunny and clear")),
+                "3|1|0|1|1|5|done|true");
+
+        // -- GATE: auto-read OFF never extracts --------------
+        final int[] percG = {0};
+        final int[] readG = {0};
+        Agent.Hands gateHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                percG[0]++;
+                return thinTwo;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) { return "ok"; }
+            @Override public String read(int chunk) {
+                readG[0]++;
+                return Eyes.formatReadChunk(0, fcText,
+                        fcText.length());
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] gCalls = {0};
+        ModelEngine gateEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                gCalls[0]++;
+                if (gCalls[0] == 1) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Sunny and clear, high of 72 today.\"}";
+            }
+        };
+        com.ghosthands.app.Trail gateTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(gateHands, gateEngine,
+                PolicyPacks.loadPack("standard"), gateTrail, ui324,
+                "q5_k_m", false, 25, true, false,
+                Settings.CHUNK_AUTO).run(
+                        "What is the weather today?");
+        int gRetry = 0;
+        int gRead = 0;
+        String gUnreadReason = null;
+        String gStop = null;
+        for (java.util.Map<String, Object> ev : gateTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("thin_map".equals(t)) {
+                String ph = String.valueOf(ev.get("phase"));
+                if ("retry".equals(ph)) gRetry++;
+                if ("fallback_read".equals(ph)) gRead++;
+                if ("fallback_unread".equals(ph)) {
+                    gUnreadReason = String.valueOf(
+                            ev.get("reason"));
+                }
+            }
+            if ("stop".equals(t)) {
+                gStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v324 run GATE: auto-read OFF retries but never "
+                        + "extracts; the planner's own read lands "
+                        + "the answer",
+                gRetry + "|" + gRead + "|" + gUnreadReason + "|"
+                        + readG[0] + "|" + gStop,
+                "3|0|auto_read_off|1|done");
+    }
+
+    /** v3.25 test helper: one accessibility node, visible and
+     *  enabled, carrying a class and a text label. */
+    private static A11yNode aNode(String className, String text) {
+        A11yNode n = new A11yNode();
+        n.className = className;
+        n.text = text;
+        n.visible = true;
+        n.enabled = true;
+        return n;
+    }
+
+    /** v3.25 checks: the accessibility eyes — the pure
+     *  node-tree-to-map conversion (A11yMap), the Settings
+     *  status line (A11yEyes), the source marking, and the
+     *  loop's eyes consultations in scripted runs: a DOM map
+     *  that stays thin (the eyes serve the step, the guard
+     *  refuses an element action against an eyes element),
+     *  a DOM perception that throws (the eyes carry the
+     *  step), and the eyes absent (the disabled-service
+     *  no-op — v3.24's FALLBACK, unchanged). The real
+     *  service, the Android grant and a live WebView tree
+     *  cannot be exercised on the host; the device pass is
+     *  owed (BUILD_NOTES). */
+    private static void v325Tests(String[] args) {
+        // ================= A11yMap (pure) ==============
+        A11yNode root = aNode("android.widget.FrameLayout", null);
+        A11yNode chrome = aNode("android.widget.Button", "RUN");
+        chrome.clickable = true;
+        root.children.add(chrome);
+        A11yNode wv = aNode("android.webkit.WebView", null);
+        root.children.add(wv);
+        wv.children.add(aNode("android.widget.TextView",
+                "Forecast for Oakdale"));
+        A11yNode hourly = aNode("android.widget.Button", "Hourly");
+        hourly.clickable = true;
+        wv.children.add(hourly);
+        A11yNode city = aNode("android.widget.EditText", "Oakdale");
+        city.editable = true;
+        wv.children.add(city);
+        A11yNode details = aNode("android.widget.TextView", "Details");
+        details.clickable = true;
+        wv.children.add(details);
+        A11yNode pw = aNode("android.widget.EditText", "hunter2");
+        pw.editable = true;
+        pw.password = true;
+        wv.children.add(pw);
+        A11yNode alerts = aNode("android.widget.CheckBox", "Alerts");
+        alerts.checkable = true;
+        alerts.checked = true;
+        wv.children.add(alerts);
+        A11yMap.Result conv = A11yMap.convert(root);
+        StringBuilder convNames = new StringBuilder();
+        boolean convMarked = conv != null;
+        if (conv != null) {
+            for (int i = 0; i < conv.elements.size(); i++) {
+                ElementInfo e = conv.elements.get(i);
+                if (i > 0) convNames.append("|");
+                convNames.append(e.name);
+                if (!"a11y".equals(e.source) || e.domIndex != -1
+                        || e.number != i + 1) {
+                    convMarked = false;
+                }
+            }
+        }
+        check("v325 eyes: the WebView subtree converts in walk "
+                        + "order; the app's own chrome stays out",
+                Boolean.valueOf(conv != null
+                        && "Hourly|Oakdale|Details||Alerts".equals(
+                                convNames.toString())
+                        && conv.textPreview.contains(
+                                "Forecast for Oakdale")
+                        && !conv.textPreview.contains("RUN")),
+                Boolean.TRUE);
+        check("v325 eyes: every converted element is source-"
+                        + "marked, numbered from 1, with no "
+                        + "stash slot",
+                Boolean.valueOf(convMarked), Boolean.TRUE);
+        ElementInfo cHourly = conv.elements.get(0);
+        ElementInfo cCity = conv.elements.get(1);
+        ElementInfo cPw = conv.elements.get(3);
+        ElementInfo cAlerts = conv.elements.get(4);
+        check("v325 eyes: button, editable and checkable map "
+                        + "onto the browser contract",
+                Boolean.valueOf("button".equals(cHourly.tag)
+                        && "input".equals(cCity.tag)
+                        && "text".equals(cCity.type)
+                        && "textbox".equals(cCity.role)
+                        && "checkbox".equals(cAlerts.type)
+                        && cAlerts.checked),
+                Boolean.TRUE);
+        check("v325 eyes: a password node's text never reaches "
+                        + "its element, the preview, or the render",
+                Boolean.valueOf("password".equals(cPw.type)
+                        && "".equals(cPw.name)
+                        && !conv.textPreview.contains("hunter2")),
+                Boolean.TRUE);
+        Eyes.Perception convP = new Eyes.Perception();
+        convP.url = "https://wx.test/today";
+        convP.title = "Today";
+        convP.textPreview = conv.textPreview;
+        convP.elements = conv.elements;
+        check("v325 eyes: the converted map renders in the "
+                        + "standing numbered discipline",
+                Boolean.valueOf(convP.render("weather").contains(
+                                "[1] <button> \"Hourly\"")
+                        && !convP.render("weather").contains(
+                                "hunter2")),
+                Boolean.TRUE);
+        check("v325 eyes: descriptors carry the source; DOM "
+                        + "descriptors are unchanged",
+                Boolean.valueOf("a11y".equals(String.valueOf(
+                                cHourly.descriptor().get("source")))
+                        && !elx(1, "a", "Home", "/").descriptor()
+                                .containsKey("source")),
+                Boolean.TRUE);
+
+        // -- scope: no WebView, no conversion ---------------
+        A11yNode bare = aNode("android.widget.FrameLayout", null);
+        A11yNode bareBtn = aNode("android.widget.Button", "RUN");
+        bareBtn.clickable = true;
+        bare.children.add(bareBtn);
+        A11yNode hiddenRoot = aNode("android.widget.FrameLayout",
+                null);
+        A11yNode hiddenWv = aNode("android.webkit.WebView", null);
+        hiddenWv.visible = false;
+        A11yNode hiddenBtn = aNode("android.widget.Button",
+                "Hidden");
+        hiddenBtn.clickable = true;
+        hiddenWv.children.add(hiddenBtn);
+        hiddenRoot.children.add(hiddenWv);
+        A11yNode shownWv = aNode("android.webkit.WebView", null);
+        A11yNode shownBtn = aNode("android.widget.Button", "Shown");
+        shownBtn.clickable = true;
+        shownWv.children.add(shownBtn);
+        A11yNode ghostBtn = aNode("android.widget.Button", "Ghost");
+        ghostBtn.clickable = true;
+        ghostBtn.visible = false;
+        shownWv.children.add(ghostBtn);
+        hiddenRoot.children.add(shownWv);
+        A11yMap.Result shownRes = A11yMap.convert(hiddenRoot);
+        check("v325 eyes: no visible WebView converts to "
+                        + "nothing; the visible tab's tree is "
+                        + "the one read",
+                Boolean.valueOf(A11yMap.convert(bare) == null
+                        && A11yMap.convert(null) == null
+                        && shownRes != null
+                        && shownRes.elements.size() == 1
+                        && "Shown".equals(
+                                shownRes.elements.get(0).name)),
+                Boolean.TRUE);
+
+        // -- secure: a locked tree declares nothing ---------
+        A11yNode secRoot = aNode("android.widget.FrameLayout",
+                null);
+        A11yNode secWv = aNode("android.webkit.WebView", null);
+        secWv.secure = true;
+        A11yNode secBtn = aNode("android.widget.Button", "Secret");
+        secBtn.clickable = true;
+        secWv.children.add(secBtn);
+        secRoot.children.add(secWv);
+        A11yMap.Result secRes = A11yMap.convert(secRoot);
+        check("v325 eyes: under a secure ancestor the elements "
+                        + "stand but every label is withheld",
+                Boolean.valueOf(secRes != null
+                        && secRes.elements.size() == 1
+                        && "".equals(secRes.elements.get(0).name)
+                        && "".equals(secRes.textPreview)),
+                Boolean.TRUE);
+
+        // -- the caps and the quiet cases -------------------
+        A11yNode bigRoot = aNode("android.widget.FrameLayout",
+                null);
+        A11yNode bigWv = aNode("android.webkit.WebView", null);
+        for (int i = 1; i <= 45; i++) {
+            A11yNode item = aNode("android.widget.TextView",
+                    "Item " + i);
+            item.clickable = true;
+            bigWv.children.add(item);
+        }
+        bigRoot.children.add(bigWv);
+        A11yMap.Result bigRes = A11yMap.convert(bigRoot);
+        A11yNode quietRoot = aNode("android.widget.FrameLayout",
+                null);
+        A11yNode quietWv = aNode("android.webkit.WebView", null);
+        quietWv.children.add(aNode("android.widget.TextView",
+                "Just a headline"));
+        quietRoot.children.add(quietWv);
+        A11yMap.Result quietRes = A11yMap.convert(quietRoot);
+        check("v325 eyes: the element cap holds at 40 with the "
+                        + "overflow counted; a text-only page "
+                        + "converts to a preview, not elements",
+                Boolean.valueOf(bigRes != null
+                        && bigRes.elements.size()
+                                == A11yMap.MAX_ELEMENTS
+                        && bigRes.omitted == 5
+                        && quietRes != null
+                        && quietRes.elements.isEmpty()
+                        && quietRes.textPreview.contains(
+                                "Just a headline")),
+                Boolean.TRUE);
+        A11yNode miscRoot = aNode("android.widget.FrameLayout",
+                null);
+        A11yNode miscWv = aNode("android.webkit.WebView", null);
+        A11yNode spin = aNode("android.widget.Spinner", "Units");
+        spin.clickable = true;
+        miscWv.children.add(spin);
+        A11yNode radio = aNode("android.widget.RadioButton",
+                "Fahrenheit");
+        radio.checkable = true;
+        miscWv.children.add(radio);
+        miscRoot.children.add(miscWv);
+        A11yMap.Result miscRes = A11yMap.convert(miscRoot);
+        check("v325 eyes: a spinner reads as a select, a radio "
+                        + "button as a radio",
+                Boolean.valueOf(miscRes != null
+                        && miscRes.elements.size() == 2
+                        && "select".equals(
+                                miscRes.elements.get(0).tag)
+                        && "radio".equals(
+                                miscRes.elements.get(1).type)),
+                Boolean.TRUE);
+
+        // ================= A11yEyes (pure) ==============
+        check("v325 eyes: the Settings status line names both "
+                        + "grant states honestly",
+                Boolean.valueOf(A11yEyes.statusLine(true)
+                                .startsWith("Eyes ON")
+                        && A11yEyes.statusLine(false)
+                                .startsWith("Eyes OFF")),
+                Boolean.TRUE);
+
+        // ================= read-only by construction =====
+        if (args != null && args.length > 0) {
+            java.io.File shim325 = new java.io.File(args[0]);
+            java.io.File shimDir325 = shim325.getParentFile();
+            java.io.File v1Dir325 = shimDir325 == null ? null
+                    : shimDir325.getParentFile() == null ? null
+                    : shimDir325.getParentFile().getParentFile();
+            if (v1Dir325 != null) {
+                String mapSrc = readTestFile(new java.io.File(
+                        v1Dir325, "app/src/main/java/com/"
+                        + "ghosthands/app/A11yMap.java"));
+                String agentSrc = readTestFile(new java.io.File(
+                        v1Dir325, "app/src/main/java/com/"
+                        + "ghosthands/app/Agent.java"));
+                String mainSrc = readTestFile(new java.io.File(
+                        v1Dir325, "app/src/main/java/com/"
+                        + "ghosthands/app/MainActivity.java"));
+                if (mapSrc != null && agentSrc != null
+                        && mainSrc != null) {
+                    check("v325 pin: the converter holds no "
+                                    + "actuation — no gesture, no "
+                                    + "node action, no service "
+                                    + "reference",
+                            Boolean.valueOf(
+                                    !mapSrc.contains("dispatchGesture")
+                                    && !mapSrc.contains("performAction")
+                                    && !mapSrc.contains("ACTION_CLICK")
+                                    && !mapSrc.contains(
+                                            "GhostA11yService.")),
+                            Boolean.TRUE);
+                    check("v325 pin: the loop consults the eyes "
+                                    + "and records them; the guard "
+                                    + "names them",
+                            Boolean.valueOf(
+                                    agentSrc.contains("perceiveA11y")
+                                    && agentSrc.contains(
+                                            "\"a11y_perception\"")
+                                    && agentSrc.contains(
+                                            "accessibility eyes are")),
+                            Boolean.TRUE);
+                    check("v325 pin: the hands read the tree "
+                                    + "through the converter",
+                            Boolean.valueOf(mainSrc.contains(
+                                    "A11yMap.convert(")),
+                            Boolean.TRUE);
+                }
+            }
+        }
+
+        // ================= scripted runs ==================
+        Agent.Ui ui325 = new Agent.Ui() {
+            @Override public void feed(String line) { }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision, String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() { return false; }
+            @Override public boolean foreground() { return false; }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) { return false; }
+        };
+        final String fcText325 = "Sunny and clear, high of 72 "
+                + "today.";
+        final Eyes.Perception thin325 = mdPage(
+                "https://wx.test/today",
+                elx(1, "a", "Home", "/"),
+                elx(2, "a", "About", "/about"));
+        thin325.title = "Today";
+        final Eyes.Perception a11yPage325 = mdPage(
+                "https://wx.test/today",
+                elx(1, "button", "Hourly", null),
+                elx(2, "div", "Details", null),
+                elx(3, "button", "Radar", null));
+        for (ElementInfo e : a11yPage325.elements) {
+            e.source = A11yMap.SOURCE;
+        }
+        a11yPage325.title = "Today";
+        a11yPage325.textPreview = "Forecast for Oakdale";
+
+        // -- EYES: the DOM map stays thin; the eyes serve ---
+        final int[] eyesCalls = {0};
+        final int[] tapsSeen = {0};
+        Agent.Hands eyesHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return thin325;
+            }
+            @Override public Eyes.Perception perceiveA11y() {
+                eyesCalls[0]++;
+                return a11yPage325;
+            }
+            @Override public String tap(int el) {
+                tapsSeen[0]++;
+                return "ok";
+            }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) { return "ok"; }
+            @Override public String read(int chunk) {
+                return Eyes.formatReadChunk(0, fcText325,
+                        fcText325.length());
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] eCalls = {0};
+        ModelEngine eyesEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                eCalls[0]++;
+                if (eCalls[0] == 1) {
+                    return "{\"action\":\"tap\",\"el\":2}";
+                }
+                if (eCalls[0] == 2) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Sunny and clear, high of 72 "
+                        + "today.\"}";
+            }
+        };
+        com.ghosthands.app.Trail eyesTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(eyesHands, eyesEngine,
+                PolicyPacks.loadPack("standard"), eyesTrail, ui325,
+                "q5_k_m").run("What is the weather today?");
+        int eRetry = 0;
+        int eFallback = 0;
+        int eUsed = 0;
+        int eGuard = 0;
+        String eStop = null;
+        for (java.util.Map<String, Object> ev : eyesTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("thin_map".equals(t)) {
+                String ph = String.valueOf(ev.get("phase"));
+                if ("retry".equals(ph)) eRetry++;
+                if ("fallback_read".equals(ph)) eFallback++;
+            }
+            if ("a11y_perception".equals(t)
+                    && "used".equals(
+                            String.valueOf(ev.get("phase")))) {
+                eUsed++;
+            }
+            if ("guard".equals(t)
+                    && String.valueOf(ev.get("reason")).startsWith(
+                            "accessibility eyes are read-only")) {
+                eGuard++;
+            }
+            if ("stop".equals(t)) {
+                eStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v325 run EYES: the ritual retries, the eyes "
+                        + "serve every step, a tap on an eyes "
+                        + "element is corrected and never "
+                        + "executes, and the run finishes",
+                eRetry + "|" + eFallback + "|" + eUsed + "|"
+                        + eyesCalls[0] + "|" + tapsSeen[0] + "|"
+                        + eGuard + "|" + eStop,
+                "3|0|3|3|0|1|done");
+
+        // -- DOMFAIL: the DOM perception throws -------------
+        Agent.Hands failHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                throw new RuntimeException("map js died");
+            }
+            @Override public Eyes.Perception perceiveA11y() {
+                return a11yPage325;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) { return "ok"; }
+            @Override public String read(int chunk) {
+                return Eyes.formatReadChunk(0, fcText325,
+                        fcText325.length());
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] fCalls = {0};
+        ModelEngine failEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                fCalls[0]++;
+                if (fCalls[0] == 1) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Sunny and clear, high of 72 "
+                        + "today.\"}";
+            }
+        };
+        com.ghosthands.app.Trail failTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(failHands, failEngine,
+                PolicyPacks.loadPack("standard"), failTrail, ui325,
+                "q5_k_m").run("What is the weather today?");
+        int fDomFailed = 0;
+        String fStop = null;
+        for (java.util.Map<String, Object> ev : failTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("a11y_perception".equals(t)
+                    && "dom_failed".equals(
+                            String.valueOf(ev.get("phase")))) {
+                fDomFailed++;
+            }
+            if ("stop".equals(t)) {
+                fStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v325 run DOMFAIL: the eyes carry both steps "
+                        + "when the DOM perception throws, and "
+                        + "the run finishes instead of stopping "
+                        + "on the error",
+                fDomFailed + "|" + fStop, "2|done");
+
+        // -- EYESOFF: no eyes — v3.24's FALLBACK, unchanged -
+        Agent.Hands offHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return thin325;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) { return "ok"; }
+            @Override public String read(int chunk) {
+                return Eyes.formatReadChunk(0, fcText325,
+                        fcText325.length());
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] oCalls = {0};
+        ModelEngine offEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                oCalls[0]++;
+                if (oCalls[0] == 1) {
+                    return "{\"action\":\"note\",\"fact\":"
+                            + "\"Forecast seen in the page text\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Sunny and clear, high of 72 "
+                        + "today.\"}";
+            }
+        };
+        com.ghosthands.app.Trail offTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(offHands, offEngine,
+                PolicyPacks.loadPack("standard"), offTrail, ui325,
+                "q5_k_m").run("What is the weather today?");
+        int oEyes = 0;
+        int oFallback = 0;
+        String oStop = null;
+        for (java.util.Map<String, Object> ev : offTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("a11y_perception".equals(t)) oEyes++;
+            if ("thin_map".equals(t)
+                    && "fallback_read".equals(
+                            String.valueOf(ev.get("phase")))) {
+                oFallback++;
+            }
+            if ("stop".equals(t)) {
+                oStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v325 run EYESOFF: with no eyes the run is "
+                        + "v3.24's — the text fallback serves and "
+                        + "no eyes event exists",
+                oEyes + "|" + oFallback + "|" + oStop, "0|1|done");
+    }
+
+    /** v3.26 tests: the empty-page read correction and the
+     *  DuckDuckGo region recovery — the two failures of the
+     *  Nov 1, 2026 device trail (trail-20261101-002036,
+     *  weather goal on v3.24.0), pinned pure first, then as
+     *  scripted runs in that trail's shape. What the host
+     *  cannot prove — that the live DDG interstitial matches
+     *  the fixture and that the kl pin prevents it — is
+     *  device-owed and disclosed in BUILD_NOTES. */
+    private static void v326Tests(String[] args) {
+        // ================= empty page (pure) =================
+        GhAction read326 = new GhAction("read");
+        GhAction tap326 = new GhAction("tap");
+        tap326.el = 1;
+        check("v326 empty: a read on about:blank corrects",
+                Boolean.valueOf(RelevanceGuard.emptyPageReason(
+                        read326, "about:blank", 0, "", 0) != null),
+                Boolean.TRUE);
+        check("v326 empty: the reason names the empty page and "
+                        + "the way out (search or goto)",
+                Boolean.valueOf(RelevanceGuard.emptyPageReason(
+                                read326, "about:blank", 0, null, 0)
+                                .startsWith("empty page corrected "
+                                        + "by guard")
+                        && RelevanceGuard.emptyPageReason(
+                                read326, "about:blank", 0, null, 0)
+                                .contains("search")),
+                Boolean.TRUE);
+        check("v326 empty: the cap silences the rule",
+                Boolean.valueOf(RelevanceGuard.emptyPageReason(
+                        read326, "about:blank", 0, "",
+                        RelevanceGuard.EMPTY_PAGE_CORRECTION_CAP)
+                        == null),
+                Boolean.TRUE);
+        check("v326 empty: one element is not the empty room",
+                Boolean.valueOf(RelevanceGuard.emptyPageReason(
+                        read326, "about:blank", 1, "", 0) == null),
+                Boolean.TRUE);
+        check("v326 empty: a text-bearing page keeps its reads "
+                        + "(a plain-text page is a real read)",
+                Boolean.valueOf(RelevanceGuard.emptyPageReason(
+                        read326, "about:blank", 0,
+                        "Some plain text with no elements.", 0)
+                        == null),
+                Boolean.TRUE);
+        check("v326 empty: a hosted page is never the empty "
+                        + "room, even at zero elements and no "
+                        + "text (sparse and error pages live "
+                        + "there, not here)",
+                Boolean.valueOf(RelevanceGuard.emptyPageReason(
+                        read326, "https://wx.test/today", 0, "", 0)
+                        == null),
+                Boolean.TRUE);
+        boolean escapesOk = true;
+        String[] escapes = {"search", "goto", "back", "wait",
+                "done", "stuck", "scroll", "note", "ask",
+                "choose", "toggle", "type", "open_tab"};
+        for (int i = 0; i < escapes.length; i++) {
+            GhAction a = new GhAction(escapes[i]);
+            if (RelevanceGuard.emptyPageReason(
+                    a, "about:blank", 0, "", 0) != null) {
+                escapesOk = false;
+            }
+        }
+        check("v326 empty: everything but read stands down — "
+                        + "the escape actions above all",
+                Boolean.valueOf(escapesOk), Boolean.TRUE);
+        check("v326 empty: tap is the v1.6 rule's, not this "
+                        + "one's (the division of labour)",
+                Boolean.valueOf(RelevanceGuard.emptyPageReason(
+                                tap326, "about:blank", 0, "", 0)
+                                == null
+                        && RelevanceGuard.emptyMapReason(
+                                tap326, 0, 0) != null),
+                Boolean.TRUE);
+        check("v326 empty: the hostless judgement",
+                Boolean.valueOf(RelevanceGuard.isHostlessUrl(
+                                "about:blank")
+                        && RelevanceGuard.isHostlessUrl(null)
+                        && RelevanceGuard.isHostlessUrl("")
+                        && RelevanceGuard.isHostlessUrl(
+                                "file:///sdcard/page.html")
+                        && !RelevanceGuard.isHostlessUrl(
+                                "https://html.duckduckgo.com/html/")
+                        && !RelevanceGuard.isHostlessUrl(
+                                "https://wx.test/today")),
+                Boolean.TRUE);
+
+        // ================= region page (pure) =================
+        final String regionText = "All Regions Argentina "
+                + "Australia Austria Belgium (fr) Belgium (nl) "
+                + "Brazil Bulgaria Canada Chile China Colombia "
+                + "Croatia Denmark Finland France Germany";
+        final String resultsText = "Oakdale, Tennessee "
+                + "weather forecast: today high 68, low 47, "
+                + "rain chance 20 percent. Ten day outlook from "
+                + "the Weather Channel.";
+        check("v326 region: the picker is recognised on the "
+                        + "bare domain and the html host",
+                Boolean.valueOf(SearchEngines.isRegionPage(
+                                "https://duckduckgo.com/?q=weather",
+                                regionText)
+                        && SearchEngines.isRegionPage(
+                                "https://html.duckduckgo.com/html/"
+                                + "?q=weather", regionText)),
+                Boolean.TRUE);
+        check("v326 region: results text is not the picker",
+                Boolean.valueOf(!SearchEngines.isRegionPage(
+                        "https://html.duckduckgo.com/html/"
+                        + "?q=weather", resultsText)),
+                Boolean.TRUE);
+        check("v326 region: the signature off DDG is not the "
+                        + "picker; a header alone is not enough; "
+                        + "no text is not the picker",
+                Boolean.valueOf(!SearchEngines.isRegionPage(
+                                "https://example.test/regions",
+                                regionText)
+                        && !SearchEngines.isRegionPage(
+                                "https://duckduckgo.com/?q=x",
+                                "All Regions Argentina")
+                        && !SearchEngines.isRegionPage(
+                                "https://duckduckgo.com/?q=x", null)),
+                Boolean.TRUE);
+        check("v326 region: the recovery URL is the pinned "
+                        + "results URL for the raw query",
+                SearchEngines.searchUrlForQuery("duckduckgo",
+                        "weather forecast Oakdale, Tennessee"),
+                "https://html.duckduckgo.com/html/?q=weather"
+                        + "+forecast+Oakdale%2C+Tennessee&kl=us-en");
+        check("v326 region: the pin is us-en, rides every DDG "
+                        + "fallback URL, and no other engine's",
+                Boolean.valueOf("us-en".equals(
+                                SearchEngines.DDG_REGION)
+                        && SearchEngines.searchUrl("duckduckgo",
+                                "x").endsWith("&kl=us-en")
+                        && !SearchEngines.searchUrl("google",
+                                "x").contains("kl=")),
+                Boolean.TRUE);
+
+        // ================= scripted runs =================
+        Agent.Ui ui326 = new Agent.Ui() {
+            @Override public void feed(String line) { }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision, String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() { return false; }
+            @Override public boolean foreground() { return false; }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) { return false; }
+        };
+        final String goal326 = "Search for the weather "
+                + "forecast for Oakdale, Tennessee and tell me "
+                + "the high and low temperatures and chance of "
+                + "rain for the next three days.";
+        final String fcText326 = "Oakdale, TN forecast: today "
+                + "high 68, low 47, rain chance 20 percent.";
+        final Eyes.Perception results326 = mdPage(
+                "https://html.duckduckgo.com/html/?q=weather"
+                        + "+forecast+Oakdale%2C+Tennessee&kl=us-en",
+                elx(1, "a", "Oakdale, TN weather forecast - "
+                        + "weather.com",
+                        "https://weather.com/weather/today"),
+                elx(2, "a", "Oakdale TN 10 day forecast",
+                        "https://www.weatherbug.com/weather-forecast"),
+                elx(3, "a", "Oakdale hourly weather",
+                        "https://www.accuweather.com/hourly"),
+                elx(4, "a", "National Weather Service Oakdale",
+                        "https://forecast.weather.gov/"));
+        results326.title = "weather forecast Oakdale, "
+                + "Tennessee at DuckDuckGo";
+        results326.textPreview = resultsText;
+
+        // -- BLANK: the device trail's opening, replayed -----
+        // about:blank throughout until the search lands: the
+        // ritual's fallback read fails exactly as it did on
+        // the device, the planner reads on — and now the
+        // guard, not the error, answers.
+        final Eyes.Perception blank326 = mdPage("about:blank");
+        blank326.title = "";
+        final boolean[] searchedB = {false};
+        final int[] readB = {0};
+        Agent.Hands blankHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return searchedB[0] ? results326 : blank326;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                searchedB[0] = true;
+                return SearchEngines.searchedMessage(
+                        "duckduckgo", q);
+            }
+            @Override public String read(int chunk) {
+                readB[0]++;
+                if (!searchedB[0]) {
+                    return "error: no readable text found on "
+                            + "this page";
+                }
+                return Eyes.formatReadChunk(0, fcText326,
+                        fcText326.length());
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] blankCalls = {0};
+        final java.util.List<String> blankPrompts =
+                new java.util.ArrayList<String>();
+        ModelEngine blankEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                blankCalls[0]++;
+                blankPrompts.add(prompt);
+                if (blankCalls[0] <= 3) {
+                    return "{\"action\":\"read\"}";
+                }
+                if (blankCalls[0] == 4) {
+                    return "{\"action\":\"search\",\"query\":"
+                            + "\"weather forecast Oakdale, "
+                            + "Tennessee\"}";
+                }
+                if (blankCalls[0] == 5) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high 68, "
+                        + "low 47, rain chance 20 percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail blankTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(blankHands, blankEngine,
+                PolicyPacks.loadPack("standard"), blankTrail,
+                ui326, "q5_k_m").run(goal326);
+        int bCorrect = 0;
+        int bExecSearch = 0;
+        int bExecRead = 0;
+        String bStop = null;
+        for (java.util.Map<String, Object> ev : blankTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("guard".equals(t)
+                    && "correct".equals(
+                            String.valueOf(ev.get("outcome")))
+                    && String.valueOf(ev.get("reason")).startsWith(
+                            "empty page corrected by guard")) {
+                bCorrect++;
+            }
+            if ("execute".equals(t)) {
+                Object a = ev.get("action");
+                if (a instanceof java.util.Map) {
+                    String kind = String.valueOf(
+                            ((java.util.Map) a).get("action"));
+                    if ("search".equals(kind)) bExecSearch++;
+                    if ("read".equals(kind)) bExecRead++;
+                }
+            }
+            if ("stop".equals(t)) {
+                bStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v326 run BLANK: three reads corrected at the "
+                        + "cap, none executed; the search then "
+                        + "executes, one read executes on the "
+                        + "results page, the run finishes",
+                bCorrect + "|" + bExecRead + "|" + bExecSearch
+                        + "|" + readB[0] + "|" + bStop,
+                "3|1|1|2|done");
+        check("v326 run BLANK: the correction reaches the "
+                        + "planner (its step-4 prompt carries the "
+                        + "empty-page note)",
+                Boolean.valueOf(blankPrompts.size() >= 4
+                        && blankPrompts.get(3).contains(
+                                "completely empty")),
+                Boolean.TRUE);
+
+        // -- REGION: the fallback lands on the picker --------
+        // A boxless article page (the fallback's shape), the
+        // search lands on the region picker, and the loop —
+        // not the planner — re-issues it pinned, so the step
+        // after the search decides on results.
+        final Eyes.Perception article326 = mdPage(
+                "https://news.test/local-story",
+                elx(1, "a", "Home", "/"),
+                elx(2, "a", "Local News", "/news"),
+                elx(3, "a", "Contact", "/contact"));
+        article326.title = "Local News";
+        article326.textPreview = "Local news and community "
+                + "stories from Roane County.";
+        final Eyes.Perception picker326 = mdPage(
+                "https://duckduckgo.com/?q=weather+forecast"
+                        + "+Oakdale%2C+Tennessee",
+                elx(1, "a", "Argentina", "/?kl=ar-es"),
+                elx(2, "a", "Australia", "/?kl=au-en"),
+                elx(3, "a", "Austria", "/?kl=at-de"),
+                elx(4, "a", "Belgium (fr)", "/?kl=be-fr"),
+                elx(5, "a", "Belgium (nl)", "/?kl=be-nl"),
+                elx(6, "a", "Brazil", "/?kl=br-pt"),
+                elx(7, "a", "Bulgaria", "/?kl=bg-bg"),
+                elx(8, "a", "Canada", "/?kl=ca-en"),
+                elx(9, "a", "Chile", "/?kl=cl-es"),
+                elx(10, "a", "China", "/?kl=cn-zh"));
+        picker326.title = "DuckDuckGo";
+        picker326.textPreview = regionText;
+        final int[] phaseR = {0};
+        final java.util.List<String> gotoR =
+                new java.util.ArrayList<String>();
+        final String recoveryUrl326 =
+                SearchEngines.searchUrlForQuery("duckduckgo",
+                        "weather forecast Oakdale, Tennessee");
+        Agent.Hands regionHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                if (phaseR[0] == 1) return picker326;
+                if (phaseR[0] == 2) return results326;
+                return article326;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                gotoR.add(url);
+                if (recoveryUrl326.equals(url)) phaseR[0] = 2;
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                phaseR[0] = 1;
+                return SearchEngines.searchedMessage(
+                        "duckduckgo", q);
+            }
+            @Override public String read(int chunk) {
+                if (phaseR[0] == 2) {
+                    return Eyes.formatReadChunk(0, fcText326,
+                            fcText326.length());
+                }
+                return "error: no readable text found on "
+                        + "this page";
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] regionCalls = {0};
+        final java.util.List<String> regionPrompts =
+                new java.util.ArrayList<String>();
+        ModelEngine regionEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                regionCalls[0]++;
+                regionPrompts.add(prompt);
+                if (regionCalls[0] == 1) {
+                    return "{\"action\":\"search\",\"query\":"
+                            + "\"weather forecast Oakdale, "
+                            + "Tennessee\"}";
+                }
+                if (regionCalls[0] == 2) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high 68, "
+                        + "low 47, rain chance 20 percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail regionTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(regionHands, regionEngine,
+                PolicyPacks.loadPack("standard"), regionTrail,
+                ui326, "q5_k_m").run(goal326);
+        int rRecover = 0;
+        String rRecoveredUrl = null;
+        String rRecoverQuery = null;
+        int rPickerSeen = 0;
+        int rExecSearch = 0;
+        int rExecRead = 0;
+        String rStop = null;
+        for (java.util.Map<String, Object> ev : regionTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("recover".equals(t)
+                    && "ddg_region".equals(
+                            String.valueOf(ev.get("phase")))) {
+                rRecover++;
+                rRecoveredUrl = String.valueOf(
+                        ev.get("recovered_url"));
+                rRecoverQuery = String.valueOf(ev.get("query"));
+            }
+            if ("perceive".equals(t)
+                    && String.valueOf(ev.get("text_preview"))
+                            .contains("All Regions")) {
+                rPickerSeen++;
+            }
+            if ("execute".equals(t)) {
+                Object a = ev.get("action");
+                if (a instanceof java.util.Map) {
+                    String kind = String.valueOf(
+                            ((java.util.Map) a).get("action"));
+                    if ("search".equals(kind)) rExecSearch++;
+                    if ("read".equals(kind)) rExecRead++;
+                }
+            }
+            if ("stop".equals(t)) {
+                rStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v326 run REGION: one ddg_region recovery, "
+                        + "trailed with the pinned URL and the "
+                        + "query; the picker was perceived once "
+                        + "(the sighting that triggered it)",
+                rRecover + "|" + rPickerSeen + "|"
+                        + recoveryUrl326.equals(rRecoveredUrl)
+                        + "|" + ("weather forecast Oakdale, "
+                        + "Tennessee").equals(rRecoverQuery),
+                "1|1|true|true");
+        check("v326 run REGION: exactly one navigation — the "
+                        + "recovery's — and the run reads results "
+                        + "and finishes",
+                gotoR.size() + "|" + rExecSearch + "|"
+                        + rExecRead + "|" + rStop,
+                "1|1|1|done");
+        check("v326 run REGION: the planner never decides on "
+                        + "the picker (its step-2 prompt is the "
+                        + "results page, countries nowhere in it)",
+                Boolean.valueOf(regionPrompts.size() >= 2
+                        && !regionPrompts.get(1).contains(
+                                "Argentina")
+                        && regionPrompts.get(1).contains(
+                                "weather.com")),
+                Boolean.TRUE);
+
+        // ---- §8: no new trail types ----
+        // v3.26 rides the standing "recover" event with phase
+        // "ddg_region" (documented in Trail's header), so the
+        // registry stands at v3.25's 33.
+        check("v326 registry: EVENT_TYPES unchanged (33 types, "
+                        + "no v3.26 addition)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
+    }
+
+    /** v3.27 (Everything Train R13 — unattended mode): the
+     *  spike's GO-IF design as executable checks — the pure
+     *  firing judgement, the firing book, the headless
+     *  screen's contract, scripted unattended runs through
+     *  the real loop (readonly forced, silence = deny, stop
+     *  and budget honored), and the source pins for the new
+     *  Android surface. What no host test can prove — a real
+     *  AlarmManager firing, a real foreground service, an
+     *  unattached WebView's rendering, Doze on Ryan's
+     *  Motorola — is the device pass the notes list. */
+    private static void v327Tests(String[] args) {
+        final long T0 = 1700000000000L;
+        final long HOUR = 60L * 60L * 1000L;
+
+        // ================= the firing judgement ============
+        check("v327 judge: a deleted check fires nothing",
+                Integer.valueOf(Unattended.judgeFiring(
+                        false, true, true, true, true, false,
+                        true, true, 0, T0)),
+                Integer.valueOf(Unattended.NOTHING));
+        check("v327 judge: an unscheduled check fires nothing",
+                Integer.valueOf(Unattended.judgeFiring(
+                        true, false, true, true, true, false,
+                        true, true, 0, T0)),
+                Integer.valueOf(Unattended.NOTHING));
+        check("v327 judge: not opted in is a plain post — the "
+                        + "attended path, whatever the phone "
+                        + "state",
+                Integer.valueOf(Unattended.judgeFiring(
+                        true, true, false, false, false, true,
+                        false, false, 0, T0)),
+                Integer.valueOf(Unattended.POST));
+        check("v327 judge: opted in + grants + charging runs",
+                Integer.valueOf(Unattended.judgeFiring(
+                        true, true, true, true, true, false,
+                        true, false, 0, T0)),
+                Integer.valueOf(Unattended.RUN));
+        check("v327 judge: charging is structural — a goal "
+                        + "that set no conditions still waits "
+                        + "for the plug",
+                Integer.valueOf(Unattended.judgeFiring(
+                        true, true, true, true, true, false,
+                        false, true, 0, T0)),
+                Integer.valueOf(Unattended.DEFER));
+        check("v327 judge: the goal's Wi-Fi condition rides "
+                        + "on top of charging",
+                Integer.valueOf(Unattended.judgeFiring(
+                        true, true, true, true, true, true,
+                        true, false, 0, T0)),
+                Integer.valueOf(Unattended.DEFER));
+        check("v327 judge: charging + Wi-Fi (when asked) runs",
+                Integer.valueOf(Unattended.judgeFiring(
+                        true, true, true, true, true, true,
+                        true, true, 0, T0)),
+                Integer.valueOf(Unattended.RUN));
+        check("v327 judge: either grant missing posts — "
+                        + "notify-and-launch is the degradation, "
+                        + "never a silent skip",
+                Boolean.valueOf(Unattended.judgeFiring(
+                                true, true, true, false, true,
+                                false, true, true, 0, T0)
+                                == Unattended.POST
+                        && Unattended.judgeFiring(
+                                true, true, true, true, false,
+                                false, true, true, 0, T0)
+                                == Unattended.POST
+                        && Unattended.judgeFiring(
+                                true, true, true, false, false,
+                                false, true, true, 0, T0)
+                                == Unattended.POST),
+                Boolean.TRUE);
+        check("v327 judge: a deferred run still inside the "
+                        + "give-up window defers again",
+                Integer.valueOf(Unattended.judgeFiring(
+                        true, true, true, true, true, false,
+                        false, true, T0, T0 + 3 * HOUR)),
+                Integer.valueOf(Unattended.DEFER));
+        check("v327 judge: past the give-up window the check "
+                        + "falls back to the notification — it "
+                        + "never runs unconditioned late",
+                Integer.valueOf(Unattended.judgeFiring(
+                        true, true, true, true, true, false,
+                        false, true, T0,
+                        T0 + CheckConditions.MAX_DEFER_MS)),
+                Integer.valueOf(Unattended.POST));
+
+        // ================= grants, arming, budget ==========
+        check("v327 grants: the missing-grant judgement",
+                Boolean.valueOf(Unattended.missingGrant(
+                                true, true)
+                                == Unattended.GRANTS_OK
+                        && Unattended.missingGrant(false, true)
+                                == Unattended.GRANT_EXACT_MISSING
+                        && Unattended.missingGrant(true, false)
+                                == Unattended.GRANT_BATTERY_MISSING
+                        && Unattended.missingGrant(false, false)
+                                == Unattended.GRANTS_BOTH_MISSING),
+                Boolean.TRUE);
+        check("v327 grants: the missing text names the doors",
+                Boolean.valueOf(Unattended.missingText(
+                                true, true).length() == 0
+                        && Unattended.missingText(false, true)
+                                .contains("Alarms & reminders")
+                        && Unattended.missingText(true, false)
+                                .contains("Unrestricted")
+                        && Unattended.missingText(false, false)
+                                .contains("and")),
+                Boolean.TRUE);
+        check("v327 arm: exact only for an opted-in goal "
+                        + "with the grant in hand at arm time",
+                Boolean.valueOf(Unattended.armMode(true, true)
+                                == Unattended.ARM_EXACT
+                        && Unattended.armMode(true, false)
+                                == Unattended.ARM_INEXACT
+                        && Unattended.armMode(false, true)
+                                == Unattended.ARM_INEXACT),
+                Boolean.TRUE);
+        check("v327 budget: ten minutes, judged at the line, "
+                        + "and an unstamped start is always over",
+                Boolean.valueOf(Unattended.MAX_RUN_MS
+                                == 10L * 60L * 1000L
+                        && !Unattended.budgetStop(T0,
+                                T0 + Unattended.MAX_RUN_MS - 1)
+                        && Unattended.budgetStop(T0,
+                                T0 + Unattended.MAX_RUN_MS)
+                        && Unattended.budgetStop(0, T0)),
+                Boolean.TRUE);
+        check("v327 status: the grants line is honest in "
+                        + "both states",
+                Boolean.valueOf(Unattended.grantStatusLine(
+                                true, true)
+                                .startsWith("Unattended ready")
+                        && Unattended.grantStatusLine(
+                                false, true)
+                                .startsWith("Unattended not "
+                                        + "ready: missing the "
+                                        + "Alarms & reminders")
+                        && Unattended.goalLine(false, true, true)
+                                .length() == 0
+                        && Unattended.goalLine(true, true, true)
+                                .startsWith("unattended: runs "
+                                        + "itself")
+                        && Unattended.goalLine(true, true, false)
+                                .contains("waiting on")),
+                Boolean.TRUE);
+
+        // ================= occurrences + missed firings ====
+        java.util.TimeZone utc =
+                java.util.TimeZone.getTimeZone("UTC");
+        java.util.Calendar cal =
+                java.util.Calendar.getInstance(utc);
+        cal.set(2026, 10, 1, 12, 0, 0);
+        cal.set(java.util.Calendar.MILLISECOND, 0);
+        long nowNoon = cal.getTimeInMillis();
+        cal.set(2026, 10, 1, 7, 30, 0);
+        cal.set(java.util.Calendar.MILLISECOND, 0);
+        long occToday = cal.getTimeInMillis();
+        cal.set(2026, 10, 1, 6, 0, 0);
+        cal.set(java.util.Calendar.MILLISECOND, 0);
+        long now6 = cal.getTimeInMillis();
+        cal.set(2026, 9, 31, 7, 30, 0);
+        cal.set(java.util.Calendar.MILLISECOND, 0);
+        long occYday = cal.getTimeInMillis();
+        check("v327 occurrence: at noon, today's 07:30 is "
+                        + "the last one",
+                Long.valueOf(Unattended.lastOccurrenceMs(
+                        nowNoon, 450, utc)),
+                Long.valueOf(occToday));
+        check("v327 occurrence: before it, yesterday's is",
+                Long.valueOf(Unattended.lastOccurrenceMs(
+                        now6, 450, utc)),
+                Long.valueOf(occYday));
+        check("v327 occurrence: no schedule, no occurrence",
+                Long.valueOf(Unattended.lastOccurrenceMs(
+                        nowNoon, -1, utc)),
+                Long.valueOf(0));
+        check("v327 missed: a firing that never reached the "
+                        + "receiver is missing",
+                Boolean.valueOf(Unattended.missedFiring(
+                        occToday - HOUR, 0, occToday)),
+                Boolean.TRUE);
+        check("v327 missed: a recorded firing for the "
+                        + "occurrence answers it (grace covers "
+                        + "delivery lag)",
+                Boolean.valueOf(!Unattended.missedFiring(
+                                occToday - HOUR, occToday,
+                                occToday)
+                        && !Unattended.missedFiring(
+                                occToday - HOUR,
+                                occToday - 4L * 60L * 1000L,
+                                occToday)),
+                Boolean.TRUE);
+        check("v327 missed: an occurrence from before the "
+                        + "opt-in is not this feature's to "
+                        + "answer for; no opt-in, no judgement",
+                Boolean.valueOf(!Unattended.missedFiring(
+                                occToday + HOUR, 0, occToday)
+                        && !Unattended.missedFiring(
+                                0, 0, occToday)),
+                Boolean.TRUE);
+
+        // ================= the firing book =================
+        UnattendedLog book = new UnattendedLog();
+        book.stampEnabled("Wx", 1000);
+        book.record("Wx", UnattendedLog.OUT_STARTED, 2000,
+                "trail-x.jsonl");
+        book.recordMissed("Wx", 1500);
+        book.record("Gone", UnattendedLog.OUT_FAILED, 500, "");
+        UnattendedLog back = UnattendedLog.parse(
+                book.serialize());
+        UnattendedLog.Record rec = back.get("Wx");
+        check("v327 book: the ledger round-trips whole",
+                Boolean.valueOf(rec != null
+                        && rec.enabledMs == 1000
+                        && rec.lastFiringMs == 2000
+                        && UnattendedLog.OUT_STARTED.equals(
+                                rec.lastOutcome)
+                        && "trail-x.jsonl".equals(
+                                rec.lastTrailName)
+                        && rec.lastMissedOccurrenceMs == 1500
+                        && back.size() == 2),
+                Boolean.TRUE);
+        java.util.Set<String> liveNames =
+                new java.util.HashSet<String>();
+        liveNames.add("Wx");
+        back.prune(liveNames);
+        check("v327 book: junk parses empty, prune drops the "
+                        + "dead",
+                Boolean.valueOf(UnattendedLog.parse("junk")
+                                .size() == 0
+                        && UnattendedLog.parse(null).size() == 0
+                        && back.size() == 1
+                        && back.get("Wx") != null),
+                Boolean.TRUE);
+
+        // ================= the goal record =================
+        SavedGoals.SavedGoal sg = new SavedGoals.SavedGoal(
+                "Wx", "check the forecast", "standard", 450);
+        check("v327 goal: the label before opt-in is "
+                        + "byte-identical to v3.26's",
+                SavedGoals.scheduleLabel(sg), "daily 07:30");
+        sg.unattended = true;
+        check("v327 goal: the label after opt-in says so",
+                SavedGoals.scheduleLabel(sg),
+                "daily 07:30 · unattended");
+        SavedGoals store327 = new SavedGoals();
+        store327.put(sg);
+        SavedGoals.SavedGoal plain = new SavedGoals.SavedGoal(
+                "Plain", "another goal", "standard", 480);
+        store327.put(plain);
+        String ser327 = store327.serialize();
+        SavedGoals back327 = SavedGoals.parse(ser327);
+        check("v327 goal: the flag round-trips, written only "
+                        + "when set",
+                Boolean.valueOf(back327.find("Wx").unattended
+                        && !back327.find("Plain").unattended
+                        && countOccurrences(ser327,
+                                "\"unattended\"") == 1),
+                Boolean.TRUE);
+        SavedGoals.SavedGoal carried = new SavedGoals.SavedGoal(
+                "Wx", "check the forecast", "readonly", 450);
+        carried.copyWatchFrom(sg);
+        check("v327 goal: a re-save carries the opt-in "
+                        + "(copyWatchFrom)",
+                Boolean.valueOf(carried.unattended),
+                Boolean.TRUE);
+
+        // ================= the headless screen =============
+        RunControl.clear();
+        HeadlessUi hui = new HeadlessUi(
+                System.currentTimeMillis());
+        check("v327 headless: silence is a deny, in every "
+                        + "shape the contract offers",
+                Boolean.valueOf(!hui.approve(
+                                new GhAction("tap"), null, "x")
+                        && hui.askUser("anything?", 1000) == null
+                        && hui.awaitUserTap(1, 1000) == null
+                        && !hui.awaitUserResume(1, "x", 1000)
+                        && !hui.foreground()),
+                Boolean.TRUE);
+        check("v327 headless: a fresh run is unstopped and "
+                        + "inside budget; an ancient start is "
+                        + "over both",
+                Boolean.valueOf(!hui.stopRequested()
+                        && !hui.budgetTripped()
+                        && new HeadlessUi(1).budgetTripped()),
+                Boolean.TRUE);
+
+        // ================= scripted runs ===================
+        final String fcText = "Oakdale forecast: today high "
+                + "68, low 47, rain chance 20 percent.";
+        final Eyes.Perception wxPage = mdPage(
+                "https://wx.test/today",
+                elx(1, "button", "Add to list", ""),
+                elx(2, "a", "Full forecast",
+                        "https://wx.test/full"));
+        wxPage.title = "Oakdale weather";
+        wxPage.textPreview = "Oakdale forecast page.";
+
+        // -- RUN A: readonly denies the write --------------
+        final java.util.List<Integer> tappedA =
+                new java.util.ArrayList<Integer>();
+        Agent.Hands handsA = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return wxPage;
+            }
+            @Override public String tap(int el) {
+                tappedA.add(Integer.valueOf(el));
+                return "ok";
+            }
+            @Override public String type(int el, String t) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String u) {
+                return "ok";
+            }
+            @Override public String scroll(String d) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int c) {
+                return Eyes.formatReadChunk(0, fcText,
+                        fcText.length());
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        final int[] callsA = {0};
+        ModelEngine engineA = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsA[0]++;
+                if (callsA[0] == 1) {
+                    return "{\"action\":\"tap\",\"el\":1}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"nothing\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailA =
+                new com.ghosthands.app.Trail(null);
+        new Agent(handsA, engineA,
+                PolicyPacks.loadPack("readonly"), trailA,
+                new HeadlessUi(System.currentTimeMillis()),
+                "q5_k_m", false, 25, true, true,
+                Settings.CHUNK_AUTO, 4, "duckduckgo", false,
+                true, false, false, Settings.END_CARD, false,
+                true, Settings.STYLE_BALANCED, null, null, null,
+                null, false, null, null, 0, 0, null, null,
+                true).run("Check the Oakdale forecast");
+        String stopA = null;
+        boolean denyA = false;
+        Object unA = null;
+        for (java.util.Map<String, Object> ev
+                : trailA.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("stop".equals(t)) {
+                stopA = String.valueOf(ev.get("reason"));
+            }
+            if ("govern".equals(t)
+                    && Governor.DENY.equals(
+                            String.valueOf(ev.get("outcome")))) {
+                denyA = true;
+            }
+            if ("run".equals(t)) unA = ev.get("unattended");
+        }
+        check("v327 run A: under the forced readonly pack a "
+                        + "write tap is denied by the Governor "
+                        + "and never executes; the run stops "
+                        + "denied, stamped unattended",
+                stopA + "|" + denyA + "|" + tappedA.isEmpty()
+                        + "|" + Boolean.TRUE.equals(unA),
+                "denied|true|true|true");
+
+        // -- RUN A2: readonly work completes ----------------
+        final java.util.List<Integer> tappedA2 =
+                new java.util.ArrayList<Integer>();
+        Agent.Hands handsA2 = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return wxPage;
+            }
+            @Override public String tap(int el) {
+                tappedA2.add(Integer.valueOf(el));
+                return "ok";
+            }
+            @Override public String type(int el, String t) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String u) {
+                return "ok";
+            }
+            @Override public String scroll(String d) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int c) {
+                return Eyes.formatReadChunk(0, fcText,
+                        fcText.length());
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        final int[] callsA2 = {0};
+        ModelEngine engineA2 = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsA2[0]++;
+                if (callsA2[0] == 1) {
+                    return "{\"action\":\"tap\",\"el\":2}";
+                }
+                if (callsA2[0] == 2) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale: high 68, low 47, rain "
+                        + "chance 20 percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailA2 =
+                new com.ghosthands.app.Trail(null);
+        new Agent(handsA2, engineA2,
+                PolicyPacks.loadPack("readonly"), trailA2,
+                new HeadlessUi(System.currentTimeMillis()),
+                "q5_k_m", false, 25, true, true,
+                Settings.CHUNK_AUTO, 4, "duckduckgo", false,
+                true, false, false, Settings.END_CARD, false,
+                true, Settings.STYLE_BALANCED, null, null, null,
+                null, false, null, null, 0, 0, null, null,
+                true).run("Check the Oakdale forecast");
+        String stopA2 = null;
+        for (java.util.Map<String, Object> ev
+                : trailA2.events()) {
+            if ("stop".equals(String.valueOf(ev.get("type")))) {
+                stopA2 = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v327 run A2: readonly work — a link tap and a "
+                        + "read — completes and finishes done",
+                stopA2 + "|" + tappedA2,
+                "done|[2]");
+
+        // -- RUN B: an ASK with nobody present is a deny ----
+        final Eyes.Perception dangerPage = mdPage(
+                "https://shop.test/account",
+                elx(1, "button", "Delete account", ""));
+        dangerPage.title = "Account";
+        dangerPage.textPreview = "Your account page.";
+        final java.util.List<Integer> tappedB =
+                new java.util.ArrayList<Integer>();
+        Agent.Hands handsB = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return dangerPage;
+            }
+            @Override public String tap(int el) {
+                tappedB.add(Integer.valueOf(el));
+                return "ok";
+            }
+            @Override public String type(int el, String t) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String u) {
+                return "ok";
+            }
+            @Override public String scroll(String d) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int c) {
+                return "error: no readable text found on "
+                        + "this page";
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        final int[] callsB = {0};
+        ModelEngine engineB = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsB[0]++;
+                if (callsB[0] == 1) {
+                    return "{\"action\":\"tap\",\"el\":1}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"nothing\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailB =
+                new com.ghosthands.app.Trail(null);
+        new Agent(handsB, engineB,
+                PolicyPacks.loadPack("standard"), trailB,
+                new HeadlessUi(System.currentTimeMillis()),
+                "q5_k_m", false, 25, true, true,
+                Settings.CHUNK_AUTO, 4, "duckduckgo", false,
+                true, false, false, Settings.END_CARD, false,
+                true, Settings.STYLE_BALANCED, null, null, null,
+                null, false, null, null, 0, 0, null, null,
+                true).run("Tidy my account");
+        String stopB = null;
+        boolean askB = false;
+        for (java.util.Map<String, Object> ev
+                : trailB.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("stop".equals(t)) {
+                stopB = String.valueOf(ev.get("reason"));
+            }
+            if ("govern".equals(t)
+                    && Governor.ASK.equals(
+                            String.valueOf(ev.get("outcome")))) {
+                askB = true;
+            }
+        }
+        check("v327 run B: even under an asking pack, an ASK "
+                        + "with nobody present is declined by "
+                        + "the headless screen and never "
+                        + "executes — the run stops denied",
+                stopB + "|" + askB + "|" + tappedB.isEmpty(),
+                "denied|true|true");
+
+        // -- RUN C: the outside stop lands ------------------
+        RunControl.clear();
+        final int[] callsC = {0};
+        ModelEngine engineC = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsC[0]++;
+                if (callsC[0] == 2) {
+                    // The widget's Stop, landing mid-run.
+                    RunControl.requestStop();
+                }
+                return "{\"action\":\"read\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailC =
+                new com.ghosthands.app.Trail(null);
+        try {
+            new Agent(handsA2, engineC,
+                    PolicyPacks.loadPack("readonly"), trailC,
+                    new HeadlessUi(System.currentTimeMillis()),
+                    "q5_k_m", false, 25, true, true,
+                    Settings.CHUNK_AUTO, 4, "duckduckgo", false,
+                    true, false, false, Settings.END_CARD, false,
+                    true, Settings.STYLE_BALANCED, null, null,
+                    null, null, false, null, null, 0, 0, null,
+                    null, true).run("Check the Oakdale "
+                            + "forecast");
+        } finally {
+            RunControl.clear();
+        }
+        String stopC = null;
+        for (java.util.Map<String, Object> ev
+                : trailC.events()) {
+            if ("stop".equals(String.valueOf(ev.get("type")))) {
+                stopC = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v327 run C: a stop requested from outside "
+                        + "(the widget latch) stops the "
+                        + "unattended run promptly",
+                stopC + "|" + (callsC[0] <= 3),
+                "stopped|true");
+
+        // -- RUN D: the wall-clock budget stops it ----------
+        final long startD = System.currentTimeMillis();
+        final int[] pollsD = {0};
+        HeadlessUi.Clock clockD = new HeadlessUi.Clock() {
+            @Override public long nowMs() {
+                pollsD[0]++;
+                return (pollsD[0] < 5) ? startD
+                        : startD + Unattended.MAX_RUN_MS + 1000;
+            }
+        };
+        HeadlessUi uiD = new HeadlessUi(startD, clockD);
+        final StringBuilder longText = new StringBuilder();
+        for (int i = 0; i < 40; i++) {
+            longText.append("Segment ").append(i)
+                    .append(": clear skies over Oakdale, ")
+                    .append("high 68, low 47. ");
+        }
+        final String longFc = longText.toString();
+        final int[] readOff = {0};
+        Agent.Hands handsD = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return wxPage;
+            }
+            @Override public String tap(int el) {
+                return "ok";
+            }
+            @Override public String type(int el, String t) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String u) {
+                return "ok";
+            }
+            @Override public String scroll(String d) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int c) {
+                int off = readOff[0];
+                int end = Math.min(longFc.length(),
+                        off + 200);
+                String chunk = longFc.substring(off, end);
+                readOff[0] = (end >= longFc.length())
+                        ? 0 : end;
+                return Eyes.formatReadChunk(off, chunk,
+                        longFc.length());
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        final int[] callsDcnt = {0};
+        ModelEngine engineD = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsDcnt[0]++;
+                return "{\"action\":\"read\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailD =
+                new com.ghosthands.app.Trail(null);
+        new Agent(handsD, engineD,
+                PolicyPacks.loadPack("readonly"), trailD, uiD,
+                "q5_k_m", false, 40, true, true,
+                Settings.CHUNK_AUTO, 4, "duckduckgo", false,
+                true, false, false, Settings.END_CARD, false,
+                true, Settings.STYLE_BALANCED, null, null, null,
+                null, false, null, null, 0, 0, null, null,
+                true).run("Read the whole Oakdale outlook");
+        String stopD = null;
+        for (java.util.Map<String, Object> ev
+                : trailD.events()) {
+            if ("stop".equals(String.valueOf(ev.get("type")))) {
+                stopD = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v327 run D: the ten-minute wall clock stops "
+                        + "the run (reason stopped, budget "
+                        + "tripped, steps unspent)",
+                stopD + "|" + uiD.budgetTripped() + "|"
+                        + (callsDcnt[0] < 40),
+                "stopped|true|true");
+
+        // -- the stamp is unattended-only -------------------
+        com.ghosthands.app.Trail trailE =
+                new com.ghosthands.app.Trail(null);
+        ModelEngine engineE = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"All quiet.\"}";
+            }
+        };
+        new Agent(handsA2, engineE,
+                PolicyPacks.loadPack("standard"), trailE,
+                new HeadlessUi(System.currentTimeMillis()),
+                "q5_k_m").run("Check the Oakdale forecast");
+        boolean stampE = true;
+        for (java.util.Map<String, Object> ev
+                : trailE.events()) {
+            if ("run".equals(String.valueOf(ev.get("type")))
+                    && ev.containsKey("unattended")) {
+                stampE = false;
+            }
+        }
+        check("v327 stamp: an attended run's record carries "
+                        + "no unattended stamp (byte-identical "
+                        + "to v3.26's)",
+                Boolean.valueOf(stampE), Boolean.TRUE);
+
+        // ================= source pins =====================
+        if (args != null && args.length > 0) {
+            java.io.File shimF = new java.io.File(args[0]);
+            java.io.File shimDir = shimF.getParentFile();
+            java.io.File v1Dir = shimDir == null ? null
+                    : shimDir.getParentFile() == null ? null
+                    : shimDir.getParentFile().getParentFile();
+            if (v1Dir != null) {
+                String base = "app/src/main/java/com/"
+                        + "ghosthands/app/";
+                String svcSrc = readTestFile(new java.io.File(
+                        v1Dir, base + "UnattendedService.java"));
+                String recvSrc = readTestFile(new java.io.File(
+                        v1Dir, base + "CheckReceiver.java"));
+                String bootSrc = readTestFile(new java.io.File(
+                        v1Dir, base + "BootReceiver.java"));
+                String widgetSrc = readTestFile(
+                        new java.io.File(v1Dir,
+                                base + "GhostWidget.java"));
+                String maniSrc = readTestFile(new java.io.File(
+                        v1Dir,
+                        "app/src/main/AndroidManifest.xml"));
+                if (svcSrc != null && recvSrc != null
+                        && bootSrc != null && widgetSrc != null
+                        && maniSrc != null) {
+                    check("v327 pin: the service forces the "
+                                    + "readonly pack by "
+                                    + "construction and holds "
+                                    + "its wake lock by name",
+                            Boolean.valueOf(svcSrc.contains(
+                                            "PolicyPacks.loadPack("
+                                                    + "\"readonly\")")
+                                    && !svcSrc.contains(
+                                            "loadPack(\"standard\")")
+                                    && svcSrc.contains(
+                                            "PARTIAL_WAKE_LOCK")
+                                    && svcSrc.contains(
+                                            "startForeground")
+                                    && svcSrc.contains(
+                                            "HeadlessUi")),
+                            Boolean.TRUE);
+                    check("v327 pin: the receiver judges "
+                                    + "unattended firings and "
+                                    + "starts the service; the "
+                                    + "boot receiver re-arms "
+                                    + "and nothing more",
+                            Boolean.valueOf(recvSrc.contains(
+                                            "Unattended.judgeFiring")
+                                    && recvSrc.contains(
+                                            "UnattendedService"
+                                                    + ".start")
+                                    && bootSrc.contains(
+                                            "armAllChecks")
+                                    && !bootSrc.contains(
+                                            "UnattendedService")
+                                    && !bootSrc.contains(
+                                            "startForegroundService")),
+                            Boolean.TRUE);
+                    check("v327 pin: the widget still never "
+                                    + "starts a run (stop only)",
+                            Boolean.valueOf(!widgetSrc.contains(
+                                            "UnattendedService")
+                                    && widgetSrc.contains(
+                                            "RunControl"
+                                                    + ".requestStop()")),
+                            Boolean.TRUE);
+                    check("v327 pin: the manifest declares "
+                                    + "the service specialUse "
+                                    + "with its subtype in plain "
+                                    + "words, the boot receiver, "
+                                    + "and neither forbidden "
+                                    + "permission",
+                            Boolean.valueOf(maniSrc.contains(
+                                            ".UnattendedService")
+                                    && maniSrc.contains(
+                                            "android:foregroundServiceType="
+                                                    + "\"specialUse\"")
+                                    && maniSrc.contains(
+                                            "PROPERTY_SPECIAL_USE_FGS_SUBTYPE")
+                                    && maniSrc.contains(
+                                            "read-only web check")
+                                    && maniSrc.contains(
+                                            ".BootReceiver")
+                                    && maniSrc.contains(
+                                            "BOOT_COMPLETED")
+                                    && !maniSrc.contains(
+                                            "android.permission"
+                                                    + ".POST_NOTIFICATIONS")
+                                    && !maniSrc.contains(
+                                            "android.permission"
+                                                    + ".USE_EXACT_ALARM")),
+                            Boolean.TRUE);
+                }
+            }
+        }
+
+        // ---- no new trail types ----
+        // v3.27 rides the standing "run" event (the
+        // "unattended" stamp) and the standing "watch"
+        // event; the registry stands at 33.
+        check("v327 registry: EVENT_TYPES unchanged (33 "
+                        + "types, no v3.27 addition)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
+    }
+
+    /** v3.28 (the v3.26 trail's two corrections): the DDG
+     *  region picker is furniture on the results page, not a
+     *  page — the pure strip and the map-gated detector, the
+     *  extraction walks' picker skip (source pins; no host
+     *  test can run a WebView), the recovery's no-navigation
+     *  rule when the pinned address is already open, and the
+     *  redirect-shim settle: pure shim recognition plus two
+     *  scripted tap-through-shim runs. What no host test can
+     *  prove — the live picker's DOM shape under the walk
+     *  skip, a real shim's forward timing — is the device
+     *  pass the notes list. */
+    private static void v328Tests(String[] args) {
+        RedirectShims.WAIT_DIVISOR = 1000000L;
+
+        // ================= furniture (pure) =================
+        final String ddgResultsUrl = "https://html.duckduckgo.com"
+                + "/html/?q=weather+forecast+Oakdale+Tennessee"
+                + "&kl=us-en";
+        final String regionRun = "All Regions Argentina "
+                + "Australia Austria Belgium (fr) Belgium (nl) "
+                + "Brazil Bulgaria Canada (en) Canada (fr) "
+                + "Catalonia Chile China Colombia Croatia "
+                + "Czech Republic Denmark Estonia Finland "
+                + "France Germany Greece Hong Kong Hungary "
+                + "Iceland India (en)";
+        final String resultsLead = "Weather forecast for "
+                + "Oakdale, Tennessee: today high 68, low 47, "
+                + "rain chance 20 percent.";
+        final String furnitureText = regionRun + " "
+                + resultsLead;
+        check("v328 strip: the run is measured whole — the "
+                        + "strip leaves the results lead intact",
+                SearchEngines.stripRegionFurniture(ddgResultsUrl,
+                        furnitureText),
+                resultsLead);
+        check("v328 strip: a page that is all picker strips "
+                        + "to nothing (the honest bare-picker "
+                        + "preview)",
+                SearchEngines.stripRegionFurniture(ddgResultsUrl,
+                        regionRun),
+                "");
+        check("v328 strip: host-scoped — the signature text "
+                        + "on another host is content, untouched",
+                SearchEngines.stripRegionFurniture(
+                        "https://example.test/regions",
+                        furnitureText),
+                furnitureText);
+        check("v328 strip: no header at the head, no strip — "
+                        + "a results page that merely mentions "
+                        + "regions keeps its text",
+                Boolean.valueOf(SearchEngines.regionRunLength(
+                                resultsLead + " " + regionRun)
+                                == 0
+                        && SearchEngines.regionRunLength(
+                                "All Regions Argentina") == 0
+                        && SearchEngines.regionRunLength(
+                                null) == 0
+                        && SearchEngines.stripRegionFurniture(
+                                ddgResultsUrl, resultsLead)
+                                .equals(resultsLead)),
+                Boolean.TRUE);
+
+        // ================= the gated detector (pure) ========
+        final java.util.List<ElementInfo> uddgEls =
+                new java.util.ArrayList<ElementInfo>();
+        uddgEls.add(elx(1, "a", "Oakdale, TN Hourly Weather "
+                        + "| AccuWeather",
+                "https://duckduckgo.com/l/?uddg=https%3A%2F%2F"
+                        + "www.accuweather.com%2Fen%2Fus%2Foakdale"
+                        + "%2F37829%2Fhourly-weather-forecast"
+                        + "%2F2121856&rut=abc"));
+        uddgEls.add(elx(2, "a", "Oakdale weather - "
+                        + "weather.com",
+                "//duckduckgo.com/l/?uddg=https%3A%2F%2F"
+                        + "weather.com%2Fweather%2Ftoday"));
+        final java.util.List<ElementInfo> regionEls =
+                new java.util.ArrayList<ElementInfo>();
+        regionEls.add(elx(1, "a", "Argentina", "/?kl=ar-es"));
+        regionEls.add(elx(2, "a", "Australia", "/?kl=au-en"));
+        regionEls.add(elx(3, "a", "Austria", "/?kl=at-de"));
+        check("v328 links: result links are recognised, "
+                        + "absolute and protocol-relative alike; "
+                        + "region links and empty maps are not",
+                Boolean.valueOf(SearchEngines.hasResultLinks(
+                                uddgEls)
+                        && !SearchEngines.hasResultLinks(regionEls)
+                        && !SearchEngines.hasResultLinks(
+                                new java.util.ArrayList<ElementInfo>())
+                        && !SearchEngines.hasResultLinks(null)),
+                Boolean.TRUE);
+        check("v328 gate: a results page wearing the picker "
+                        + "is a results page (the v3.26 step-4 "
+                        + "shape); the bare picker still judges "
+                        + "as the picker",
+                Boolean.valueOf(!SearchEngines.isRegionPage(
+                                ddgResultsUrl, furnitureText,
+                                uddgEls)
+                        && SearchEngines.isRegionPage(
+                                "https://duckduckgo.com/?q=x",
+                                regionRun, regionEls)
+                        && !SearchEngines.isRegionPage(
+                                ddgResultsUrl, resultsLead,
+                                uddgEls)),
+                Boolean.TRUE);
+
+        // ================= the shim (pure) ==================
+        final String shimUrl = "https://duckduckgo.com/l/"
+                + "?uddg=https%3A%2F%2Fwww.accuweather.com%2Fen"
+                + "%2Fus%2Foakdale%2F37829%2Fhourly-weather-"
+                + "forecast%2F2121856&rut=679751fd53dd1a13f2069"
+                + "403c31450ef3d96d3a4dd818b1d54767c1224d11533";
+        final String accuUrl = "https://www.accuweather.com"
+                + "/en/us/oakdale/37829/hourly-weather-forecast"
+                + "/2121856";
+        check("v328 shim: the trail's shim is recognised and "
+                        + "its destination decodes whole",
+                Boolean.valueOf(RedirectShims.isShim(shimUrl)
+                        && accuUrl.equals(
+                                RedirectShims.destination(shimUrl))),
+                Boolean.TRUE);
+        check("v328 shim: results URLs, other hosts' /l/ "
+                        + "paths and parameter-less DDG pages "
+                        + "are not shims; uddg need not be the "
+                        + "first parameter",
+                Boolean.valueOf(!RedirectShims.isShim(
+                                ddgResultsUrl)
+                        && !RedirectShims.isShim(
+                                "https://example.test/l/?uddg="
+                                + "https%3A%2F%2Fx.test%2F")
+                        && !RedirectShims.isShim(
+                                "https://duckduckgo.com/l/")
+                        && RedirectShims.isShim(
+                                "https://duckduckgo.com/l/?rut=1"
+                                + "&uddg=https%3A%2F%2Fx.test%2F")
+                        && "https://x.test/".equals(
+                                RedirectShims.destination(
+                                        "https://duckduckgo.com"
+                                        + "/l/?rut=1&uddg=https"
+                                        + "%3A%2F%2Fx.test%2F"))
+                        && RedirectShims.destination(
+                                ddgResultsUrl) == null),
+                Boolean.TRUE);
+
+        // ================= extraction skip (source pins) ====
+        check("v328 js: both extraction walks carry the DDG "
+                        + "picker skip, host-scoped in the "
+                        + "script, and stay structurally sound",
+                Boolean.valueOf(Eyes.readTextAtJs(-1, 0, 100)
+                                .contains("ghIsDdgPicker")
+                        && Eyes.readTextAtJs(-1, 0, 100)
+                                .contains("duckduckgo")
+                        && Eyes.readTextJs(0, 100)
+                                .contains("ghIsDdgPicker")
+                        && jsStructureError(
+                                Eyes.readTextAtJs(-1, 0, 100))
+                                == null
+                        && jsStructureError(
+                                Eyes.readTextJs(0, 100)) == null),
+                Boolean.TRUE);
+
+        // ================= scripted runs ====================
+        Agent.Ui ui328 = new Agent.Ui() {
+            @Override public void feed(String line) { }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision, String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() { return false; }
+            @Override public boolean foreground() { return false; }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) { return false; }
+        };
+        final String goal328 = "Search for the weather "
+                + "forecast for Oakdale, Tennessee and tell me "
+                + "the high and low temperatures and chance of "
+                + "rain for the next three days.";
+        final String fcText328 = "Oakdale, TN forecast: today "
+                + "high 68, low 47, rain chance 20 percent.";
+        final Eyes.Perception article328 = mdPage(
+                "https://news.test/local-story",
+                elx(1, "a", "Home", "/"),
+                elx(2, "a", "Local News", "/news"),
+                elx(3, "a", "Contact", "/contact"));
+        article328.title = "Local News";
+        article328.textPreview = "Local news and community "
+                + "stories from Roane County.";
+
+        // -- FURNITURE: results wearing the picker ----------
+        // The v3.26 trail's step 4, replayed against the
+        // gated detector: the search lands on a results page
+        // whose text leads with the region run and whose map
+        // holds shim-wrapped result links. No recovery may
+        // fire, no navigation may happen, and what the
+        // planner sees — preview and read chunk alike —
+        // leads with results content.
+        final Eyes.Perception furn328 = mdPage(ddgResultsUrl,
+                elx(1, "a", "Oakdale, TN Hourly Weather | "
+                        + "AccuWeather",
+                        "https://duckduckgo.com/l/?uddg=https"
+                        + "%3A%2F%2Fwww.accuweather.com%2Fen%2Fus"
+                        + "%2Foakdale%2F37829"),
+                elx(2, "a", "Oakdale TN 10 day forecast",
+                        "https://duckduckgo.com/l/?uddg=https"
+                        + "%3A%2F%2Fwww.weatherbug.com%2F"),
+                elx(3, "a", "National Weather Service Oakdale",
+                        "https://duckduckgo.com/l/?uddg=https"
+                        + "%3A%2F%2Fforecast.weather.gov%2F"));
+        furn328.title = "weather forecast Oakdale, Tennessee "
+                + "at DuckDuckGo";
+        furn328.textPreview = furnitureText;
+        final int[] phaseF = {0};
+        final java.util.List<String> gotoF =
+                new java.util.ArrayList<String>();
+        Agent.Hands furnHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return phaseF[0] == 1 ? furn328 : article328;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                gotoF.add(url);
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                phaseF[0] = 1;
+                return SearchEngines.searchedMessage(
+                        "duckduckgo", q);
+            }
+            @Override public String read(int chunk) {
+                // The chunk the fixed extraction serves:
+                // the walk skipped the picker, so the text
+                // leads with the results.
+                if (phaseF[0] == 1) {
+                    return Eyes.formatReadChunk(0, fcText328,
+                            fcText328.length());
+                }
+                return "error: no readable text found on "
+                        + "this page";
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] furnCalls = {0};
+        final java.util.List<String> furnPrompts =
+                new java.util.ArrayList<String>();
+        ModelEngine furnEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                furnCalls[0]++;
+                furnPrompts.add(prompt);
+                if (furnCalls[0] == 1) {
+                    return "{\"action\":\"search\",\"query\":"
+                            + "\"weather forecast Oakdale, "
+                            + "Tennessee\"}";
+                }
+                if (furnCalls[0] == 2) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high 68, "
+                        + "low 47, rain chance 20 percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail furnTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(furnHands, furnEngine,
+                PolicyPacks.loadPack("standard"), furnTrail,
+                ui328, "q5_k_m").run(goal328);
+        int fRecover = 0;
+        int fExecRead = 0;
+        String fStop = null;
+        for (java.util.Map<String, Object> ev : furnTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("recover".equals(t)) fRecover++;
+            if ("execute".equals(t)) {
+                Object a = ev.get("action");
+                if (a instanceof java.util.Map
+                        && "read".equals(String.valueOf(
+                                ((java.util.Map) a).get("action")))) {
+                    fExecRead++;
+                }
+            }
+            if ("stop".equals(t)) {
+                fStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v328 run FURNITURE: no recovery fires on a "
+                        + "results page wearing the picker, no "
+                        + "navigation happens, the run reads "
+                        + "and finishes",
+                fRecover + "|" + gotoF.size() + "|" + fExecRead
+                        + "|" + fStop,
+                "0|0|1|done");
+        check("v328 run FURNITURE: the planner's prompt on "
+                        + "the results page leads with results "
+                        + "content — the country list is nowhere "
+                        + "in its page text",
+                Boolean.valueOf(furnPrompts.size() >= 2
+                        && furnPrompts.get(1).contains(
+                                "Page text: " + resultsLead)
+                        && !furnPrompts.get(1).contains(
+                                "Argentina")),
+                Boolean.TRUE);
+
+        // -- BARE: the true picker, unpinned address --------
+        // The detector fires and the recovery navigates —
+        // somewhere NEW (the picker's address is not the
+        // pinned results address).
+        final Eyes.Perception bare328 = mdPage(
+                "https://duckduckgo.com/?q=weather+forecast"
+                        + "+Oakdale%2C+Tennessee",
+                elx(1, "a", "Argentina", "/?kl=ar-es"),
+                elx(2, "a", "Australia", "/?kl=au-en"),
+                elx(3, "a", "Austria", "/?kl=at-de"),
+                elx(4, "a", "Belgium (fr)", "/?kl=be-fr"),
+                elx(5, "a", "Belgium (nl)", "/?kl=be-nl"),
+                elx(6, "a", "Brazil", "/?kl=br-pt"),
+                elx(7, "a", "Bulgaria", "/?kl=bg-bg"),
+                elx(8, "a", "Canada", "/?kl=ca-en"),
+                elx(9, "a", "Chile", "/?kl=cl-es"),
+                elx(10, "a", "China", "/?kl=cn-zh"));
+        bare328.title = "DuckDuckGo";
+        bare328.textPreview = regionRun;
+        final Eyes.Perception clean328 = mdPage(ddgResultsUrl,
+                elx(1, "a", "Oakdale, TN weather forecast - "
+                        + "weather.com",
+                        "https://weather.com/weather/today"),
+                elx(2, "a", "Oakdale TN 10 day forecast",
+                        "https://www.weatherbug.com/"),
+                elx(3, "a", "National Weather Service Oakdale",
+                        "https://forecast.weather.gov/"));
+        clean328.title = "weather forecast Oakdale, "
+                + "Tennessee at DuckDuckGo";
+        clean328.textPreview = resultsLead;
+        final int[] phaseB = {0};
+        final java.util.List<String> gotoB =
+                new java.util.ArrayList<String>();
+        final String recoveryUrl328 =
+                SearchEngines.searchUrlForQuery("duckduckgo",
+                        "weather forecast Oakdale, Tennessee");
+        Agent.Hands bareHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                if (phaseB[0] == 1) return bare328;
+                if (phaseB[0] == 2) return clean328;
+                return article328;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                gotoB.add(url);
+                if (recoveryUrl328.equals(url)) phaseB[0] = 2;
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                phaseB[0] = 1;
+                return SearchEngines.searchedMessage(
+                        "duckduckgo", q);
+            }
+            @Override public String read(int chunk) {
+                if (phaseB[0] == 2) {
+                    return Eyes.formatReadChunk(0, fcText328,
+                            fcText328.length());
+                }
+                return "error: no readable text found on "
+                        + "this page";
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] bareCalls = {0};
+        ModelEngine bareEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                bareCalls[0]++;
+                if (bareCalls[0] == 1) {
+                    return "{\"action\":\"search\",\"query\":"
+                            + "\"weather forecast Oakdale, "
+                            + "Tennessee\"}";
+                }
+                if (bareCalls[0] == 2) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high 68, "
+                        + "low 47, rain chance 20 percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail bareTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(bareHands, bareEngine,
+                PolicyPacks.loadPack("standard"), bareTrail,
+                ui328, "q5_k_m").run(goal328);
+        int bRegion = 0;
+        String bStop = null;
+        for (java.util.Map<String, Object> ev : bareTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("recover".equals(t)
+                    && "ddg_region".equals(
+                            String.valueOf(ev.get("phase")))) {
+                bRegion++;
+            }
+            if ("stop".equals(t)) {
+                bStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v328 run BARE: the gated detector still "
+                        + "fires on a true bare picker, and the "
+                        + "recovery navigates somewhere new — "
+                        + "the pinned address, not the picker's",
+                bRegion + "|" + gotoB.size() + "|"
+                        + (gotoB.size() == 1
+                                && recoveryUrl328.equals(gotoB.get(0)))
+                        + "|" + bStop,
+                "1|1|true|done");
+
+        // -- SAMEURL: the picker at the pinned address ------
+        // The v3.26 trail's own geometry: the picker served
+        // AT the region-pinned results URL. The recovery is
+        // recorded, but navigating would only reload the
+        // page already open — so no navigation happens, and
+        // the planner finds its own way out.
+        final Eyes.Perception pinned328 = mdPage(recoveryUrl328,
+                elx(1, "a", "Argentina", "/?kl=ar-es"),
+                elx(2, "a", "Australia", "/?kl=au-en"),
+                elx(3, "a", "Austria", "/?kl=at-de"),
+                elx(4, "a", "Belgium (fr)", "/?kl=be-fr"),
+                elx(5, "a", "Belgium (nl)", "/?kl=be-nl"),
+                elx(6, "a", "Brazil", "/?kl=br-pt"),
+                elx(7, "a", "Bulgaria", "/?kl=bg-bg"),
+                elx(8, "a", "Canada", "/?kl=ca-en"),
+                elx(9, "a", "Chile", "/?kl=cl-es"),
+                elx(10, "a", "China", "/?kl=cn-zh"));
+        pinned328.title = "DuckDuckGo";
+        pinned328.textPreview = regionRun;
+        final String liteUrl328 = "https://lite.duckduckgo.com"
+                + "/lite/?q=weather+forecast+Oakdale+Tennessee";
+        final int[] phaseS = {0};
+        final java.util.List<String> gotoS =
+                new java.util.ArrayList<String>();
+        Agent.Hands sameHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                if (phaseS[0] == 1) return pinned328;
+                if (phaseS[0] == 2) return clean328;
+                return article328;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                gotoS.add(url);
+                if (liteUrl328.equals(url)) phaseS[0] = 2;
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                phaseS[0] = 1;
+                return SearchEngines.searchedMessage(
+                        "duckduckgo", q);
+            }
+            @Override public String read(int chunk) {
+                if (phaseS[0] == 2) {
+                    return Eyes.formatReadChunk(0, fcText328,
+                            fcText328.length());
+                }
+                return "error: no readable text found on "
+                        + "this page";
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] sameCalls = {0};
+        ModelEngine sameEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                sameCalls[0]++;
+                if (sameCalls[0] == 1) {
+                    return "{\"action\":\"search\",\"query\":"
+                            + "\"weather forecast Oakdale, "
+                            + "Tennessee\"}";
+                }
+                if (sameCalls[0] == 2) {
+                    return "{\"action\":\"goto\",\"url\":\""
+                            + liteUrl328 + "\"}";
+                }
+                if (sameCalls[0] == 3) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high 68, "
+                        + "low 47, rain chance 20 percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail sameTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(sameHands, sameEngine,
+                PolicyPacks.loadPack("standard"), sameTrail,
+                ui328, "q5_k_m").run(goal328);
+        int sRegion = 0;
+        String sStop = null;
+        for (java.util.Map<String, Object> ev : sameTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("recover".equals(t)
+                    && "ddg_region".equals(
+                            String.valueOf(ev.get("phase")))) {
+                sRegion++;
+            }
+            if ("stop".equals(t)) {
+                sStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v328 run SAMEURL: the recovery records but "
+                        + "never navigates to the address "
+                        + "already open — the only navigation "
+                        + "is the planner's own way out",
+                sRegion + "|" + gotoS.size() + "|"
+                        + !gotoS.contains(recoveryUrl328)
+                        + "|" + sStop,
+                "1|1|true|done");
+
+        // -- SHIM: the tap-through that stranded the run ----
+        // The v3.26 trail's steps 7-8, replayed: results
+        // page, the AccuWeather tap, the shim — which never
+        // resolves on its own, so the loop waits it out and
+        // navigates to the decoded destination itself.
+        final Eyes.Perception shimResults328 = mdPage(
+                ddgResultsUrl,
+                elx(1, "a", "Oakdale, TN Hourly Weather | "
+                        + "AccuWeather", shimUrl),
+                elx(2, "a", "Oakdale TN 10 day forecast",
+                        "https://duckduckgo.com/l/?uddg=https"
+                        + "%3A%2F%2Fwww.weatherbug.com%2F"),
+                elx(3, "a", "National Weather Service Oakdale",
+                        "https://duckduckgo.com/l/?uddg=https"
+                        + "%3A%2F%2Fforecast.weather.gov%2F"));
+        shimResults328.title = "weather forecast Oakdale, "
+                + "Tennessee at DuckDuckGo";
+        shimResults328.textPreview = resultsLead;
+        final Eyes.Perception shim328 = mdPage(shimUrl);
+        shim328.title = "";
+        final Eyes.Perception dest328 = mdPage(accuUrl,
+                elx(1, "a", "Oakdale, TN Weather Forecast",
+                        "https://www.accuweather.com/en/us/"
+                        + "oakdale/37829/weather-forecast/2121856"),
+                elx(2, "a", "Hourly",
+                        "https://www.accuweather.com/en/us/"
+                        + "oakdale/37829/hourly-weather-forecast/"
+                        + "2121856"),
+                elx(3, "a", "Daily",
+                        "https://www.accuweather.com/en/us/"
+                        + "oakdale/37829/daily-weather-forecast/"
+                        + "2121856"));
+        dest328.title = "Oakdale, TN Hourly Weather | "
+                + "AccuWeather";
+        dest328.textPreview = fcText328;
+        final int[] phaseH = {0};
+        final java.util.List<String> gotoH =
+                new java.util.ArrayList<String>();
+        Agent.Hands shimHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                if (phaseH[0] == 1) return shim328;
+                if (phaseH[0] == 2) return dest328;
+                return shimResults328;
+            }
+            @Override public String tap(int el) {
+                phaseH[0] = 1;
+                return "ok: tapped #" + el;
+            }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                gotoH.add(url);
+                if (accuUrl.equals(url)) phaseH[0] = 2;
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int chunk) {
+                if (phaseH[0] == 2) {
+                    return Eyes.formatReadChunk(0, fcText328,
+                            fcText328.length());
+                }
+                return "error: no readable text found on "
+                        + "this page";
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] shimCalls = {0};
+        final java.util.List<String> shimPrompts =
+                new java.util.ArrayList<String>();
+        ModelEngine shimEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                shimCalls[0]++;
+                shimPrompts.add(prompt);
+                if (shimCalls[0] == 1) {
+                    return "{\"action\":\"tap\",\"el\":1}";
+                }
+                if (shimCalls[0] == 2) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high 68, "
+                        + "low 47, rain chance 20 percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail shimTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(shimHands, shimEngine,
+                PolicyPacks.loadPack("standard"), shimTrail,
+                ui328, "q5_k_m").run(goal328);
+        int hShim = 0;
+        int hGoto = 0;
+        String hDest = null;
+        String hStop = null;
+        for (java.util.Map<String, Object> ev : shimTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("recover".equals(t)
+                    && "redirect_shim".equals(
+                            String.valueOf(ev.get("phase")))) {
+                hShim++;
+                hDest = String.valueOf(ev.get("destination"));
+            }
+            if ("recover".equals(t)
+                    && "redirect_shim_goto".equals(
+                            String.valueOf(ev.get("phase")))) {
+                hGoto++;
+            }
+            if ("stop".equals(t)) {
+                hStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v328 run SHIM: the stub is waited out, then "
+                        + "bypassed to the destination it "
+                        + "carried — one shim judgement, one "
+                        + "direct navigation, the run finishes "
+                        + "on the forecast page",
+                hShim + "|" + hGoto + "|" + gotoH.size() + "|"
+                        + (gotoH.size() == 1
+                                && accuUrl.equals(gotoH.get(0)))
+                        + "|" + accuUrl.equals(hDest) + "|"
+                        + hStop,
+                "1|1|1|true|true|done");
+        check("v328 run SHIM: the planner never decides on "
+                        + "the stub (its second prompt is the "
+                        + "destination page, shim address nowhere "
+                        + "in its page line)",
+                Boolean.valueOf(shimPrompts.size() >= 2
+                        && shimPrompts.get(1).contains(
+                                "Page: " + accuUrl)
+                        && !shimPrompts.get(1).contains(
+                                "duckduckgo.com/l/")),
+                Boolean.TRUE);
+
+        // -- SHIMWAIT: the forward fires inside the wait ----
+        // Same landing, but the stub resolves on the second
+        // poll: no direct navigation may happen.
+        final int[] phaseW = {0};
+        final int[] pollsW = {0};
+        final java.util.List<String> gotoW =
+                new java.util.ArrayList<String>();
+        Agent.Hands waitHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                if (phaseW[0] == 1) {
+                    pollsW[0]++;
+                    return pollsW[0] >= 2 ? dest328 : shim328;
+                }
+                if (phaseW[0] == 2) return dest328;
+                return shimResults328;
+            }
+            @Override public String tap(int el) {
+                phaseW[0] = 1;
+                return "ok: tapped #" + el;
+            }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                gotoW.add(url);
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int chunk) {
+                return Eyes.formatReadChunk(0, fcText328,
+                        fcText328.length());
+            }
+            @Override public String reload(String u) { return "ok"; }
+        };
+        final int[] waitCalls = {0};
+        ModelEngine waitEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                waitCalls[0]++;
+                if (waitCalls[0] == 1) {
+                    return "{\"action\":\"tap\",\"el\":1}";
+                }
+                if (waitCalls[0] == 2) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high 68, "
+                        + "low 47, rain chance 20 percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail waitTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(waitHands, waitEngine,
+                PolicyPacks.loadPack("standard"), waitTrail,
+                ui328, "q5_k_m").run(goal328);
+        int wShim = 0;
+        int wGotoEv = 0;
+        String wStop = null;
+        for (java.util.Map<String, Object> ev : waitTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("recover".equals(t)
+                    && "redirect_shim".equals(
+                            String.valueOf(ev.get("phase")))) {
+                wShim++;
+            }
+            if ("recover".equals(t)
+                    && "redirect_shim_goto".equals(
+                            String.valueOf(ev.get("phase")))) {
+                wGotoEv++;
+            }
+            if ("stop".equals(t)) {
+                wStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v328 run SHIMWAIT: a stub that resolves "
+                        + "inside the wait is never bypassed — "
+                        + "no direct navigation, the run "
+                        + "finishes on the destination",
+                wShim + "|" + wGotoEv + "|" + gotoW.size()
+                        + "|" + wStop,
+                "1|0|0|done");
+
+        RedirectShims.WAIT_DIVISOR = 1L;
+
+        // ---- §8: no new trail types ----
+        // v3.28 rides the standing "recover" event with the
+        // phases "redirect_shim" / "redirect_shim_goto" (and
+        // the ddg_region amendment), so the registry stands
+        // at 33.
+        check("v328 registry: EVENT_TYPES unchanged (33 "
+                        + "types, no v3.28 addition)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
+    }
+
+    /** v3.29: a Fireworks chat-completions reply body
+     *  carrying the given planner content and usage — the
+     *  fake wire's one shape. */
+    private static String fwReply329(String content,
+            long promptTokens, long completionTokens) {
+        java.util.Map<String, Object> msg =
+                new java.util.LinkedHashMap<String, Object>();
+        msg.put("role", "assistant");
+        msg.put("content", content);
+        java.util.Map<String, Object> choice =
+                new java.util.LinkedHashMap<String, Object>();
+        choice.put("message", msg);
+        java.util.List<Object> choices =
+                new java.util.ArrayList<Object>();
+        choices.add(choice);
+        java.util.Map<String, Object> usage =
+                new java.util.LinkedHashMap<String, Object>();
+        usage.put("prompt_tokens", Long.valueOf(promptTokens));
+        usage.put("completion_tokens",
+                Long.valueOf(completionTokens));
+        java.util.Map<String, Object> root =
+                new java.util.LinkedHashMap<String, Object>();
+        root.put("choices", choices);
+        root.put("usage", usage);
+        return com.ghosthands.app.Json.write(root);
+    }
+
+    /** v3.29: a transport that answers from a script of
+     *  planner contents (the last one repeats), recording
+     *  every request it is handed. No network exists in
+     *  the harness: this IS the wire. */
+    private static CloudBrain.Transport fwScript329(
+            final String[] contents,
+            final java.util.List<String> seenUrls,
+            final java.util.List<String> seenAuths,
+            final java.util.List<String> seenBodies) {
+        final int[] n = {0};
+        return new CloudBrain.Transport() {
+            @Override public CloudBrain.Response post(
+                    String url, String authorization,
+                    String body) {
+                if (seenUrls != null) seenUrls.add(url);
+                if (seenAuths != null) seenAuths.add(authorization);
+                if (seenBodies != null) seenBodies.add(body);
+                String c = contents[Math.min(n[0],
+                        contents.length - 1)];
+                n[0]++;
+                return new CloudBrain.Response(200,
+                        fwReply329(c, 300 + n[0], 20));
+            }
+        };
+    }
+
+    /** v3.29: the two-element weather page, built fresh
+     *  on every call — a run's machinery annotates the
+     *  perception it is handed, so runs never share one. */
+    private static Eyes.Perception wxPage329() {
+        Eyes.Perception p = mdPage(
+                "https://wx.test/today",
+                elx(1, "button", "Add to list", ""),
+                elx(2, "a", "Full forecast",
+                        "https://wx.test/full"));
+        p.title = "Oakdale weather";
+        p.textPreview = "Oakdale forecast page.";
+        return p;
+    }
+
+    private static void v329Tests(String[] args) {
+        // ================= the request (pure) ==============
+        String req = CloudBrain.requestJson(
+                CloudBrain.DEFAULT_MODEL, "PROMPT-TEXT", 160);
+        Object reqObj = com.ghosthands.app.Json.parse(req);
+        java.util.Map<?, ?> reqMap =
+                (java.util.Map<?, ?>) reqObj;
+        java.util.List<?> reqMsgs =
+                (java.util.List<?>) reqMap.get("messages");
+        java.util.Map<?, ?> reqMsg0 =
+                (java.util.Map<?, ?>) reqMsgs.get(0);
+        check("v329 request: one user message carrying the "
+                        + "assembled prompt verbatim, the "
+                        + "named model, greedy temperature "
+                        + "and the caller's token cap",
+                Boolean.valueOf(CloudBrain.DEFAULT_MODEL
+                                .equals(reqMap.get("model"))
+                        && reqMsgs.size() == 1
+                        && "user".equals(reqMsg0.get("role"))
+                        && "PROMPT-TEXT".equals(
+                                reqMsg0.get("content"))
+                        && ((Number) reqMap.get("temperature"))
+                                .doubleValue() == 0.0
+                        && ((Number) reqMap.get("max_tokens"))
+                                .longValue() == 160L),
+                Boolean.TRUE);
+
+        // ================= the reply (pure) ================
+        check("v329 reply: content and usage extract from "
+                        + "a well-formed reply; an error "
+                        + "envelope, garbage and a non-string "
+                        + "content all extract nothing",
+                Boolean.valueOf("ACT".equals(
+                                CloudBrain.extractContent(
+                                        fwReply329("ACT", 5, 2)))
+                        && CloudBrain.extractContent(
+                                "{\"error\":{\"message\":"
+                                + "\"bad key\"}}") == null
+                        && CloudBrain.extractContent(
+                                "not json") == null
+                        && CloudBrain.extractContent(
+                                "{\"choices\":[{\"message\":"
+                                + "{\"content\":42}}]}") == null
+                        && CloudBrain.extractUsage(
+                                fwReply329("x", 321, 17))[0]
+                                == 321L
+                        && CloudBrain.extractUsage(
+                                fwReply329("x", 321, 17))[1]
+                                == 17L
+                        && CloudBrain.extractUsage(
+                                "{\"id\":\"x\"}")[0] == 0L),
+                Boolean.TRUE);
+        check("v329 identity: the trail id names the cloud "
+                        + "and its model, and is not — and "
+                        + "never resolves to — an on-device "
+                        + "model id",
+                Boolean.valueOf(new CloudBrain(null, "k", null)
+                                .trailModelId().equals(
+                                        "fireworks:"
+                                        + CloudBrain
+                                                .DEFAULT_MODEL)
+                        && ModelStore.specFor(new CloudBrain(
+                                null, "k", null)
+                                .trailModelId()) == null
+                        && CloudBrain.keyPresent(" abc ")
+                        && !CloudBrain.keyPresent("")
+                        && !CloudBrain.keyPresent("   ")
+                        && !CloudBrain.keyPresent(null)),
+                Boolean.TRUE);
+        check("v329 wording: the status line is honest in "
+                        + "all three states — on-device "
+                        + "sends nothing, cloud with a key "
+                        + "names the sending, cloud without "
+                        + "a key says runs will not start",
+                Boolean.valueOf(CloudBrain.statusLine(
+                                Settings.BRAIN_DEVICE, false)
+                                .contains("nothing leaves")
+                        && CloudBrain.statusLine(
+                                Settings.BRAIN_FIREWORKS, true)
+                                .contains("leaves the phone")
+                        && CloudBrain.statusLine(
+                                Settings.BRAIN_FIREWORKS, false)
+                                .contains("will not start")),
+                Boolean.TRUE);
+
+        // ================= generate, on a fake wire ========
+        final java.util.List<String> gUrls =
+                new java.util.ArrayList<String>();
+        final java.util.List<String> gAuths =
+                new java.util.ArrayList<String>();
+        final java.util.List<String> gBodies =
+                new java.util.ArrayList<String>();
+        CloudBrain gBrain = new CloudBrain(
+                fwScript329(new String[]{"{\"action\":\"done\"}"},
+                        gUrls, gAuths, gBodies),
+                "TESTKEY", null);
+        String gOut = gBrain.generate("THE PROMPT", 160);
+        ModelEngine.Stats gStats = gBrain.lastStats();
+        Object gReqObj = com.ghosthands.app.Json.parse(
+                gBodies.get(0));
+        java.util.Map<?, ?> gReqMap =
+                (java.util.Map<?, ?>) gReqObj;
+        java.util.Map<?, ?> gReqMsg = (java.util.Map<?, ?>)
+                ((java.util.List<?>) gReqMap.get("messages"))
+                        .get(0);
+        check("v329 generate: the reply's content comes "
+                        + "back verbatim, the request went to "
+                        + "the Fireworks endpoint with the "
+                        + "key as its bearer and the prompt "
+                        + "as its message, and the stats "
+                        + "speak the trail's shape (usage "
+                        + "tokens, none reused, no grammar)",
+                Boolean.valueOf("{\"action\":\"done\"}"
+                                .equals(gOut)
+                        && gUrls.size() == 1
+                        && CloudBrain.API_URL.equals(
+                                gUrls.get(0))
+                        && "Bearer TESTKEY".equals(
+                                gAuths.get(0))
+                        && "THE PROMPT".equals(
+                                gReqMsg.get("content"))
+                        && gStats.lastPromptTokens == 301
+                        && gStats.lastReusedTokens == 0
+                        && gStats.lastEvaluatedTokens == 301
+                        && gStats.lastGenTokens == 20
+                        && !gStats.lastGrammarConstrained),
+                Boolean.TRUE);
+
+        // ---- failure shapes: one attempt, an honest ERROR --
+        CloudBrain httpBrain = new CloudBrain(
+                new CloudBrain.Transport() {
+                    @Override public CloudBrain.Response post(
+                            String url, String auth,
+                            String body) {
+                        return new CloudBrain.Response(401,
+                                "{\"error\":{\"message\":"
+                                + "\"invalid api key\"}}");
+                    }
+                }, "TESTKEY", null);
+        String httpOut = httpBrain.generate("P", 160);
+        CloudBrain throwBrain = new CloudBrain(
+                new CloudBrain.Transport() {
+                    @Override public CloudBrain.Response post(
+                            String url, String auth,
+                            String body) throws Exception {
+                        throw new Exception("connection reset");
+                    }
+                }, "TESTKEY", null);
+        String throwOut = throwBrain.generate("P", 160);
+        CloudBrain junkBrain = new CloudBrain(
+                new CloudBrain.Transport() {
+                    @Override public CloudBrain.Response post(
+                            String url, String auth,
+                            String body) {
+                        return new CloudBrain.Response(200,
+                                "not json at all");
+                    }
+                }, "TESTKEY", null);
+        String junkOut = junkBrain.generate("P", 160);
+        final int[] noKeyCalls = {0};
+        CloudBrain noKeyBrain = new CloudBrain(
+                new CloudBrain.Transport() {
+                    @Override public CloudBrain.Response post(
+                            String url, String auth,
+                            String body) {
+                        noKeyCalls[0]++;
+                        return new CloudBrain.Response(200,
+                                fwReply329("x", 1, 1));
+                    }
+                }, "  ", null);
+        String noKeyOut = noKeyBrain.generate("P", 160);
+        check("v329 failure: HTTP error, transport throw "
+                        + "and malformed reply each come back "
+                        + "as the engine's ERROR shape after "
+                        + "one attempt — and a keyless brain "
+                        + "refuses before the wire is touched",
+                Boolean.valueOf(httpOut.startsWith("ERROR:")
+                        && httpOut.contains("401")
+                        && throwOut.startsWith("ERROR:")
+                        && throwOut.contains("fireworks")
+                        && junkOut.startsWith("ERROR:")
+                        && noKeyOut.startsWith("ERROR:")
+                        && noKeyCalls[0] == 0
+                        && httpBrain.lastStats()
+                                .lastPromptTokens == 0),
+                Boolean.TRUE);
+
+        // ================= settings ========================
+        check("v329 settings: the brain defaults on-device, "
+                        + "junk resolves on-device (a strange "
+                        + "value never invents a cloud), and "
+                        + "the choice round-trips whole",
+                Boolean.valueOf(Settings.BRAIN_DEVICE.equals(
+                                new Settings().brain)
+                        && Settings.BRAIN_DEVICE.equals(
+                                Settings.resolveBrain("junk"))
+                        && Settings.BRAIN_DEVICE.equals(
+                                Settings.resolveBrain(null))
+                        && Settings.BRAIN_FIREWORKS.equals(
+                                Settings.resolveBrain(
+                                        " Fireworks "))
+                        && Settings.BRAIN_FIREWORKS.equals(
+                                Settings.fromMap(
+                                        java.util.Collections
+                                                .singletonMap(
+                                                        Settings
+                                                                .KEY_BRAIN,
+                                                        "fireworks"))
+                                        .brain)),
+                Boolean.TRUE);
+        Settings rt329 = new Settings();
+        rt329.brain = Settings.BRAIN_FIREWORKS;
+        java.util.Map<String, String> rtMap = rt329.toMap();
+        boolean keyIsSetting = false;
+        for (int i = 0; i < Settings.ALL_KEYS.length; i++) {
+            if (CloudBrain.PREF_API_KEY.equals(
+                    Settings.ALL_KEYS[i])) keyIsSetting = true;
+        }
+        check("v329 settings: the choice persists in the "
+                        + "model's map and restores — and the "
+                        + "API key is NOT a Settings value: "
+                        + "no key of the model carries it, so "
+                        + "it can never ride a run marker",
+                Boolean.valueOf(Settings.BRAIN_FIREWORKS
+                                .equals(rtMap.get(
+                                        Settings.KEY_BRAIN))
+                        && Settings.BRAIN_FIREWORKS.equals(
+                                Settings.fromMap(rtMap).brain)
+                        && !keyIsSetting
+                        && !rtMap.containsKey(
+                                CloudBrain.PREF_API_KEY)),
+                Boolean.TRUE);
+
+        // ================= scripted runs ===================
+        Agent.Ui ui329 = new Agent.Ui() {
+            @Override public void feed(String line) { }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision, String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() {
+                return false;
+            }
+            @Override public boolean foreground() {
+                return false;
+            }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) {
+                return false;
+            }
+        };
+        final String goal329 = "Search for the weather "
+                + "forecast for Oakdale, Tennessee and tell "
+                + "me the high and low temperatures and "
+                + "chance of rain for the next three days.";
+        final String fcText329 = "Oakdale, TN forecast: "
+                + "today high 68, low 47, rain chance 20 "
+                + "percent.";
+
+        // -- CLOUD: a run planned over the wire ------------
+        final java.util.List<String> cBodies =
+                new java.util.ArrayList<String>();
+        CloudBrain cBrain = new CloudBrain(
+                fwScript329(new String[]{
+                        "{\"action\":\"read\"}",
+                        "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high "
+                        + "68, low 47, rain chance 20 "
+                        + "percent.\"}"},
+                        null, null, cBodies),
+                "TESTKEY", null);
+        final int[] localCalls = {0};
+        ModelEngine localSpy = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                localCalls[0]++;
+                return "ERROR: the local engine must not "
+                        + "plan a cloud run";
+            }
+        };
+        Agent.Hands cHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return wxPage329();
+            }
+            @Override public String tap(int el) {
+                return "ok";
+            }
+            @Override public String type(int el, String t) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String u) {
+                return "ok";
+            }
+            @Override public String scroll(String d) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int c) {
+                return Eyes.formatReadChunk(0, fcText329,
+                        fcText329.length());
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        com.ghosthands.app.Trail cTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(cHands, localSpy,
+                PolicyPacks.loadPack("standard"), cTrail,
+                ui329, cBrain.trailModelId(), false, 10, true,
+                false, Settings.CHUNK_AUTO, 4, "duckduckgo",
+                false, true, false, false, Settings.END_CARD,
+                false, true, Settings.STYLE_BALANCED, null,
+                null, null, null, false, null, null, 0, 0,
+                null, null, false, cBrain).run(goal329);
+        String cStop = null;
+        String cRunModel = null;
+        int cDecides = 0;
+        boolean cDecideModelsOk = true;
+        for (java.util.Map<String, Object> ev
+                : cTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("run".equals(t)) {
+                cRunModel = String.valueOf(ev.get("model"));
+            }
+            if ("decide".equals(t)) {
+                cDecides++;
+                if (!cBrain.trailModelId().equals(
+                        String.valueOf(ev.get("model")))) {
+                    cDecideModelsOk = false;
+                }
+            }
+            if ("stop".equals(t)) {
+                cStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        Object cReqObj = com.ghosthands.app.Json.parse(
+                cBodies.get(0));
+        java.util.Map<?, ?> cReqMap =
+                (java.util.Map<?, ?>) cReqObj;
+        String cPrompt = String.valueOf(
+                ((java.util.Map<?, ?>) ((java.util.List<?>)
+                        cReqMap.get("messages")).get(0))
+                        .get("content"));
+        check("v329 run CLOUD: the run completes on cloud "
+                        + "decides alone — the local engine is "
+                        + "never called, every record names "
+                        + "the cloud brain, and the wire "
+                        + "carried the run's own prompt (goal "
+                        + "and action contract included)",
+                cStop + "|" + localCalls[0] + "|" + cDecides
+                        + "|" + cDecideModelsOk + "|"
+                        + cBrain.trailModelId().equals(cRunModel)
+                        + "|" + cPrompt.contains(goal329)
+                        + "|" + cPrompt.contains("\"action\""),
+                "done|0|2|true|true|true|true");
+
+        // -- CLOUD GOVERN: the Governor judges the cloud ---
+        final java.util.List<Integer> tappedG =
+                new java.util.ArrayList<Integer>();
+        Agent.Hands gHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return wxPage329();
+            }
+            @Override public String tap(int el) {
+                tappedG.add(Integer.valueOf(el));
+                return "ok";
+            }
+            @Override public String type(int el, String t) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String u) {
+                return "ok";
+            }
+            @Override public String scroll(String d) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int c) {
+                return Eyes.formatReadChunk(0, fcText329,
+                        fcText329.length());
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        CloudBrain govBrain = new CloudBrain(
+                fwScript329(new String[]{
+                        "{\"action\":\"tap\",\"el\":1}",
+                        "{\"action\":\"done\",\"summary\":"
+                        + "\"nothing\"}"},
+                        null, null, null),
+                "TESTKEY", null);
+        com.ghosthands.app.Trail gTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(gHands, new ModelEngine(),
+                PolicyPacks.loadPack("readonly"), gTrail,
+                ui329, govBrain.trailModelId(), false, 10, true,
+                false, Settings.CHUNK_AUTO, 4, "duckduckgo",
+                false, true, false, false, Settings.END_CARD,
+                false, true, Settings.STYLE_BALANCED, null,
+                null, null, null, false, null, null, 0, 0,
+                null, null, false, govBrain).run(
+                        "Check the Oakdale forecast");
+        String gStop = null;
+        boolean gDeny = false;
+        for (java.util.Map<String, Object> ev
+                : gTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("stop".equals(t)) {
+                gStop = String.valueOf(ev.get("reason"));
+            }
+            if ("govern".equals(t)
+                    && Governor.DENY.equals(
+                            String.valueOf(ev.get("outcome")))) {
+                gDeny = true;
+            }
+        }
+        check("v329 run GOVERN: a cloud-planned write under "
+                        + "the readonly pack is denied by the "
+                        + "same Governor and never executes — "
+                        + "the swap is a brain swap, never a "
+                        + "governance bypass",
+                gStop + "|" + gDeny + "|" + tappedG.isEmpty(),
+                "denied|true|true");
+
+        // -- CLOUD ERROR: the wire fails, the run stops ----
+        final int[] eCalls = {0};
+        CloudBrain eBrain = new CloudBrain(
+                new CloudBrain.Transport() {
+                    @Override public CloudBrain.Response post(
+                            String url, String auth,
+                            String body) {
+                        eCalls[0]++;
+                        return new CloudBrain.Response(503,
+                                "upstream unavailable");
+                    }
+                }, "TESTKEY", null);
+        com.ghosthands.app.Trail eTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(cHands, new ModelEngine(),
+                PolicyPacks.loadPack("standard"), eTrail,
+                ui329, eBrain.trailModelId(), false, 10, true,
+                false, Settings.CHUNK_AUTO, 4, "duckduckgo",
+                false, true, false, false, Settings.END_CARD,
+                false, true, Settings.STYLE_BALANCED, null,
+                null, null, null, false, null, null, 0, 0,
+                null, null, false, eBrain).run(goal329);
+        String eStop = null;
+        String eSummary = null;
+        String eRaw = null;
+        String eModel = null;
+        for (java.util.Map<String, Object> ev
+                : eTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("stop".equals(t)) {
+                eStop = String.valueOf(ev.get("reason"));
+                eSummary = String.valueOf(ev.get("summary"));
+            }
+            if ("decide".equals(t)) {
+                eRaw = String.valueOf(ev.get("raw"));
+                eModel = String.valueOf(ev.get("model"));
+            }
+        }
+        check("v329 run ERROR: an HTTP failure stops the "
+                        + "run at the first decide, honestly — "
+                        + "one wire attempt, the ERROR on the "
+                        + "decide record under the cloud "
+                        + "brain's name, the standing engine-"
+                        + "error stop shape",
+                eStop + "|" + eCalls[0] + "|"
+                        + (eRaw != null
+                                && eRaw.startsWith("ERROR:"))
+                        + "|" + eBrain.trailModelId()
+                                .equals(eModel)
+                        + "|" + (eSummary != null
+                                && eSummary.contains(
+                                        "model engine error")),
+                "error|1|true|true|true");
+
+        // -- OFF PARITY: no cloud brain, the old road ------
+        final int[] pCalls = {0};
+        ModelEngine pEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                pCalls[0]++;
+                if (pCalls[0] == 1) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high "
+                        + "68, low 47, rain chance 20 "
+                        + "percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail pTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(cHands, pEngine,
+                PolicyPacks.loadPack("standard"), pTrail,
+                ui329, "q5_k_m", false, 10, true, false,
+                Settings.CHUNK_AUTO, 4, "duckduckgo", false,
+                true, false, false, Settings.END_CARD, false,
+                true, Settings.STYLE_BALANCED, null, null,
+                null, null, false, null, null, 0, 0, null,
+                null).run(goal329);
+        String pStop = null;
+        String pRunModel = null;
+        for (java.util.Map<String, Object> ev
+                : pTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("run".equals(t)) {
+                pRunModel = String.valueOf(ev.get("model"));
+            }
+            if ("stop".equals(t)) {
+                pStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v329 run OFF: an agent built the pre-v3.29 "
+                        + "way (no cloud brain) runs exactly "
+                        + "as it always did — the local engine "
+                        + "plans, its id names the records, "
+                        + "the run completes",
+                pStop + "|" + pCalls[0] + "|" + pRunModel,
+                "done|2|q5_k_m");
+
+        // ================= source pins =====================
+        if (args != null && args.length > 0) {
+            java.io.File shimF = new java.io.File(args[0]);
+            java.io.File shimDir = shimF.getParentFile();
+            java.io.File v1Dir = shimDir == null ? null
+                    : shimDir.getParentFile() == null ? null
+                    : shimDir.getParentFile().getParentFile();
+            if (v1Dir != null) {
+                String base = "app/src/main/java/com/"
+                        + "ghosthands/app/";
+                String cloudSrc = readTestFile(
+                        new java.io.File(v1Dir,
+                                base + "CloudBrain.java"));
+                String agentSrc = readTestFile(
+                        new java.io.File(v1Dir,
+                                base + "Agent.java"));
+                String mainSrc = readTestFile(
+                        new java.io.File(v1Dir,
+                                base + "MainActivity.java"));
+                String settingsSrc = readTestFile(
+                        new java.io.File(v1Dir,
+                                base + "Settings.java"));
+                if (cloudSrc != null && agentSrc != null
+                        && mainSrc != null
+                        && settingsSrc != null) {
+                    check("v329 pin: the bearer header is "
+                                    + "built from the key "
+                                    + "value in CloudBrain "
+                                    + "alone — no other app "
+                                    + "source speaks it, and "
+                                    + "the Settings model "
+                                    + "never names the key's "
+                                    + "preference",
+                            Boolean.valueOf(cloudSrc.contains(
+                                            "\"Bearer \" + apiKey")
+                                    && !mainSrc.contains(
+                                            "Bearer ")
+                                    && !agentSrc.contains(
+                                            "Bearer ")
+                                    && !settingsSrc.contains(
+                                            CloudBrain
+                                                    .PREF_API_KEY)),
+                            Boolean.TRUE);
+                    check("v329 pin: the decide has exactly "
+                                    + "two roads — the cloud "
+                                    + "brain's generate and "
+                                    + "the engine's — and the "
+                                    + "start path builds the "
+                                    + "cloud brain only from "
+                                    + "the stored key",
+                            Boolean.valueOf(agentSrc.contains(
+                                            "cloudBrain.generate(")
+                                    && agentSrc.contains(
+                                            "engine.generate(")
+                                    && mainSrc.contains(
+                                            "CloudBrain.fireworks("
+                                            + "fireworksApiKey())")
+                                    && mainSrc.contains(
+                                            "Settings.KEY_BRAIN")),
+                            Boolean.TRUE);
+                    // No key material anywhere in the app
+                    // sources: no source file carries a
+                    // Fireworks-shaped key literal (the
+                    // "fw_" key prefix) at all.
+                    boolean fwFree = true;
+                    java.io.File srcDir = new java.io.File(
+                            v1Dir, base);
+                    java.io.File[] files = srcDir.listFiles();
+                    if (files != null) {
+                        for (int i = 0; i < files.length;
+                                i++) {
+                            if (!files[i].getName()
+                                    .endsWith(".java")) {
+                                continue;
+                            }
+                            String s = readTestFile(files[i]);
+                            if (s != null
+                                    && s.contains("fw_")) {
+                                fwFree = false;
+                            }
+                        }
+                    }
+                    check("v329 pin: no Fireworks key "
+                                    + "material exists in any "
+                                    + "app source (no fw_ key "
+                                    + "literal anywhere in "
+                                    + "the tree)",
+                            Boolean.valueOf(fwFree),
+                            Boolean.TRUE);
+                }
+            }
+        }
+
+        // ---- no new trail types ----
+        check("v329 registry: EVENT_TYPES unchanged (33 "
+                        + "types, no v3.29 addition)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
+    }
+
+    /** v3.30 tests: the trained planner — its registry pin
+     *  (the Colab-verified size + sha256), the pure import
+     *  judgement against that pin, the import state machine
+     *  driven on injected fixture specs over a scratch dir,
+     *  the download path's refusal of a url-less spec, a
+     *  scripted run under the trained id, and source pins.
+     *  No fixture ever satisfies the shipped pin: the state
+     *  machine is proven on a test spec injected the way the
+     *  store injects its own specs, and the real pin is
+     *  asserted to refuse a fixture outright. */
+    private static void v330Tests(String[] args) {
+        final com.ghosthands.app.ModelStore.Spec trained =
+                com.ghosthands.app.ModelStore.TRAINED;
+
+        // ================= the pin =======================
+        check("v330 pin: the trained spec is the Colab "
+                        + "verification — id, size and sha256 "
+                        + "exactly as the training run "
+                        + "printed them, twice confirmed",
+                Boolean.valueOf("q5_k_m_trained".equals(
+                                trained.id)
+                        && trained.size == 1125049888L
+                        && "5f68b8b848bd96a544e1af4a003f2b5551"
+                                .concat("d0c98408a070f76920813"
+                                        + "5d20d4c16")
+                                .equals(trained.sha256)
+                        && trained.size
+                                == com.ghosthands.app.ModelStore
+                                        .TRAINED_SIZE
+                        && trained.sha256.equals(
+                                com.ghosthands.app.ModelStore
+                                        .TRAINED_SHA256)),
+                Boolean.TRUE);
+        check("v330 registry: the trained entry is import-"
+                        + "sourced (no URL), honestly named "
+                        + "as the Ghost Hands trained "
+                        + "planner, third in picker order — "
+                        + "and its on-phone file collides "
+                        + "with neither stock file",
+                Boolean.valueOf(trained.isImport()
+                        && trained.url == null
+                        && !com.ghosthands.app.ModelStore.Q4
+                                .isImport()
+                        && !com.ghosthands.app.ModelStore.Q5
+                                .isImport()
+                        && "Qwen2.5-1.5B Q5_K_M — Ghost "
+                                .concat("Hands trained planner")
+                                .equals(trained.displayName)
+                        && "Q5 TRAINED".equals(
+                                trained.shortName)
+                        && com.ghosthands.app.ModelStore
+                                .MODELS[2] == trained
+                        && !trained.fileName.equals(
+                                com.ghosthands.app.ModelStore
+                                        .Q5.fileName)
+                        && !trained.fileName.equals(
+                                com.ghosthands.app.ModelStore
+                                        .Q4.fileName)
+                        && trained == com.ghosthands.app
+                                .ModelStore.specFor(
+                                        " Q5_K_M_TRAINED ")
+                        && "q5_k_m_trained".equals(
+                                com.ghosthands.app.ModelStore
+                                        .resolveId(
+                                                "q5_k_m_trained"))),
+                Boolean.TRUE);
+        check("v330 labels: the trained chip names an "
+                        + "import, never a download — and "
+                        + "speaks the standing shapes once "
+                        + "the file is on the phone",
+                Boolean.valueOf("1.1 GB".equals(
+                                com.ghosthands.app.ModelStore
+                                        .gbLabel(trained))
+                        && "Q5 TRAINED · 1.1 GB import"
+                                .equals(com.ghosthands.app
+                                        .ModelStore.pickerLabel(
+                                                trained, false,
+                                                false))
+                        && "Q5 TRAINED · on phone".equals(
+                                com.ghosthands.app.ModelStore
+                                        .pickerLabel(trained,
+                                                false, true))
+                        && "Q5 TRAINED ✓ active".equals(
+                                com.ghosthands.app.ModelStore
+                                        .pickerLabel(trained,
+                                                true, true))),
+                Boolean.TRUE);
+
+        // ============ the judgement (pure) ===============
+        check("v330 verdict: the shipped pin passes only "
+                        + "its exact self — a byte either "
+                        + "way is a size refusal, the stock "
+                        + "Q5 hash at the right size is a "
+                        + "sha refusal, a missing hash "
+                        + "refuses too",
+                Boolean.valueOf(com.ghosthands.app.ModelStore
+                                .importVerdict(trained,
+                                        1125049888L,
+                                        trained.sha256)
+                                == com.ghosthands.app
+                                        .ModelStore.IMPORT_OK
+                        && com.ghosthands.app.ModelStore
+                                .importVerdict(trained,
+                                        1125049887L,
+                                        trained.sha256)
+                                == com.ghosthands.app
+                                        .ModelStore
+                                        .IMPORT_SIZE_MISMATCH
+                        && com.ghosthands.app.ModelStore
+                                .importVerdict(trained,
+                                        1125049889L,
+                                        trained.sha256)
+                                == com.ghosthands.app
+                                        .ModelStore
+                                        .IMPORT_SIZE_MISMATCH
+                        && com.ghosthands.app.ModelStore
+                                .importVerdict(trained,
+                                        1125049888L,
+                                        com.ghosthands.app
+                                                .ModelStore
+                                                .MODEL_SHA256)
+                                == com.ghosthands.app
+                                        .ModelStore
+                                        .IMPORT_SHA_MISMATCH
+                        && com.ghosthands.app.ModelStore
+                                .importVerdict(trained,
+                                        1125049888L, null)
+                                == com.ghosthands.app
+                                        .ModelStore
+                                        .IMPORT_SHA_MISMATCH),
+                Boolean.TRUE);
+        check("v330 wording: each verdict's line is honest "
+                        + "— the pass says verified, the "
+                        + "size refusal names both byte "
+                        + "counts and says nothing was "
+                        + "imported, the sha refusal says "
+                        + "the hash did not match",
+                Boolean.valueOf(com.ghosthands.app.ModelStore
+                                .importStatusLine(trained,
+                                        com.ghosthands.app
+                                                .ModelStore
+                                                .IMPORT_OK, 0)
+                                .contains("imported and "
+                                        + "verified")
+                        && com.ghosthands.app.ModelStore
+                                .importStatusLine(trained,
+                                        com.ghosthands.app
+                                                .ModelStore
+                                                .IMPORT_SIZE_MISMATCH,
+                                        42)
+                                .contains("1125049888")
+                        && com.ghosthands.app.ModelStore
+                                .importStatusLine(trained,
+                                        com.ghosthands.app
+                                                .ModelStore
+                                                .IMPORT_SIZE_MISMATCH,
+                                        42)
+                                .contains("nothing was "
+                                        + "imported")
+                        && com.ghosthands.app.ModelStore
+                                .importStatusLine(trained,
+                                        com.ghosthands.app
+                                                .ModelStore
+                                                .IMPORT_SHA_MISMATCH,
+                                        1125049888L)
+                                .contains("sha256 does not "
+                                        + "match")),
+                Boolean.TRUE);
+
+        // ======== the state machine (injected spec) ======
+        // sha256("abc") — the fixture's whole content.
+        final String abcSha = "ba7816bf8f01cfea414140de5"
+                + "dae2223b00361a396177a9cb410ff61f20015ad";
+        final com.ghosthands.app.ModelStore.Spec fixture =
+                new com.ghosthands.app.ModelStore.Spec(
+                        "test_import", "Test import spec",
+                        "TEST", "test-import.gguf", null, 3L,
+                        abcSha);
+        java.io.File scratch330 = new java.io.File(
+                System.getProperty("java.io.tmpdir"),
+                "gh-v330-import");
+        java.io.File[] stale330 = scratch330.listFiles();
+        if (stale330 != null) {
+            for (int i = 0; i < stale330.length; i++) {
+                stale330[i].delete();
+            }
+        }
+        scratch330.mkdirs();
+        final com.ghosthands.app.ModelStore ms330 =
+                new com.ghosthands.app.ModelStore(scratch330);
+        final java.util.List<String> statuses330 =
+                new java.util.ArrayList<String>();
+        com.ghosthands.app.ModelStore.Listener lis330 =
+                new com.ghosthands.app.ModelStore.Listener() {
+                    @Override public void onProgress(long done,
+                            long total) { }
+                    @Override public void onStatus(String s) {
+                        statuses330.add(s);
+                    }
+                };
+        boolean shaRefused = !ms330.importModel(fixture,
+                new java.io.ByteArrayInputStream(
+                        new byte[]{97, 98, 100}), lis330);
+        boolean sizeRefused = !ms330.importModel(fixture,
+                new java.io.ByteArrayInputStream(
+                        new byte[]{97, 98}), lis330);
+        boolean landed = ms330.importModel(fixture,
+                new java.io.ByteArrayInputStream(
+                        new byte[]{97, 98, 99}), lis330);
+        boolean stagingGone = !new java.io.File(scratch330,
+                "test-import.gguf.import").exists();
+        boolean readyAfter = ms330.ready(fixture);
+        boolean deleted = ms330.deleteFile(fixture);
+        check("v330 import: a wrong-hash copy and a "
+                        + "short copy are each refused with "
+                        + "nothing left behind — no file, "
+                        + "no staging — the exact copy "
+                        + "lands, verifies and reads ready, "
+                        + "and the store's delete returns "
+                        + "the entry to not-imported",
+                Boolean.valueOf(shaRefused && sizeRefused
+                        && landed && stagingGone
+                        && readyAfter && deleted
+                        && !ms330.ready(fixture)
+                        && statuses330.size() == 3
+                        && statuses330.get(0).equals(
+                                com.ghosthands.app.ModelStore
+                                        .importStatusLine(
+                                                fixture,
+                                                com.ghosthands
+                                                        .app
+                                                        .ModelStore
+                                                        .IMPORT_SHA_MISMATCH,
+                                                3))
+                        && statuses330.get(1).equals(
+                                com.ghosthands.app.ModelStore
+                                        .importStatusLine(
+                                                fixture,
+                                                com.ghosthands
+                                                        .app
+                                                        .ModelStore
+                                                        .IMPORT_SIZE_MISMATCH,
+                                                2))
+                        && statuses330.get(2).equals(
+                                com.ghosthands.app.ModelStore
+                                        .importStatusLine(
+                                                fixture,
+                                                com.ghosthands
+                                                        .app
+                                                        .ModelStore
+                                                        .IMPORT_OK,
+                                                3))),
+                Boolean.TRUE);
+
+        // ======== the two flows never cross ==============
+        statuses330.clear();
+        boolean dlRefused = !ms330.download(trained, lis330);
+        boolean noPart = !new java.io.File(scratch330,
+                trained.fileName + ".part").exists();
+        boolean noDest = !ms330.fileFor(trained).exists();
+        boolean impRefused = !ms330.importModel(
+                com.ghosthands.app.ModelStore.Q4,
+                new java.io.ByteArrayInputStream(
+                        new byte[]{97, 98, 99}), lis330);
+        boolean pinRefused = !ms330.importModel(trained,
+                new java.io.ByteArrayInputStream(
+                        new byte[]{97, 98, 99}), lis330);
+        check("v330 separation: the download path refuses "
+                        + "the url-less trained spec before "
+                        + "touching a file, the import path "
+                        + "refuses a downloadable spec, and "
+                        + "the shipped pin refuses a 3-byte "
+                        + "fixture outright — no state "
+                        + "changes hands anywhere",
+                Boolean.valueOf(dlRefused && noPart && noDest
+                        && impRefused && pinRefused
+                        && !ms330.fileFor(
+                                com.ghosthands.app.ModelStore
+                                        .Q4).exists()
+                        && !ms330.fileFor(trained).exists()
+                        && statuses330.get(0).contains(
+                                "imported from a file")),
+                Boolean.TRUE);
+
+        // ============ a run under the trained id =========
+        Agent.Ui ui330 = new Agent.Ui() {
+            @Override public void feed(String line) { }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision,
+                    String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() {
+                return false;
+            }
+            @Override public boolean foreground() {
+                return false;
+            }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) {
+                return false;
+            }
+        };
+        Agent.Hands hands330 = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return wxPage329();
+            }
+            @Override public String tap(int el) {
+                return "ok";
+            }
+            @Override public String type(int el, String t) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String u) {
+                return "ok";
+            }
+            @Override public String scroll(String d) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int c) {
+                String t = "Oakdale, TN forecast: today "
+                        + "high 68, low 47, rain chance 20 "
+                        + "percent.";
+                return Eyes.formatReadChunk(0, t, t.length());
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        final int[] tCalls = {0};
+        ModelEngine tEngine = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                tCalls[0]++;
+                if (tCalls[0] == 1) {
+                    return "{\"action\":\"read\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale, TN forecast: today high "
+                        + "68, low 47, rain chance 20 "
+                        + "percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail tTrail =
+                new com.ghosthands.app.Trail(null);
+        new Agent(hands330, tEngine,
+                PolicyPacks.loadPack("standard"), tTrail,
+                ui330, ModelStore.TRAINED_ID, false, 10, true,
+                false, Settings.CHUNK_AUTO, 4, "duckduckgo",
+                false, true, false, false, Settings.END_CARD,
+                false, true, Settings.STYLE_BALANCED, null,
+                null, null, null, false, null, null, 0, 0,
+                null, null).run("Search for the weather "
+                        + "forecast for Oakdale, Tennessee");
+        String tStop = null;
+        String tRunModel = null;
+        boolean tDecidesOk = true;
+        int tDecides = 0;
+        for (java.util.Map<String, Object> ev
+                : tTrail.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("run".equals(t)) {
+                tRunModel = String.valueOf(ev.get("model"));
+            }
+            if ("decide".equals(t)) {
+                tDecides++;
+                if (!ModelStore.TRAINED_ID.equals(
+                        String.valueOf(ev.get("model")))) {
+                    tDecidesOk = false;
+                }
+            }
+            if ("stop".equals(t)) {
+                tStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v330 run: a run under the trained id "
+                        + "completes like any other model's "
+                        + "— and every record names "
+                        + "q5_k_m_trained, so a trail always "
+                        + "shows which brain planned it",
+                tStop + "|" + tCalls[0] + "|" + tRunModel
+                        + "|" + tDecides + "|" + tDecidesOk,
+                "done|2|q5_k_m_trained|2|true");
+
+        // ================= source pins ===================
+        if (args != null && args.length > 0) {
+            java.io.File shimF = new java.io.File(args[0]);
+            java.io.File shimDir = shimF.getParentFile();
+            java.io.File v1Dir = shimDir == null ? null
+                    : shimDir.getParentFile() == null ? null
+                    : shimDir.getParentFile().getParentFile();
+            if (v1Dir != null) {
+                String base = "app/src/main/java/com/"
+                        + "ghosthands/app/";
+                String storeSrc = readTestFile(
+                        new java.io.File(v1Dir,
+                                base + "ModelStore.java"));
+                String mainSrc = readTestFile(
+                        new java.io.File(v1Dir,
+                                base + "MainActivity.java"));
+                if (storeSrc != null && mainSrc != null) {
+                    check("v330 pin: the import arrives "
+                                    + "through the document "
+                                    + "picker under its own "
+                                    + "request code, the "
+                                    + "Activity hands the "
+                                    + "stream to the store's "
+                                    + "import, and the launch "
+                                    + "path guards the "
+                                    + "auto-download by the "
+                                    + "spec's source",
+                            Boolean.valueOf(mainSrc.contains(
+                                            "REQ_IMPORT_MODEL")
+                                    && mainSrc.contains(
+                                            "Intent.ACTION_OPEN"
+                                            + "_DOCUMENT")
+                                    && mainSrc.contains(
+                                            "store.importModel(")
+                                    && mainSrc.contains(
+                                            "activeSpec()"
+                                            + ".isImport()")),
+                            Boolean.TRUE);
+                    check("v330 pin: the store's pin is the "
+                                    + "trained sha itself, "
+                                    + "carried in ModelStore "
+                                    + "and nowhere the picker "
+                                    + "could weaken it — the "
+                                    + "verdict is a pure "
+                                    + "judgement over size "
+                                    + "and hash",
+                            Boolean.valueOf(storeSrc.contains(
+                                            "5f68b8b848bd96a544"
+                                            + "e1af4a003f2b5551"
+                                            + "d0c98408a070f769"
+                                            + "208135d20d4c16")
+                                    && storeSrc.contains(
+                                            "importVerdict(")
+                                    && storeSrc.contains(
+                                            ".import\"")),
+                            Boolean.TRUE);
+                }
+            }
+        }
+
+        // ---- no new trail types ----
+        check("v330 registry: EVENT_TYPES unchanged (33 "
+                        + "types, no v3.30 addition)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
+    }
+
+    /** v3.31: the fact-grounding guard — the pure verdict
+     *  (token normalization, standalone matching, the cap's
+     *  CORRECT -> BYPASSED turn) and scripted runs in the
+     *  Nov 1, 2026 trained run's own shape: a planner that
+     *  reads a forecast-free page, notes invented figures,
+     *  and tries to answer with them is corrected at the note
+     *  and again at the done; a planner whose figures were
+     *  read is never touched; a stubborn planner is bypassed
+     *  after the cap with its text intact and the figures
+     *  named on the trail and in the run_summary; the same
+     *  correction fires on an unattended (readonly, headless)
+     *  run, because both ride the one loop. */
+    private static void v331Tests(String[] args) {
+        // ================= pure: tokens & matching =================
+        final String corpusWx331 = "Oakdale forecast: today "
+                + "high 68, low 47, rain chance 20 percent, "
+                + "winds 5 to 10 mph.";
+        check("v331 pure: unit dressings normalize away "
+                        + "(60°F, 47 degrees, 20% are 60/47/20)",
+                Boolean.valueOf(GroundingGuard.judge(
+                                "High 60°F, low 47 degrees, "
+                                        + "rain 20%",
+                                "high 60, low 47, rain 20",
+                                0).outcome
+                        == GroundingGuard.Outcome.PASS),
+                Boolean.TRUE);
+        check("v331 pure: every figure grounded passes",
+                Boolean.valueOf(GroundingGuard.judge(
+                                "high 68, low 47, rain 20 "
+                                        + "percent",
+                                corpusWx331, 0).outcome
+                        == GroundingGuard.Outcome.PASS),
+                Boolean.TRUE);
+        check("v331 pure: grouping commas drop on both "
+                        + "sides (1,200 the claim, 1200 the "
+                        + "text — and the reverse)",
+                Boolean.valueOf(GroundingGuard.judge(
+                                "It costs 1,200 dollars",
+                                "price: 1200 dollars", 0).outcome
+                        == GroundingGuard.Outcome.PASS
+                        && GroundingGuard.judge(
+                                "It costs 1200 dollars",
+                                "price: 1,200 dollars",
+                                0).outcome
+                        == GroundingGuard.Outcome.PASS),
+                Boolean.TRUE);
+        check("v331 pure: a decimal is its own token — 20.5 "
+                        + "is not grounded by 20, nor 20 by "
+                        + "20.5",
+                GroundingGuard.ungroundedTokens(
+                                "about 20.5 inches",
+                                "about 20 inches")
+                        + "|" + GroundingGuard
+                                .ungroundedTokens(
+                                        "about 20 inches",
+                                        "about 20.5 inches"),
+                "[20.5]|[20]");
+        check("v331 pure: standalone matching — a corpus "
+                        + "2036 does not ground 20",
+                GroundingGuard.ungroundedTokens(
+                        "rain 20 percent",
+                        "ok: read chars 0-2036 of 2036")
+                        .toString(),
+                "[20]");
+        check("v331 pure: standalone matching — a corpus "
+                        + "20910 grounds neither 20 nor 2091, "
+                        + "but grounds 20910 itself",
+                GroundingGuard.ungroundedTokens(
+                                "low 20, zip 2091",
+                                "Silver Spring, MD 20910")
+                        + "|" + (GroundingGuard.judge(
+                                "zip 20910",
+                                "Silver Spring, MD 20910",
+                                0).outcome
+                        == GroundingGuard.Outcome.PASS),
+                "[20, 2091]|true");
+        check("v331 pure: partial grounding names only the "
+                        + "invented figure",
+                Boolean.valueOf(GroundingGuard.judge(
+                                "high 68, low 47, rain 35 "
+                                        + "percent",
+                                corpusWx331, 0).outcome
+                        == GroundingGuard.Outcome.CORRECT
+                        && "[35]".equals(GroundingGuard
+                                .ungroundedTokens(
+                                        "high 68, low 47, "
+                                                + "rain 35 "
+                                                + "percent",
+                                        corpusWx331)
+                                .toString())),
+                Boolean.TRUE);
+        check("v331 pure: an empty corpus grounds nothing — "
+                        + "a figured candidate corrects",
+                Boolean.valueOf(GroundingGuard.judge(
+                                "High 60 degrees", "", 0)
+                        .outcome
+                        == GroundingGuard.Outcome.CORRECT
+                        && "[60]".equals(GroundingGuard
+                                .ungroundedTokens(
+                                        "High 60 degrees",
+                                        "")
+                                .toString())
+                        && GroundingGuard.judge(
+                                "High 60 degrees", null, 0)
+                        .outcome
+                        == GroundingGuard.Outcome.CORRECT),
+                Boolean.TRUE);
+        check("v331 pure: a figureless candidate passes on "
+                        + "any corpus — the honest exit stays "
+                        + "open (and nulls are safe)",
+                Boolean.valueOf(GroundingGuard.judge(
+                                "I could not find the "
+                                        + "forecast",
+                                "", 0).outcome
+                        == GroundingGuard.Outcome.PASS
+                        && GroundingGuard.judge(null, null, 0)
+                        .outcome
+                        == GroundingGuard.Outcome.PASS),
+                Boolean.TRUE);
+        check("v331 pure: duplicate figures collapse, order "
+                        + "is the candidate's",
+                GroundingGuard.ungroundedTokens(
+                        "20 then 60 then 20 again", "")
+                        .toString(),
+                "[20, 60]");
+        check("v331 pure: the cap turns CORRECT into "
+                        + "BYPASSED — and never touches a "
+                        + "grounded candidate",
+                Boolean.valueOf(GroundingGuard.judge(
+                                "High 60", "",
+                                GroundingGuard
+                                        .GROUNDING_CORRECTION_CAP
+                                        - 1).outcome
+                        == GroundingGuard.Outcome.CORRECT
+                        && GroundingGuard.judge(
+                                "High 60", "",
+                                GroundingGuard
+                                        .GROUNDING_CORRECTION_CAP)
+                        .outcome
+                        == GroundingGuard.Outcome.BYPASSED
+                        && GroundingGuard.judge(
+                                "high 68", corpusWx331, 99)
+                        .outcome
+                        == GroundingGuard.Outcome.PASS),
+                Boolean.TRUE);
+        check("v331 pure: the correction names the figures "
+                        + "and both honest ways out",
+                Boolean.valueOf(GroundingGuard.judge(
+                                "60 40 20", "", 0).reason
+                        .startsWith("fact grounding "
+                                + "corrected by guard:")
+                        && GroundingGuard.judge(
+                                "60 40 20", "", 0).reason
+                        .contains("60, 40 and 20")
+                        && GroundingGuard.judge(
+                                "60 40 20", "", 0).reason
+                        .contains("could not")),
+                Boolean.TRUE);
+        check("v331 pure: the bypass wording names the "
+                        + "figures it let through",
+                Boolean.valueOf(GroundingGuard.judge(
+                                "The answer is 42", "",
+                                GroundingGuard
+                                        .GROUNDING_CORRECTION_CAP)
+                        .reason.startsWith(
+                                "fact grounding bypassed")
+                        && GroundingGuard.judge(
+                                "The answer is 42", "",
+                                GroundingGuard
+                                        .GROUNDING_CORRECTION_CAP)
+                        .reason.contains("42")
+                        && "60, 40 and 20".equals(
+                                GroundingGuard.figureList(
+                                        GroundingGuard
+                                                .ungroundedTokens(
+                                                        "60 40 20",
+                                                        "")))
+                        && "7".equals(GroundingGuard
+                                .figureList(GroundingGuard
+                                        .ungroundedTokens(
+                                                "7", "")))),
+                Boolean.TRUE);
+
+        // ================= scripted runs =================
+        Agent.Ui ui331 = new Agent.Ui() {
+            @Override public void feed(String line) { }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision, String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() {
+                return false;
+            }
+            @Override public boolean foreground() {
+                return false;
+            }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) {
+                return false;
+            }
+        };
+        final String goal331 = "Search for the weather "
+                + "forecast for Oakdale, Tennessee and tell "
+                + "me the high and low temperatures and "
+                + "chance of rain for the next three days.";
+
+        // -- TONIGHT: the trained run's shape, replayed -----
+        // The planner reads a page with no forecast on it
+        // (the NWS landing page: menus, an address, a ZIP),
+        // notes the invented 60/40/20, then answers with
+        // them. The note is corrected; a note whose figure
+        // WAS read (the ZIP) lands; the done repeating the
+        // invention is corrected again — the corrected note
+        // never laundered it, because notes are not corpus;
+        // the honest figureless done then completes the run.
+        final String landing331 = "HOME FORECAST Local "
+                + "Graphical Aviation Marine Rivers and Lakes "
+                + "Hurricanes Severe Weather Fire Weather "
+                + "Sunrise/Sunset Long Range Forecasts Climate "
+                + "Prediction Space Weather PAST WEATHER Past "
+                + "Weather Astronomical Data National Weather "
+                + "Service 1325 East West Highway Silver "
+                + "Spring, MD 20910";
+        final Eyes.Perception nws331 = mdPage(
+                "https://www.weather.gov/",
+                elx(1, "a", "Forecast", "/forecast"),
+                elx(2, "a", "Past Weather", "/past"),
+                elx(3, "a", "Safety", "/safety"),
+                elx(4, "a", "Information", "/info"));
+        nws331.title = "National Weather Service";
+        nws331.textPreview = "Customize Your Weather.gov "
+                + "Enter Your City, ST or ZIP Code";
+        Agent.Hands nwsHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return nws331;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int chunk) {
+                return Eyes.formatReadChunk(0, landing331,
+                        landing331.length());
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        final int[] callsT = {0};
+        ModelEngine engineT = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsT[0]++;
+                if (callsT[0] == 1) {
+                    return "{\"action\":\"read\"}";
+                }
+                if (callsT[0] == 2) {
+                    return "{\"action\":\"note\",\"fact\":"
+                            + "\"Next three days: High 60°F, "
+                            + "Low 40°F, Chance of rain "
+                            + "20%.\"}";
+                }
+                if (callsT[0] == 3) {
+                    return "{\"action\":\"note\",\"fact\":"
+                            + "\"The NWS office is in Silver "
+                            + "Spring, MD 20910.\"}";
+                }
+                if (callsT[0] == 4) {
+                    return "{\"action\":\"done\",\"summary\":"
+                            + "\"The next three days in "
+                            + "Oakdale, Tennessee: High 60°F, "
+                            + "Low 40°F, Chance of rain "
+                            + "20%.\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"I could not find the Oakdale "
+                        + "forecast in the pages I read.\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailT =
+                new com.ghosthands.app.Trail(null);
+        Agent agentT = new Agent(nwsHands, engineT,
+                PolicyPacks.loadPack("standard"), trailT,
+                ui331, "q5_k_m_trained");
+        agentT.run(goal331);
+        int tCorrect = 0;
+        int tBypass = 0;
+        int tNoteAdded = 0;
+        String tStop = null;
+        String tSummary = null;
+        Object tBypassField = "unset";
+        for (java.util.Map<String, Object> ev : trailT.events()) {
+            String t = String.valueOf(ev.get("type"));
+            String r = String.valueOf(ev.get("reason"));
+            if ("guard".equals(t)
+                    && r.startsWith("fact grounding")) {
+                if ("correct".equals(
+                        String.valueOf(ev.get("outcome")))) {
+                    tCorrect++;
+                }
+                if ("bypassed".equals(
+                        String.valueOf(ev.get("outcome")))) {
+                    tBypass++;
+                }
+            }
+            if ("note".equals(t) && "added".equals(
+                    String.valueOf(ev.get("status")))) {
+                tNoteAdded++;
+            }
+            if ("stop".equals(t)) {
+                tStop = String.valueOf(ev.get("reason"));
+                tSummary = String.valueOf(ev.get("summary"));
+            }
+            if ("run_summary".equals(t)) {
+                tBypassField = ev.get("grounding_bypassed");
+            }
+        }
+        check("v331 run TONIGHT: the invented note and the "
+                        + "done repeating it are both corrected "
+                        + "— the note never laundered the done",
+                tCorrect + "|" + tBypass, "2|0");
+        check("v331 run TONIGHT: the read-figure note lands, "
+                        + "the invented one never does",
+                tNoteAdded + "|"
+                        + agentT.scratchpad().size(),
+                "1|1");
+        check("v331 run TONIGHT: the honest figureless done "
+                        + "completes the run, unrewritten",
+                tStop + "|" + callsT[0] + "|"
+                        + (tSummary != null
+                                && tSummary.contains(
+                                        "could not find")),
+                "done|5|true");
+        check("v331 run TONIGHT: no bypass, so the "
+                        + "run_summary carries no bypass field",
+                Boolean.valueOf(tBypassField == null),
+                Boolean.TRUE);
+
+        // -- GROUNDED: read figures flow through untouched --
+        final String fc331 = "Oakdale forecast: today high "
+                + "68, low 47, rain chance 20 percent.";
+        final Eyes.Perception wxp331 = mdPage(
+                "https://wx.test/today",
+                elx(1, "a", "Hourly", "/hourly"),
+                elx(2, "a", "10-Day", "/10day"),
+                elx(3, "a", "Radar", "/radar"));
+        wxp331.title = "Conditions";
+        wxp331.textPreview = fc331;
+        Agent.Hands wxHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return wxp331;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int chunk) {
+                return Eyes.formatReadChunk(0, fc331,
+                        fc331.length());
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        final int[] callsG = {0};
+        ModelEngine engineG = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsG[0]++;
+                if (callsG[0] == 1) {
+                    return "{\"action\":\"read\"}";
+                }
+                if (callsG[0] == 2) {
+                    return "{\"action\":\"note\",\"fact\":"
+                            + "\"Today high 68, low 47, rain "
+                            + "chance 20 percent.\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Oakdale today: high 68, low 47, "
+                        + "rain chance 20 percent.\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailG =
+                new com.ghosthands.app.Trail(null);
+        new Agent(wxHands, engineG,
+                PolicyPacks.loadPack("standard"), trailG,
+                ui331, "q5_k_m").run(goal331);
+        int gGrounding = 0;
+        int gNoteAdded = 0;
+        String gStop = null;
+        for (java.util.Map<String, Object> ev : trailG.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("guard".equals(t) && String.valueOf(
+                    ev.get("reason")).startsWith(
+                            "fact grounding")) {
+                gGrounding++;
+            }
+            if ("note".equals(t) && "added".equals(
+                    String.valueOf(ev.get("status")))) {
+                gNoteAdded++;
+            }
+            if ("stop".equals(t)) {
+                gStop = String.valueOf(ev.get("reason"));
+            }
+        }
+        check("v331 run GROUNDED: figures that were read "
+                        + "are never corrected — note lands, "
+                        + "done completes, three calls",
+                gGrounding + "|" + gNoteAdded + "|" + gStop
+                        + "|" + callsG[0],
+                "0|1|done|3");
+
+        // -- BYPASS: the cap spent, the text stands ---------
+        final Eyes.Perception plain331 = mdPage(
+                "https://example.test/x",
+                elx(1, "a", "One", "/1"),
+                elx(2, "a", "Two", "/2"),
+                elx(3, "a", "Three", "/3"));
+        Agent.Hands plainHands = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return plain331;
+            }
+            @Override public String tap(int el) { return "ok"; }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int chunk) {
+                return "error: no readable text found on "
+                        + "this page";
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        final int[] callsB = {0};
+        ModelEngine engineB = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsB[0]++;
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"The answer is 42.\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailB =
+                new com.ghosthands.app.Trail(null);
+        new Agent(plainHands, engineB,
+                PolicyPacks.loadPack("standard"), trailB,
+                ui331, "q5_k_m").run("Summarize this page "
+                        + "for me");
+        int bCorrect = 0;
+        int bBypass = 0;
+        String bStop = null;
+        String bSummary = null;
+        Object bBypassField = null;
+        for (java.util.Map<String, Object> ev : trailB.events()) {
+            String t = String.valueOf(ev.get("type"));
+            String r = String.valueOf(ev.get("reason"));
+            if ("guard".equals(t)
+                    && r.startsWith("fact grounding")) {
+                if ("correct".equals(
+                        String.valueOf(ev.get("outcome")))) {
+                    bCorrect++;
+                }
+                if ("bypassed".equals(
+                        String.valueOf(ev.get("outcome")))) {
+                    bBypass++;
+                }
+            }
+            if ("stop".equals(t)) {
+                bStop = String.valueOf(ev.get("reason"));
+                bSummary = String.valueOf(ev.get("summary"));
+            }
+            if ("run_summary".equals(t)) {
+                bBypassField = ev.get("grounding_bypassed");
+            }
+        }
+        check("v331 run BYPASS: three corrections, then the "
+                        + "fourth proposal proceeds — the cap "
+                        + "is a stand-down, not a trap",
+                bCorrect + "|" + bBypass + "|" + callsB[0],
+                "3|1|4");
+        check("v331 run BYPASS: the planner's text stands "
+                        + "exactly as written, and the "
+                        + "run_summary names the bypassed "
+                        + "figure",
+                bStop + "|" + bSummary + "|" + bBypassField,
+                "done|The answer is 42.|42");
+
+        // -- UNATTENDED: the same loop, headless ------------
+        final int[] callsU = {0};
+        ModelEngine engineU = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsU[0]++;
+                if (callsU[0] == 1) {
+                    return "{\"action\":\"note\",\"fact\":"
+                            + "\"High 99 degrees.\"}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"I could not find the "
+                        + "forecast.\"}";
+            }
+        };
+        com.ghosthands.app.Trail trailU =
+                new com.ghosthands.app.Trail(null);
+        new Agent(wxHands, engineU,
+                PolicyPacks.loadPack("readonly"), trailU,
+                new HeadlessUi(System.currentTimeMillis()),
+                "q5_k_m", false, 25, true, true,
+                Settings.CHUNK_AUTO, 4, "duckduckgo", false,
+                true, false, false, Settings.END_CARD, false,
+                true, Settings.STYLE_BALANCED, null, null,
+                null, null, false, null, null, 0, 0, null,
+                null, true).run("Check the Oakdale forecast");
+        int uCorrect = 0;
+        String uStop = null;
+        Object uUnattended = null;
+        for (java.util.Map<String, Object> ev : trailU.events()) {
+            String t = String.valueOf(ev.get("type"));
+            if ("guard".equals(t) && String.valueOf(
+                    ev.get("reason")).startsWith(
+                            "fact grounding")
+                    && "correct".equals(
+                            String.valueOf(
+                                    ev.get("outcome")))) {
+                uCorrect++;
+            }
+            if ("stop".equals(t)) {
+                uStop = String.valueOf(ev.get("reason"));
+            }
+            if ("run".equals(t)) {
+                uUnattended = ev.get("unattended");
+            }
+        }
+        check("v331 run UNATTENDED: the grounding "
+                        + "correction fires headless under "
+                        + "the readonly pack — one loop, "
+                        + "both paths",
+                uCorrect + "|" + uStop + "|"
+                        + Boolean.TRUE.equals(uUnattended),
+                "1|done|true");
+
+        // ---- no new trail types ----
+        check("v331 registry: EVENT_TYPES unchanged (33 "
+                        + "types, no v3.31 addition — the "
+                        + "guard rides the standing guard "
+                        + "event)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
+    }
+
+    private static void v332Tests(String[] args) {
+        // ================= Fix 1: trail durability, pure ====
+        try {
+            java.io.File dir332 = java.nio.file.Files
+                    .createTempDirectory("gh332").toFile();
+            // A memory-only trail: no file to fail against.
+            com.ghosthands.app.Trail mem332 =
+                    new com.ghosthands.app.Trail(null);
+            boolean memOk = !mem332.fileBacked()
+                    && mem332.fileWritten()
+                    && mem332.lastWriteError() == null;
+            mem332.record("run", 0, com.ghosthands.app.Trail
+                    .fields("goal", "x"));
+            check("v332 trail pure: a memory-only trail is "
+                            + "not file-backed and always "
+                            + "reports written",
+                    Boolean.valueOf(memOk && mem332.fileWritten()
+                            && mem332.lastWriteError() == null),
+                    Boolean.TRUE);
+            // A writable file trail: writes land, on disk.
+            java.io.File tf332 = new java.io.File(dir332,
+                    "ok.jsonl");
+            com.ghosthands.app.Trail file332 =
+                    new com.ghosthands.app.Trail(tf332);
+            file332.record("govern", 1, com.ghosthands.app.Trail
+                    .fields("outcome", "allow"));
+            String onDisk332 = new String(java.nio.file.Files
+                    .readAllBytes(tf332.toPath()), "UTF-8");
+            check("v332 trail pure: a file trail's landed "
+                            + "write reports written, error "
+                            + "null, bytes on disk",
+                    Boolean.valueOf(file332.fileBacked()
+                            && file332.fileWritten()
+                            && file332.lastWriteError() == null
+                            && onDisk332.contains("\"govern\"")),
+                    Boolean.TRUE);
+            // An unwritable file trail: the path sits under a
+            // regular file, so every open fails.
+            java.io.File blocker332 = new java.io.File(dir332,
+                    "blocker");
+            java.nio.file.Files.write(blocker332.toPath(),
+                    new byte[]{1});
+            com.ghosthands.app.Trail bad332 =
+                    new com.ghosthands.app.Trail(
+                            new java.io.File(blocker332,
+                                    "trail.jsonl"));
+            boolean badBefore = bad332.fileBacked()
+                    && bad332.fileWritten();
+            bad332.record("govern", 1, com.ghosthands.app.Trail
+                    .fields("outcome", "allow"));
+            check("v332 trail pure: a failed write reports "
+                            + "not written, names the error, "
+                            + "and the event survives in memory",
+                    Boolean.valueOf(badBefore
+                            && !bad332.fileWritten()
+                            && bad332.lastWriteError() != null
+                            && bad332.lastWriteError().length() > 0
+                            && bad332.events().size() == 1),
+                    Boolean.TRUE);
+            // Recovery: the semantics are per-write — once
+            // the path can be written, the next record lands
+            // and the report turns true again.
+            blocker332.delete();
+            blocker332.mkdir();
+            bad332.record("execute", 1, com.ghosthands.app.Trail
+                    .fields("action", "tap"));
+            String recovered332 = new String(java.nio.file
+                    .Files.readAllBytes(new java.io.File(
+                            blocker332, "trail.jsonl").toPath()),
+                    "UTF-8");
+            check("v332 trail pure: durability is per-write "
+                            + "— a recovered path reports "
+                            + "written again",
+                    Boolean.valueOf(bad332.fileWritten()
+                            && bad332.lastWriteError() == null
+                            && recovered332.contains(
+                                    "\"execute\"")),
+                    Boolean.TRUE);
+        } catch (Exception e) {
+            check("v332 trail pure: fixtures ran", "threw " + e,
+                    "ran");
+        }
+
+        // ================= Fix 1: the gate in a run ========
+        final java.util.List<String> feedF = new java.util
+                .ArrayList<String>();
+        Agent.Ui uiF = new Agent.Ui() {
+            @Override public void feed(String line) {
+                feedF.add(line);
+            }
+            @Override public void status(String s) { }
+            @Override public boolean approve(GhAction action,
+                    Governor.Decision decision, String describe) {
+                return true;
+            }
+            @Override public boolean stopRequested() {
+                return false;
+            }
+            @Override public boolean foreground() {
+                return false;
+            }
+            @Override public ElementInfo awaitUserTap(int step,
+                    long timeoutMs) { return null; }
+            @Override public boolean awaitUserResume(int step,
+                    String message, long timeoutMs) {
+                return false;
+            }
+        };
+        final Eyes.Perception pageF = mdPage(
+                "https://wx.test/today",
+                elx(1, "a", "Forecast", "/forecast"),
+                elx(2, "a", "Hourly", "/hourly"),
+                elx(3, "a", "Radar", "/radar"),
+                elx(4, "a", "Maps", "/maps"));
+        pageF.title = "Conditions";
+        pageF.textPreview = "Oakdale conditions page.";
+        final int[] tapCalls = {0};
+        Agent.Hands handsF = new Agent.Hands() {
+            @Override public Eyes.Perception perceive() {
+                return pageF;
+            }
+            @Override public String tap(int el) {
+                tapCalls[0]++;
+                return "ok";
+            }
+            @Override public String type(int el, String text) {
+                return "ok";
+            }
+            @Override public String choose(int el, String text) {
+                return "ok";
+            }
+            @Override public String toggle(int el, String text) {
+                return "ok";
+            }
+            @Override public String gotoUrl(String url) {
+                return "ok";
+            }
+            @Override public String scroll(String dir) {
+                return "ok";
+            }
+            @Override public String back() { return "ok"; }
+            @Override public String search(String q) {
+                return "ok";
+            }
+            @Override public String read(int chunk) {
+                return Eyes.formatReadChunk(0, "Oakdale "
+                        + "conditions page.",
+                        "Oakdale conditions page.".length());
+            }
+            @Override public String reload(String u) {
+                return "ok";
+            }
+        };
+        final int[] callsF = {0};
+        ModelEngine engineF = new ModelEngine() {
+            @Override public synchronized String generate(
+                    String prompt, int maxTokens) {
+                callsF[0]++;
+                if (callsF[0] == 1) {
+                    return "{\"action\":\"tap\",\"el\":1}";
+                }
+                return "{\"action\":\"done\",\"summary\":"
+                        + "\"Tapped the link.\"}";
+            }
+        };
+        // -- BROKEN TRAIL: the governed tap must not run ---
+        try {
+            java.io.File dirB = java.nio.file.Files
+                    .createTempDirectory("gh332b").toFile();
+            java.io.File blockerB = new java.io.File(dirB,
+                    "blocker");
+            java.nio.file.Files.write(blockerB.toPath(),
+                    new byte[]{1});
+            com.ghosthands.app.Trail brokenTrail =
+                    new com.ghosthands.app.Trail(
+                            new java.io.File(blockerB,
+                                    "trail.jsonl"));
+            tapCalls[0] = 0;
+            callsF[0] = 0;
+            feedF.clear();
+            new Agent(handsF, engineF,
+                    PolicyPacks.loadPack("standard"),
+                    brokenTrail, uiF, "q5_k_m")
+                    .run("Tap the forecast link");
+            int bGovern = 0;
+            int bExecute = 0;
+            String bStop = null;
+            String bSummary = null;
+            for (java.util.Map<String, Object> ev
+                    : brokenTrail.events()) {
+                String t = String.valueOf(ev.get("type"));
+                if ("govern".equals(t)) bGovern++;
+                if ("execute".equals(t)) bExecute++;
+                if ("stop".equals(t)) {
+                    bStop = String.valueOf(ev.get("reason"));
+                    bSummary = String.valueOf(
+                            ev.get("summary"));
+                }
+            }
+            boolean bFed = false;
+            for (String line : feedF) {
+                if (line.contains("trail")) bFed = true;
+            }
+            check("v332 run BROKEN TRAIL: the govern record "
+                            + "is in memory, no execute record "
+                            + "exists, the tap never ran",
+                    bGovern + "|" + bExecute + "|"
+                            + tapCalls[0] + "|" + callsF[0],
+                    "1|0|0|1");
+            check("v332 run BROKEN TRAIL: the run stops "
+                            + "honestly — an error stop naming "
+                            + "the trail write failure, fed "
+                            + "to the user",
+                    bStop + "|"
+                            + (bSummary != null && bSummary
+                                    .contains("trail write "
+                                            + "failure"))
+                            + "|" + bFed,
+                    "error|true|true");
+        } catch (Exception e) {
+            check("v332 run BROKEN TRAIL: fixture ran",
+                    "threw " + e, "ran");
+        }
+        // -- GOOD TRAIL (control): the gate stays out of the
+        //    way when writes land -------------------------
+        try {
+            java.io.File dirG = java.nio.file.Files
+                    .createTempDirectory("gh332g").toFile();
+            java.io.File tfG = new java.io.File(dirG,
+                    "trail.jsonl");
+            com.ghosthands.app.Trail goodTrail =
+                    new com.ghosthands.app.Trail(tfG);
+            tapCalls[0] = 0;
+            callsF[0] = 0;
+            new Agent(handsF, engineF,
+                    PolicyPacks.loadPack("standard"),
+                    goodTrail, uiF, "q5_k_m")
+                    .run("Tap the forecast link");
+            String gStop = null;
+            for (java.util.Map<String, Object> ev
+                    : goodTrail.events()) {
+                if ("stop".equals(String.valueOf(
+                        ev.get("type")))) {
+                    gStop = String.valueOf(ev.get("reason"));
+                }
+            }
+            String gDisk = new String(java.nio.file.Files
+                    .readAllBytes(tfG.toPath()), "UTF-8");
+            check("v332 run GOOD TRAIL (control): writes "
+                            + "land, the gate never trips — "
+                            + "tap executes, govern and "
+                            + "execute are on disk, run "
+                            + "completes done",
+                    tapCalls[0] + "|" + gStop + "|"
+                            + goodTrail.fileWritten() + "|"
+                            + gDisk.contains("\"govern\"")
+                            + "|" + gDisk.contains(
+                                    "\"execute\""),
+                    "1|done|true|true|true");
+        } catch (Exception e) {
+            check("v332 run GOOD TRAIL: fixture ran",
+                    "threw " + e, "ran");
+        }
+        // ================= Fix 2: the scheme matrix ======
+        check("v332 scheme: the web and the blank page are "
+                        + "allowed (case included)",
+                Boolean.valueOf(NavScheme.allowed(
+                                "https://example.com/x")
+                        && NavScheme.allowed(
+                                "http://example.com")
+                        && NavScheme.allowed(
+                                "HTTP://EXAMPLE.COM/PATH")
+                        && NavScheme.allowed("about:blank")
+                        && NavScheme.allowed("about:")),
+                Boolean.TRUE);
+        check("v332 scheme: the escape schemes are refused "
+                        + "— file, javascript, data, content, "
+                        + "blob, intent, ftp, mailto",
+                Boolean.valueOf(!NavScheme.allowed(
+                                "javascript:alert(1)")
+                        && !NavScheme.allowed(
+                                "data:text/html;base64,AAAA")
+                        && !NavScheme.allowed("file:///x")
+                        && !NavScheme.allowed(
+                                "content://media/x")
+                        && !NavScheme.allowed(
+                                "blob:https://example.com/id")
+                        && !NavScheme.allowed(
+                                "intent://x#Intent;end")
+                        && !NavScheme.allowed(
+                                "ftp://example.com/f")
+                        && !NavScheme.allowed("mailto:a@b.c")),
+                Boolean.TRUE);
+        check("v332 scheme: case evasions fold — the "
+                        + "scheme is read lowercased",
+                Boolean.valueOf(!NavScheme.allowed(
+                                "JaVaScRiPt:alert(1)")
+                        && !NavScheme.allowed("FILE:///x")
+                        && "https".equals(NavScheme.schemeOf(
+                                "HTTPS://x"))),
+                Boolean.TRUE);
+        check("v332 scheme: whitespace and control "
+                        + "evasions fold — leading junk and "
+                        + "embedded tabs/newlines vanish "
+                        + "before the scheme is read",
+                Boolean.valueOf(!NavScheme.allowed(
+                                "  javascript:alert(1)")
+                        && !NavScheme.allowed(
+                                "\t\n javascript:x")
+                        && !NavScheme.allowed(
+                                "\u0001javascript:x")
+                        && !NavScheme.allowed(
+                                "java\tscript:alert(1)")
+                        && !NavScheme.allowed(
+                                "java\nscript:alert(1)")
+                        && "javascript".equals(NavScheme
+                                .schemeOf("java\tscript:x"))
+                        && NavScheme.allowed(
+                                "  https://example.com")),
+                Boolean.TRUE);
+        check("v332 scheme: scheme-less strings are "
+                        + "refused (null, empty, bare host, "
+                        + "scheme-relative, no colon)",
+                Boolean.valueOf(!NavScheme.allowed(null)
+                        && !NavScheme.allowed("")
+                        && !NavScheme.allowed(
+                                "example.com/path")
+                        && !NavScheme.allowed("//example.com")
+                        && !NavScheme.allowed("https")
+                        && "".equals(NavScheme.schemeOf(null))
+                        && "".equals(NavScheme.schemeOf(""))),
+                Boolean.TRUE);
+        check("v332 scheme: illegal scheme shapes read as "
+                        + "no scheme; legal-but-unlisted "
+                        + "schemes are named and refused",
+                Boolean.valueOf(!NavScheme.allowed("1http://x")
+                        && !NavScheme.allowed("://x")
+                        && !NavScheme.allowed("ht tp://x")
+                        && "tel".equals(NavScheme.schemeOf(
+                                "tel:+1234"))
+                        && !NavScheme.allowed("tel:+1234")),
+                Boolean.TRUE);
+
+        // ================= Fix 3: redirect hops, pure =====
+        final DownloadRedirects.Policy fakePolicy332 =
+                new DownloadRedirects.Policy() {
+                    @Override public String denialFor(String u) {
+                        return (u != null && u.contains(
+                                "evil.test"))
+                                ? "domain evil.test is "
+                                        + "blocked by policy"
+                                : null;
+                    }
+                };
+        check("v332 hops: exactly 301/302/303/307/308 are "
+                        + "followed — 200, 204, 300, 304 and "
+                        + "404 are not",
+                Boolean.valueOf(DownloadRedirects.isRedirect(301)
+                        && DownloadRedirects.isRedirect(302)
+                        && DownloadRedirects.isRedirect(303)
+                        && DownloadRedirects.isRedirect(307)
+                        && DownloadRedirects.isRedirect(308)
+                        && !DownloadRedirects.isRedirect(200)
+                        && !DownloadRedirects.isRedirect(204)
+                        && !DownloadRedirects.isRedirect(300)
+                        && !DownloadRedirects.isRedirect(304)
+                        && !DownloadRedirects.isRedirect(404)),
+                Boolean.TRUE);
+        check("v332 hops: a same-host hop and a policy-clean "
+                        + "cross-host hop both proceed",
+                Boolean.valueOf(DownloadRedirects.hopDenial(
+                                fakePolicy332,
+                                "https://a.test/f.zip",
+                                "https://a.test/g.zip", 0)
+                                == null
+                        && DownloadRedirects.hopDenial(
+                                fakePolicy332,
+                                "https://a.test/f.zip",
+                                "https://cdn.test/g.zip", 0)
+                                == null),
+                Boolean.TRUE);
+        check("v332 hops: a cross-host hop the policy "
+                        + "denies aborts with the policy's "
+                        + "own reason",
+                DownloadRedirects.hopDenial(fakePolicy332,
+                        "https://a.test/f.zip",
+                        "https://evil.test/f.zip", 0),
+                "domain evil.test is blocked by policy");
+        check("v332 hops: an https -> http downgrade is "
+                        + "refused outright; http -> https "
+                        + "upgrades proceed",
+                Boolean.valueOf(DownloadRedirects.hopDenial(
+                                fakePolicy332,
+                                "https://a.test/f.zip",
+                                "http://a.test/f.zip", 0)
+                                != null
+                        && DownloadRedirects.hopDenial(
+                                fakePolicy332,
+                                "http://a.test/f.zip",
+                                "https://a.test/f.zip", 0)
+                                == null),
+                Boolean.TRUE);
+        check("v332 hops: a hop off the web's schemes is "
+                        + "refused (file, data, ftp)",
+                Boolean.valueOf(DownloadRedirects.hopDenial(
+                                fakePolicy332,
+                                "https://a.test/f.zip",
+                                "file:///etc/passwd", 0) != null
+                        && DownloadRedirects.hopDenial(
+                                fakePolicy332,
+                                "https://a.test/f.zip",
+                                "data:text/plain,AAAA", 0)
+                                != null
+                        && DownloadRedirects.hopDenial(
+                                fakePolicy332,
+                                "https://a.test/f.zip",
+                                "ftp://a.test/f", 0) != null),
+                Boolean.TRUE);
+        check("v332 hops: the cap is 5 — the fifth hop "
+                        + "proceeds, the sixth is refused",
+                Boolean.valueOf(DownloadRedirects.MAX_HOPS == 5
+                        && DownloadRedirects.hopDenial(
+                                fakePolicy332,
+                                "https://a.test/f.zip",
+                                "https://a.test/g.zip", 4)
+                                == null
+                        && DownloadRedirects.hopDenial(
+                                fakePolicy332,
+                                "https://a.test/f.zip",
+                                "https://a.test/g.zip", 5)
+                                != null),
+                Boolean.TRUE);
+        check("v332 hops: Location resolution rides the "
+                        + "platform's relative semantics; "
+                        + "unreadable pairs come back null",
+                Boolean.valueOf("https://a.test/g.zip".equals(
+                                DownloadRedirects.resolve(
+                                        "https://a.test/dir/f.zip",
+                                        "/g.zip"))
+                        && "https://a.test/dir/g.zip".equals(
+                                DownloadRedirects.resolve(
+                                        "https://a.test/dir/f.zip",
+                                        "g.zip"))
+                        && "https://b.test/x".equals(
+                                DownloadRedirects.resolve(
+                                        "https://a.test/f",
+                                        "https://b.test/x"))
+                        && DownloadRedirects.resolve(
+                                "https://a.test/f",
+                                "nosuchproto://x") == null
+                        && DownloadRedirects.resolve(null,
+                                "/x") == null),
+                Boolean.TRUE);
+        check("v332 hops: cookies ride only within a host "
+                        + "— a chain's first request always "
+                        + "may, a host change never does "
+                        + "(case folded)",
+                Boolean.valueOf(DownloadRedirects.sendCookies(
+                                null, "https://a.test/f")
+                        && DownloadRedirects.sendCookies(
+                                "https://a.test/f",
+                                "https://a.test/g")
+                        && !DownloadRedirects.sendCookies(
+                                "https://a.test/f",
+                                "https://cdn.test/g")
+                        && DownloadRedirects.sendCookies(
+                                "https://A.test/f",
+                                "https://a.test/g")),
+                Boolean.TRUE);
+        check("v332 hops: a null policy judges nothing — "
+                        + "the structural rules still stand",
+                Boolean.valueOf(DownloadRedirects.hopDenial(
+                                null, "https://a.test/f",
+                                "https://a.test/g", 0) == null
+                        && DownloadRedirects.hopDenial(
+                                null, "https://a.test/f",
+                                "http://a.test/g", 0) != null),
+                Boolean.TRUE);
+
+        // ================= pins & registry ===============
+        check("v332 registry: EVENT_TYPES unchanged (33 "
+                        + "types, no v3.32 addition)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
+        if (args == null || args.length == 0) return;
+        java.io.File shim332 = new java.io.File(args[0]);
+        java.io.File shimDir332 = shim332.getParentFile();
+        java.io.File v1Dir332 = shimDir332 == null ? null
+                : shimDir332.getParentFile() == null ? null
+                : shimDir332.getParentFile().getParentFile();
+        if (v1Dir332 == null) return;
+        String mainSrc332 = readTestFile(new java.io.File(
+                v1Dir332, "app/src/main/java/com/ghosthands/app/"
+                        + "MainActivity.java"));
+        String agentSrc332 = readTestFile(new java.io.File(
+                v1Dir332, "app/src/main/java/com/ghosthands/app/"
+                        + "Agent.java"));
+        String trailSrc332 = readTestFile(new java.io.File(
+                v1Dir332, "app/src/main/java/com/ghosthands/app/"
+                        + "Trail.java"));
+        String buildSrc332 = readTestFile(new java.io.File(
+                v1Dir332, "build-apk.sh"));
+        if (mainSrc332 == null || agentSrc332 == null
+                || trailSrc332 == null || buildSrc332 == null) {
+            return;
+        }
+        check("v332 pin: the WebView client consults "
+                        + "NavScheme on page navigations",
+                Boolean.valueOf(mainSrc332.contains(
+                        "NavScheme.allowed(url)")),
+                Boolean.TRUE);
+        check("v332 pin: automatic redirect following is "
+                        + "OFF in the download fetch — the "
+                        + "true form nowhere in MainActivity",
+                Boolean.valueOf(mainSrc332.contains(
+                                "setInstanceFollowRedirects(false)")
+                        && !mainSrc332.contains(
+                                "setInstanceFollowRedirects(true)")),
+                Boolean.TRUE);
+        check("v332 pin: every download hop is judged "
+                        + "through the redirect helper",
+                Boolean.valueOf(mainSrc332.contains(
+                        "DownloadRedirects.hopDenial(")),
+                Boolean.TRUE);
+        check("v332 pin: the durability gate stands after "
+                        + "the govern, approval and execute "
+                        + "records in BOTH governed paths",
+                Boolean.valueOf(countOccurrences(agentSrc332,
+                                "stopIfTrailBroken(step, "
+                                        + "\"govern\")") == 2
+                        && countOccurrences(agentSrc332,
+                                "stopIfTrailBroken(step, "
+                                        + "\"approval\")") == 2
+                        && countOccurrences(agentSrc332,
+                                "stopIfTrailBroken(step, "
+                                        + "\"execute\")") == 2),
+                Boolean.TRUE);
+        check("v332 pin: Trail exposes the durability of "
+                        + "its writes",
+                Boolean.valueOf(trailSrc332.contains(
+                        "public synchronized boolean "
+                                + "fileWritten()")),
+                Boolean.TRUE);
+        check("v332 pin: the build fails closed on a "
+                        + "missing keystore — no keypair is "
+                        + "ever generated",
+                Boolean.valueOf(!buildSrc332.contains(
+                                "-genkeypair")
+                        && buildSrc332.contains(
+                                "the preserved signing "
+                                        + "keystore is missing")),
+                Boolean.TRUE);
+    }
+}

@@ -127,6 +127,26 @@ public class Scratchpad {
         return ADDED;
     }
 
+    /** v3.18 (R9 — chaining): seed a fact inherited from a
+     *  previous chain step. The fact enters under a provenance
+     *  STAMP in place of a page: the Fact's title slot carries
+     *  the stamp ("previous step: <goal>"), so the prompt's
+     *  FACTS block labels it with its honest source — a fact's
+     *  stamp is data, and "previous step" is what this fact's
+     *  provenance actually is. The notebook's caps and dedupe
+     *  apply exactly as for a noted fact (statusFor judges the
+     *  text against what is already in), and the outcome is
+     *  add()'s vocabulary. The loop records the "chain_seed"
+     *  trail event BEFORE calling this — record-before-touch,
+     *  as everywhere else. */
+    public String seedIn(String text, String stamp) {
+        String status = statusFor(text);
+        if (!ADDED.equals(status)) return status;
+        facts.add(new Fact(normalise(text), "",
+                (stamp == null) ? "" : stamp));
+        return ADDED;
+    }
+
     /** The FACTS block for the prompt, or "" when the notebook
      *  is empty (an empty notebook leaves the prompt byte-
      *  identical to its pre-v3.0 shape). One line per fact:

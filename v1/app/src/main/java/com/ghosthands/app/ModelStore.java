@@ -41,6 +41,22 @@ import java.util.Locale;
  * / grammarPrefValue / grammarToggleLabel) — pure and host-tested
  * like the registry above; MainActivity owns the persisted value
  * and the toggle UI, ModelEngine carries the flag into the shim.
+ *
+ * v3.30: a THIRD registry entry, and the first that is not a
+ * download. The Ghost Hands trained planner — the QLoRA fine-tune
+ * of this same Qwen2.5-1.5B (718 examples, Colab, Oct 31-Nov 1,
+ * 2026) — exists only as a file in Ryan's Google Drive; it has no
+ * stable public URL, so its spec's url is null and the file
+ * arrives by IMPORT: the user picks the .gguf, the store copies it
+ * in while counting bytes and hashing, and the pure importVerdict
+ * judges the copy against the spec's pin (the trained size +
+ * sha256, verified twice in Colab against the training output).
+ * Only an exact match is moved into place; anything else is
+ * refused and the copy deleted, so a selectable trained entry is
+ * always the trained bytes. The stock entries and their download
+ * flow are untouched — download() itself refuses a url-less spec
+ * rather than guess, and the two flows never share a temp name
+ * (downloads resume from .part; imports stage in .import).
  */
 public class ModelStore {
 
@@ -63,6 +79,13 @@ public class ModelStore {
             this.url = url;
             this.size = size;
             this.sha256 = sha256;
+        }
+
+        /** v3.30: true when this brain has no download source —
+         *  the file arrives by import (the trained planner).
+         *  Every pre-v3.30 spec carries a URL and is not one. */
+        public boolean isImport() {
+            return url == null;
         }
     }
 
@@ -95,8 +118,31 @@ public class ModelStore {
             "Qwen2.5-1.5B Q5_K_M (sharper, larger)", "Q5_K_M",
             MODEL_NAME, MODEL_URL, MODEL_SIZE, MODEL_SHA256);
 
+    // ---- the trained planner pin (v3.30) -------------------------
+    //
+    // The Ghost Hands fine-tune of the Q5 brain above (QLoRA over
+    // 718 planner examples, trained in Colab Oct 31-Nov 1, 2026).
+    // Size + sha256 were printed by the training notebook's final
+    // cell and verified a second time against the copy saved to
+    // Ryan's Google Drive (MyDrive/ghosthands-trained/) — the two
+    // values below are that verification, and they are the whole
+    // point of the import path: the app accepts as "the trained
+    // planner" exactly the file these describe, nothing else. The
+    // on-phone filename is its own (it must not collide with the
+    // stock Q5 file, whose Drive name it shares).
+    public static final String TRAINED_ID = "q5_k_m_trained";
+    public static final long TRAINED_SIZE = 1125049888L;
+    public static final String TRAINED_SHA256 =
+            "5f68b8b848bd96a544e1af4a003f2b5551d0c98408a070f769208135d20d4c16";
+
+    public static final Spec TRAINED = new Spec(TRAINED_ID,
+            "Qwen2.5-1.5B Q5_K_M — Ghost Hands trained planner",
+            "Q5 TRAINED",
+            "qwen2.5-1.5b-instruct-q5_k_m-trained.gguf",
+            null, TRAINED_SIZE, TRAINED_SHA256);
+
     /** Every brain the switcher offers, in picker order. */
-    public static final Spec[] MODELS = { Q4, Q5 };
+    public static final Spec[] MODELS = { Q4, Q5, TRAINED };
 
     /** The spec for an id, or null when the id names no known
      *  model (unknown ids are rejected, never guessed at). The id
@@ -167,15 +213,20 @@ public class ModelStore {
     }
 
     /** The picker chip's text for one model, given whether it is
-     *  the active choice and whether its file is on the phone. */
+     *  the active choice and whether its file is on the phone.
+     *  v3.30: an import-sourced model (the trained planner) names
+     *  its own arrival — "import", never "download". */
     public static String pickerLabel(Spec spec, boolean active,
                                      boolean downloaded) {
         if (active) {
             return spec.shortName + (downloaded
                     ? " ✓ active" : " ✓ chosen");
         }
-        return spec.shortName + (downloaded
-                ? " · on phone" : " · " + gbLabel(spec) + " download");
+        if (downloaded) {
+            return spec.shortName + " · on phone";
+        }
+        return spec.shortName + " · " + gbLabel(spec)
+                + (spec.isImport() ? " import" : " download");
     }
 
     // ---- the model manager (v3.7, DATA) -------------------------
@@ -306,6 +357,17 @@ public class ModelStore {
      * verified. The other model's files are never touched.
      */
     public boolean download(Spec spec, Listener listener) {
+        // v3.30: a url-less spec (the trained planner) is never
+        // fetched — it arrives by import. Refuse before any file
+        // or network work, so no path can mistake the import
+        // entry for a download.
+        if (spec == null || spec.url == null) {
+            listener.onStatus(spec == null
+                    ? "No model chosen."
+                    : spec.displayName + " has no download — "
+                            + "it is imported from a file instead.");
+            return false;
+        }
         File part = partFileFor(spec);
         File dest = fileFor(spec);
         int attempts = 0;
@@ -397,6 +459,135 @@ public class ModelStore {
         return true;
     }
 
+    // ---- the import path (v3.30) --------------------------------
+    //
+    // The trained planner's arrival. The judgement is pure
+    // (importVerdict over a copied byte count and the sha256 the
+    // copy hashed to, against the spec's pin); the state machine
+    // (importModel) stages the picked stream in a sibling .import
+    // file, hashing as it copies, and only a copy the judgement
+    // passes is renamed over the model's own file. Every refusal
+    // deletes the staging file — an import never leaves a
+    // selectable partial behind, and the model's own file is
+    // touched only by a verified copy.
+
+    public static final int IMPORT_OK = 0;
+    public static final int IMPORT_SIZE_MISMATCH = 1;
+    public static final int IMPORT_SHA_MISMATCH = 2;
+
+    /** Judge a copied file against a spec's pin: exact size
+     *  first (the cheap fact), then the sha256. Null inputs
+     *  refuse — a missing hash is a mismatch, never a pass. */
+    public static int importVerdict(Spec spec, long bytes,
+                                    String sha256) {
+        if (spec == null || bytes != spec.size) {
+            return IMPORT_SIZE_MISMATCH;
+        }
+        if (sha256 == null || !spec.sha256.equals(sha256)) {
+            return IMPORT_SHA_MISMATCH;
+        }
+        return IMPORT_OK;
+    }
+
+    /** The one status line an import ends with, for the
+     *  judgement it reached — honest in each direction: a pass
+     *  says verified; a refusal names the fact that failed and
+     *  says nothing was imported. */
+    public static String importStatusLine(Spec spec, int verdict,
+                                          long bytes) {
+        if (verdict == IMPORT_OK) {
+            return spec.displayName + " imported and verified "
+                    + "(size + sha256 match the trained model).";
+        }
+        if (verdict == IMPORT_SIZE_MISMATCH) {
+            return "That file is " + bytes + " bytes; the trained "
+                    + "model is exactly " + spec.size + " bytes. "
+                    + "It did not match the trained model — "
+                    + "nothing was imported.";
+        }
+        return "That file is the right size, but its sha256 does "
+                + "not match the trained model. Nothing was "
+                + "imported.";
+    }
+
+    private File importFileFor(Spec spec) {
+        return new File(filesDir, spec.fileName + ".import");
+    }
+
+    /**
+     * Copy one picked stream into place as this spec's model,
+     * verified against the spec's pin. Blocking — call from a
+     * worker thread. Only an import-sourced spec may arrive this
+     * way; a downloadable spec is refused before a byte is read.
+     * Returns true only when the verified file is in place.
+     */
+    public boolean importModel(Spec spec, InputStream in,
+                               Listener listener) {
+        if (spec == null || !spec.isImport()) {
+            listener.onStatus(spec == null
+                    ? "No model chosen."
+                    : spec.displayName + " is a download, not "
+                            + "an import.");
+            return false;
+        }
+        File staging = importFileFor(spec);
+        File dest = fileFor(spec);
+        long copied = 0;
+        String sha = null;
+        FileOutputStream out = null;
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            out = new FileOutputStream(staging, false);
+            byte[] buf = new byte[65536];
+            long lastReport = 0;
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                out.write(buf, 0, n);
+                md.update(buf, 0, n);
+                copied += n;
+                if (copied - lastReport >= 4194304L) {
+                    lastReport = copied;
+                    listener.onProgress(copied, spec.size);
+                }
+            }
+            out.flush();
+            sha = toHex(md.digest());
+            listener.onProgress(copied, spec.size);
+        } catch (Exception e) {
+            listener.onStatus("Import failed while reading the "
+                    + "file (" + e.getMessage() + "). Nothing "
+                    + "was imported.");
+            if (out != null) try { out.close(); } catch (Exception ignored) { }
+            staging.delete();
+            return false;
+        } finally {
+            if (out != null) try { out.close(); } catch (Exception ignored) { }
+        }
+        int verdict = importVerdict(spec, copied, sha);
+        if (verdict != IMPORT_OK) {
+            staging.delete();
+            listener.onStatus(importStatusLine(spec, verdict, copied));
+            return false;
+        }
+        if (dest.exists()) dest.delete();
+        if (!staging.renameTo(dest)) {
+            staging.delete();
+            listener.onStatus("Could not move the imported model "
+                    + "into place. Nothing was imported.");
+            return false;
+        }
+        listener.onStatus(importStatusLine(spec, verdict, copied));
+        return true;
+    }
+
+    private static String toHex(byte[] digest) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < digest.length; i++) {
+            sb.append(String.format("%02x", digest[i] & 0xff));
+        }
+        return sb.toString();
+    }
+
     private static String sha256OfFile(File f) throws Exception {
         MessageDigest md = MessageDigest.getInstance("SHA-256");
         FileInputStream in = new FileInputStream(f);
@@ -406,11 +597,6 @@ public class ModelStore {
             md.update(buf, 0, n);
         }
         in.close();
-        byte[] digest = md.digest();
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < digest.length; i++) {
-            sb.append(String.format("%02x", digest[i] & 0xff));
-        }
-        return sb.toString();
+        return toHex(md.digest());
     }
 }

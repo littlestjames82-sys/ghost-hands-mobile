@@ -437,6 +437,88 @@ public final class RelevanceGuard {
                 + "instead of tap/type";
     }
 
+    /** v3.26: the empty-page correction cap, per run — the
+     *  empty-map cap's sibling (same size, same reasoning: three
+     *  explicit "there is nothing here" nudges, then the guard
+     *  falls silent and the stuck logic owns the repeat). */
+    public static final int EMPTY_PAGE_CORRECTION_CAP = 3;
+
+    /**
+     * v3.26: true when a URL names no host — about:blank and its
+     * kin (about:, file:, data:, an absent URL). A page at a
+     * hostless URL is not a place content can be read FROM; it
+     * is the browser's empty room. Hosted URLs — including the
+     * failed URL an error page keeps — are never hostless, which
+     * is what keeps this test from ever mistaking a load failure
+     * for emptiness: the loop's error-page recovery owns those,
+     * and it runs in the perceive phase, before any decide.
+     */
+    public static boolean isHostlessUrl(String url) {
+        if (url == null) return true;
+        String u = url.trim();
+        if (u.length() == 0) return true;
+        try {
+            String host = new URL(u).getHost();
+            return host == null || host.length() == 0;
+        } catch (Exception e) {
+            // Not a parseable URL: hostless unless it carries an
+            // authority ("scheme://host") of its own.
+            return u.indexOf("://") < 0;
+        }
+    }
+
+    /**
+     * v3.26: the empty-page read correction. Field evidence —
+     * the Nov 1, 2026 device trail trail-20261101-002036
+     * (weather goal on v3.24.0): the run opened on about:blank,
+     * the thin-map ritual's fallback extraction failed
+     * ("read_failed"), and the planner then proposed plain
+     * "read" FIVE times (steps 1-5 of a 10-step budget); every
+     * one executed and errored "no readable text found on this
+     * page" before the planner finally searched at step 6. A
+     * read against a provably empty page can only produce that
+     * error, so the guard corrects it the way the v1.6 rule
+     * corrects a tap against an empty map.
+     *
+     * The emptiness bar is a TRIPLE, stricter than the v1.6
+     * rule's element count alone, because the actions differ:
+     * a tap has nothing to hit on ANY zero-element page, but a
+     * read on a zero-element page that carries TEXT (a
+     * text-only article, a plain-text file) is legitimate and
+     * must never be corrected. All three must hold:
+     *   - zero elements,
+     *   - no page text (the perception's preview is blank),
+     *   - a hostless URL (isHostlessUrl) — so a hosted page
+     *     that is merely sparse, still loading, or an error
+     *     page is never mistaken for the empty room; error
+     *     pages keep their hosted URL and are owned upstream
+     *     by the error-page recovery regardless.
+     *
+     * Only "read" is judged; every other action — search,
+     * goto, back, wait, done, stuck above all, since those are
+     * how the planner LEAVES the empty room — returns null by
+     * construction. (Tap and type are not re-handled here: the
+     * v1.6 empty-map rule above already corrects them at zero
+     * elements.) Returns the reason, or null.
+     */
+    public static String emptyPageReason(GhAction action, String url,
+                                         int elementCount,
+                                         String textPreview,
+                                         int correctionsSoFar) {
+        if (action == null || !"read".equals(action.action)) return null;
+        if (elementCount > 0) return null;
+        if (textPreview != null && textPreview.trim().length() > 0) {
+            return null;
+        }
+        if (!isHostlessUrl(url)) return null;
+        if (correctionsSoFar >= EMPTY_PAGE_CORRECTION_CAP) return null;
+        return "empty page corrected by guard: this page is "
+                + "completely empty - no elements, no readable "
+                + "text, and no host (about:blank) - so there is "
+                + "nothing here to read; use {\"action\":\"search\"} "
+                + "or {\"action\":\"goto\"} to reach a real page first";
+    }
+
     /** v1.7: the arrival-guard correction cap, per run (not per
      *  action signature, for the same reason as the empty-map cap:
      *  a planner abandoning its page can vary the leaving action's

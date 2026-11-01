@@ -83,6 +83,11 @@ public final class PageWatches {
         public String lastVerdict = "";
         public long lastCheckTsMs = 0;
         public final List<String> lastDiff = new ArrayList<String>();
+        // v3.18 (R9 — smart checks): the conditions this
+        // watch's scheduled check asks for — the goal checks'
+        // two fields, same keys, same fire-time judgement.
+        public boolean condCharging = false;
+        public boolean condWifi = false;
 
         public PageWatch() { }
 
@@ -120,6 +125,15 @@ public final class PageWatches {
             }
             m.put("verdict", lastVerdict);
             m.put("checked", Long.valueOf(lastCheckTsMs));
+            // v3.18: the conditions ride too — written only
+            // when set, so an unconditioned record stays
+            // byte-identical to v3.16's.
+            if (condCharging) {
+                m.put("cond_charge", Boolean.TRUE);
+            }
+            if (condWifi) {
+                m.put("cond_wifi", Boolean.TRUE);
+            }
             List<Object> diff = new ArrayList<Object>();
             for (int i = 0; i < lastDiff.size(); i++) {
                 diff.add(lastDiff.get(i));
@@ -163,6 +177,9 @@ public final class PageWatches {
             }
             Object v = m.get("verdict");
             if (v instanceof String) w.lastVerdict = (String) v;
+            // v3.18: the conditions (absent reads false).
+            w.condCharging = Boolean.TRUE.equals(m.get("cond_charge"));
+            w.condWifi = Boolean.TRUE.equals(m.get("cond_wifi"));
             Object c = m.get("checked");
             if (c instanceof Number) {
                 w.lastCheckTsMs = ((Number) c).longValue();
@@ -325,6 +342,24 @@ public final class PageWatches {
     public static String urlFromAlarm(String name) {
         return isPageAlarm(name)
                 ? name.substring(ALARM_PREFIX.length()) : null;
+    }
+
+    /** v3.22 (R11): the suffix a PENDING watch's row carries
+     *  — a watch created from a template or a share, whose
+     *  baseline no completed check has set yet. The suffix
+     *  appears exactly when baseline == null, beside (never
+     *  instead of) the R9 condition suffixes, and clears the
+     *  moment the first completed check records the baseline
+     *  (applyCompletedCheck — the callback already advances
+     *  on any completed check, so a pending watch's first
+     *  check yields the BASELINE verdict through the same
+     *  path a created-with-baseline watch's checks take). */
+    public static final String PENDING_SUFFIX =
+            " — baseline on first check";
+
+    public static String pendingSuffix(PageWatch w) {
+        return (w != null && !w.hasBaseline())
+                ? PENDING_SUFFIX : "";
     }
 
     /** The watch's short display name: "Page: host/path",

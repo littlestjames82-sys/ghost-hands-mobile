@@ -24,7 +24,13 @@ public final class NavState {
     public static final int ROUTES = 2;
     public static final int HISTORY = 3;
     public static final int SETTINGS = 4;
-    public static final int SCREEN_COUNT = 5;
+    // v3.20 (R10): the mission board, SECOND in the drawer
+    // (after AGENT) — but its id is appended, not inserted, so
+    // every existing id and every v3.5 invariant keeps its
+    // meaning. Only the drawer arrays' ORDER is a display
+    // choice; the ids are state.
+    public static final int MISSION = 5;
+    public static final int SCREEN_COUNT = 6;
 
     // Back-press resolutions (back() returns one of these AND
     // applies the state change it names).

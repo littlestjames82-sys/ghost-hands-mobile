@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.ghosthands.app"
-    android:versionCode="38"
-    android:versionName="3.16.0">
+    android:versionCode="54"
+    android:versionName="3.32.0">
 
     <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
 
@@ -14,6 +14,38 @@
          mic is tapped, and used only by the framework speech
          recognizer. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- v3.27 (Everything Train R13 — unattended mode): the
+         spike's §8.3 list, named in full, each for exactly
+         the job the R13 spike report assigns it. The set is
+         inert unless the user opts a goal into unattended
+         mode AND gives the two one-time grants in Android
+         Settings; unattended is off by default, per goal.
+         FOREGROUND_SERVICE + FOREGROUND_SERVICE_SPECIAL_USE:
+         the unattended run's foreground service and its
+         specialUse type. WAKE_LOCK: the run's partial wake
+         lock, held for the run's budget and released at
+         every ending. SCHEDULE_EXACT_ALARM: user-granted in
+         Settings (never assumed — re-checked at arm and
+         fire time); the exact alarm is the platform's key
+         for starting that service from the background.
+         REQUEST_IGNORE_BATTERY_OPTIMIZATIONS: the door to
+         the battery exemption the design stands on; the app
+         only ever opens the system's page for it.
+         RECEIVE_BOOT_COMPLETED: the boot receiver that
+         re-arms check alarms after a reboot (it starts
+         nothing). Deliberately NOT added: POST_NOTIFICATIONS
+         — the app's standing posture through v3.26 stands;
+         the foreground service posts its mandatory
+         notification regardless, with the demoted drawer
+         visibility the platform gives an ungranted one
+         (the spike's §8.3 decision, disclosed in the
+         release notes). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:label="@string/app_name"
@@ -42,6 +74,74 @@
         <receiver
             android:name=".CheckReceiver"
             android:exported="false" />
+        <!-- v3.27 (Everything Train R13 — unattended mode):
+             the boot receiver. NEW SURFACE, called out
+             plainly: it exists so check alarms survive a
+             reboot without the app being opened (the spike's
+             §7 prerequisite). It re-arms alarms and NOTHING
+             more — it starts no service and runs no check.
+             Exported is required by the platform for a
+             manifest receiver with an intent filter, and
+             BOOT_COMPLETED is a protected broadcast only
+             the system can send, so the export opens no
+             door to other apps. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <!-- v3.27 (Everything Train R13 — unattended mode):
+             the unattended run's foreground service. NEW
+             SURFACE, called out plainly: declared with the
+             specialUse type the spike's §3 chose, and the
+             subtype property below is the use case in plain
+             words (the string a Play review would read;
+             Ryan sideloads, so it is documentation today).
+             Not exported: only this app's own receiver can
+             start it, from an exact-alarm firing the user
+             opted into, per goal. The service runs one
+             read-only check under a ten-minute budget and
+             stops itself at every ending. -->
+        <service
+            android:name=".UnattendedService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Periodically re-runs a user-saved read-only web check with an on-device model" />
+        </service>
+        <!-- v3.23 (Everything Train R12 — the home-screen
+             widget): the widget's AppWidgetProvider. NEW
+             SURFACE, called out plainly: exported="true" is
+             PLATFORM-MANDATED for widget providers (the
+             launcher and the system AppWidget service must
+             be able to reach it); it is the app's third
+             exported component (MainActivity and R11's
+             share-intake activity are the others, and R11's
+             QS tile service is exported behind its own
+             system permission). The provider accepts only
+             the widget-update broadcast from the system path
+             plus the app's own explicit-component stop
+             action, which only this app can mint a
+             PendingIntent for, and it re-checks the action
+             string before acting. It starts no run, reads
+             nothing but the app's own stores, and renders
+             only into RemoteViews the system hands it. It
+             adds NO uses-permission — the four above are
+             still the whole set. -->
+        <receiver
+            android:name=".GhostWidget"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/ghost_widget_info" />
+        </receiver>
         <!-- v3.14 (Everything Train R6 — the accessibility
              spike): the spike's AccessibilityService. NEW
              SURFACE, called out plainly: this declares a
@@ -53,7 +153,13 @@
              on (SpikeGate). The BIND_ACCESSIBILITY_SERVICE
              permission below is the service's own protection
              (only the system may bind it), not an app
-             permission. -->
+             permission. v3.25 (accessibility eyes): the eyes
+             ride THIS SAME declaration — the read-only agent
+             perception path (A11yMap) reads through the
+             service instance the user already enabled here;
+             v3.25 adds NO new manifest surface at all (no
+             second service, no new permission, no config
+             change) — only the version stamp moves. -->
         <service
             android:name=".GhostA11yService"
             android:label="@string/app_name"
@@ -71,10 +177,13 @@
              SURFACE, called out plainly like the service
              above: it exists so a stored file can be opened
              in a system viewer or shared (a file:// URI is
-             refused at this target SDK). It serves ONLY the
-             app's private downloads directory, read-only, is
-             not exported, and answers only through per-URI
-             read grants the app hands out itself. It adds NO
+             refused at this target SDK). v3.22 (R11): it
+             serves the app's private downloads AND reports
+             directories (the reports root rides a
+             …/reports/<name> path), read-only, is not
+             exported, and answers only through per-URI read
+             grants the app hands out itself. Its declaration
+             is unchanged by the widening. It adds NO
              uses-permission — the four above are still the
              whole set. -->
         <provider
@@ -82,5 +191,54 @@
             android:authorities="com.ghosthands.app.files"
             android:exported="false"
             android:grantUriPermissions="true" />
+        <!-- v3.22 (Everything Train R11 — share intake): a
+             share target for TEXT. NEW SURFACE, the release's
+             largest, called out plainly: any app on the phone
+             can offer the user a share into Ghost Hands. The
+             activity is exported with exactly one filter
+             (SEND + text/plain), shows what arrived, and can
+             only prefill the goal field for review or create
+             an unscheduled page watch whose baseline is
+             pending — it fetches nothing, runs nothing, and
+             schedules nothing. A dialog theme, excluded from
+             recents. It adds NO uses-permission. -->
+        <activity
+            android:name=".ShareIntakeActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Material.Dialog">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+        <!-- v3.22 (Everything Train R11 — the QS tile): the
+             "Ghost goal" Quick Settings tile. NEW SURFACE,
+             called out plainly: the service is exported
+             because the platform requires it, and protected
+             by BIND_QUICK_SETTINGS_TILE — only the system
+             may bind it. That permission is the service's
+             own protection, NOT a uses-permission: the four
+             above are still the whole set (the v3.14
+             precedent). The tile shows a static, honest
+             state (it can know neither run state nor the
+             clipboard's contents) and its tap lands in
+             MainActivity, which reads the clipboard in the
+             foreground and prefills the goal for review. -->
+        <service
+            android:name=".GhostTileService"
+            android:label="Ghost goal"
+            android:icon="@drawable/mascot_header"
+            android:exported="true"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVE_TILE"
+                android:value="true" />
+        </service>
     </application>
 </manifest>

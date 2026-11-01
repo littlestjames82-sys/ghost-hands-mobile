@@ -28,6 +28,17 @@ import java.util.TimeZone;
  * math here (nextFireMillis) is pure; the AlarmManager wiring is
  * the Activity's and the receiver's.
  *
+ * v3.27 (Everything Train R13 — unattended mode): the one
+ * opt-in exception to that stance. A goal the user marks
+ * UNATTENDED may run itself at its firing — readonly-forced,
+ * grant- and condition-gated, budget-capped — under the
+ * design in R13_SPIKE_REPORT.md §8 (Unattended judges; the
+ * receiver and UnattendedService execute). The flag defaults
+ * off, is written only when set (an unattended-free record
+ * stays byte-identical to v3.26's), and never widens what a
+ * run may do: an unattended run is a check run with the
+ * user absent, not a new kind of run.
+ *
  * v3.2 (watch mode): a saved goal can also be WATCHED. A watched
  * goal carries a baseline — the comparable signature (see
  * WatchCompare), summary, and timestamp of its last watched DONE
@@ -73,6 +84,21 @@ public class SavedGoals {
         // trail for as long as it is the reference; the name
         // rides inside the baseline's own record below.
         public String baselineTrailName = "";
+
+        // v3.18 (R9 — smart checks): the conditions this
+        // record's scheduled check asks for — judged at fire
+        // time by CheckConditions, and only while Settings'
+        // master switch is on. They gate the reminder's POST,
+        // never the run. Absent keys (every pre-v3.18 record)
+        // read false, the standing behaviour.
+        public boolean condCharging = false;
+        public boolean condWifi = false;
+
+        // v3.27 (R13 — unattended mode): the user's per-goal
+        // opt-in to a check that runs itself (see the class
+        // doc). Absent (every pre-v3.27 record) reads false —
+        // notify-and-launch, the standing behaviour.
+        public boolean unattended = false;
 
         public SavedGoal() { }
 
@@ -131,6 +157,15 @@ public class SavedGoals {
             baselineSummary = other.baselineSummary;
             baselineTsMs = other.baselineTsMs;
             baselineTrailName = other.baselineTrailName;
+            // v3.18: the conditions ride the same carry — a
+            // re-save under the same name keeps them, as it
+            // keeps the watch and the schedule.
+            condCharging = other.condCharging;
+            condWifi = other.condWifi;
+            // v3.27: the unattended opt-in rides the same
+            // carry — a re-save under the same name keeps it,
+            // as it keeps the watch and the conditions.
+            unattended = other.unattended;
         }
     }
 
@@ -196,6 +231,21 @@ public class SavedGoals {
             // v3.2: the watch state rides in the same record;
             // older builds ignore keys they do not know.
             m.put("watch", Boolean.valueOf(g.watched));
+            // v3.18: the check's conditions ride too — written
+            // only when set, so an unconditioned record stays
+            // byte-identical to v3.17's.
+            if (g.condCharging) {
+                m.put("cond_charge", Boolean.TRUE);
+            }
+            if (g.condWifi) {
+                m.put("cond_wifi", Boolean.TRUE);
+            }
+            // v3.27: the unattended opt-in rides too — written
+            // only when set, so an opted-out record stays
+            // byte-identical to v3.26's.
+            if (g.unattended) {
+                m.put("unattended", Boolean.TRUE);
+            }
             if (g.hasBaseline()) {
                 Map<String, Object> base =
                         new LinkedHashMap<String, Object>();
@@ -264,6 +314,13 @@ public class SavedGoals {
             // A malformed baseline costs the baseline, never the
             // goal or its watch flag.
             g.watched = Boolean.TRUE.equals(m.get("watch"));
+            // v3.18: the conditions (absent reads false — every
+            // pre-v3.18 record keeps the standing behaviour).
+            g.condCharging = Boolean.TRUE.equals(m.get("cond_charge"));
+            g.condWifi = Boolean.TRUE.equals(m.get("cond_wifi"));
+            // v3.27: the unattended opt-in (absent reads false —
+            // every pre-v3.27 record keeps notify-and-launch).
+            g.unattended = Boolean.TRUE.equals(m.get("unattended"));
             Object base = m.get("base");
             if (base instanceof Map) {
                 Map<?, ?> bm = (Map<?, ?>) base;
@@ -305,7 +362,27 @@ public class SavedGoals {
      *  "" when the goal carries no check time. */
     public static String scheduleLabel(SavedGoal g) {
         if (g == null || !g.hasSchedule()) return "";
-        return "daily " + timeLabel(g.schedMinutes);
+        String label = "daily " + timeLabel(g.schedMinutes);
+        // v3.18: the conditions ride the same label, so the
+        // list says what the check waits for.
+        String cond = conditionSuffix(
+                g.condCharging, g.condWifi);
+        if (cond.length() > 0) label = label + cond;
+        // v3.27: the unattended opt-in rides the same label,
+        // so the list says the check runs itself.
+        if (g.unattended) label = label + " · unattended";
+        return label;
+    }
+
+    /** v3.18 (R9): the conditions suffix shared by the goal
+     *  and page-watch list labels: " · charging", " · Wi-Fi",
+     *  or " · charging + Wi-Fi" — "" when neither is set. */
+    public static String conditionSuffix(boolean charging,
+                                         boolean wifi) {
+        if (charging && wifi) return " · charging + Wi-Fi";
+        if (charging) return " · charging";
+        if (wifi) return " · Wi-Fi";
+        return "";
     }
 
     /**

@@ -309,6 +309,25 @@ public class Agent {
                 throws Exception {
             return "error: documents are not supported by these hands";
         }
+        /** v3.25 (accessibility eyes): an alternate, READ-ONLY
+         *  perception of the current page from this app's own
+         *  accessibility node tree (A11yMap's conversion of
+         *  the WebView subtree the user's enabled service can
+         *  read), or null when the eyes cannot see — the
+         *  service is not enabled, no tree, a foreign window,
+         *  a locked keyguard, or a tree no richer than the
+         *  DOM's. DEFAULT method, deliberately — the
+         *  choose/toggle/tab/document reasoning: hands that
+         *  predate the eyes have none (null), so their runs
+         *  are byte-identical to v3.24; the Activity's
+         *  WebHands overrides it with the real service read.
+         *  The loop consults it only when the DOM perception
+         *  failed or its map stayed thin after the thin-map
+         *  ritual, and the elements it returns are read-only
+         *  (the loop's eyes guard refuses element actions
+         *  against them; their actions still flow through
+         *  the DOM hands or not at all). */
+        default Eyes.Perception perceiveA11y() { return null; }
     }
 
     /** The screen: step feed, approvals, stop. approve() blocks the
@@ -531,6 +550,68 @@ public class Agent {
     // every run rule; the Activity decides it at Start.
     private final boolean tabsEnabled;
 
+    // v3.18 (R9 — chaining): the facts this run inherits from
+    // a previous chain step — (fact, stamp) pairs, seeded into
+    // the scratchpad at run start after a "chain_seed" trail
+    // event records them. Null (or empty) for an ordinary run:
+    // no event, no seed, the prompt byte-identical to v3.17's.
+    // Seeds are evidence, not a planner action — the contract,
+    // the grammar, and the Governor are untouched by their
+    // presence; the done-grounding guard already judges a done
+    // against the run's evidence, the seeded facts included.
+    private final java.util.List<String[]> seedFacts;
+
+    // v3.18 (R9): when this run is a chain step, the chain's
+    // name ("" for an ad-hoc follow-up) and this step's place —
+    // stamped onto the run record ONLY when chainName is
+    // non-null, so an ordinary trail reads exactly as it did
+    // through v3.17 (the retry/resume stamp precedent).
+    private final String chainName;
+    private final int chainStep;
+    private final int chainTotal;
+    // v3.18 (R9): the previous step's trail file name, named
+    // on the chain_seed event (null for an ordinary run).
+    private final String chainFromTrail;
+
+    // v3.23 (R12 — the voice loop): when this run was started
+    // by the voice loop's follow-up, the trail file name of
+    // the run it follows. Null for every other run — and the
+    // run record carries the "via_voice_loop" / "follows_trail"
+    // stamps ONLY when it is non-null, so an ordinary trail
+    // reads exactly as it did through v3.22 (the retry/resume/
+    // chain stamp precedent). An empty string is a loop start
+    // whose predecessor's name was unavailable: the via stamp
+    // still rides, the follows stamp does not invent a name.
+    private final String voiceLoopFollowsTrail;
+
+    // v3.27 (R13 — unattended mode): this run was started by
+    // the unattended service (a scheduled check running
+    // itself). The run record carries the "unattended" stamp
+    // ONLY when it is set — an attended run's opening record
+    // stays byte-identical to v3.26's (the retry/resume/
+    // chain/voice-stamp precedent). The stamp is provenance,
+    // not a rule: the run's actual discipline (readonly pack,
+    // headless screen, wall-clock budget) is the service's
+    // construction choices, not this flag.
+    private final boolean unattendedRun;
+
+    // v3.29 (the Fireworks cloud brain): when this run is
+    // planned by the cloud brain, the CloudBrain that serves
+    // its decides. Null — every other run — means the
+    // on-device engine plans, byte-for-byte the behaviour of
+    // every build through v3.28. The swap is at the decide
+    // only: the cloud receives the same assembled prompt the
+    // engine would, its text runs through the same parser,
+    // guards and Governor, and its failures come back in the
+    // engine's own "ERROR: ..." shape, which the loop stops
+    // on as it stops on any engine failure. The run's
+    // modelId (handed in as usual) is the cloud brain's
+    // trail id on such a run, so its records name the cloud
+    // honestly. The engine still rides along (the record's
+    // thread count reads it) but is never asked to plan —
+    // and never needs a model loaded.
+    private final CloudBrain cloudBrain;
+
     // v3.15 (R7): the running loop's tab book, set by run()
     // before its first step so addHistory can stamp each entry
     // with the tab it was produced in. Null outside run() (a
@@ -554,6 +635,16 @@ public class Agent {
     // always; displayed only when the run's liveStatsOn is set.
     private long totalGenTokens = 0;
     private long totalGenMs = 0;
+
+    // v3.31 (fact-grounding guard): the figures a bypassed
+    // note/done carried past the spent cap — accumulated by
+    // run()'s grounding interception (deduped, in the order the
+    // planner stated them), reset at the top of run(), and read
+    // by stop(): a run whose answer was allowed to stand on
+    // ungrounded figures says so in its run_summary record, not
+    // only in the bypass's own guard event.
+    private final List<String> groundingBypassed =
+            new ArrayList<String>();
 
     // v2.9 (item 3 — adaptive read chunks): the chunk size the
     // hands serve for the CURRENT perception — the standing
@@ -786,7 +877,82 @@ public class Agent {
                  boolean batteryGuardSettingOn,
                  int plannerStyle, String retryOverride,
                  String retryOf, String resumedFrom,
-                 GrantBook grantBook, boolean tabsEnabled) {
+                 GrantBook grantBook, boolean tabsEnabled,
+                 java.util.List<String[]> seedFacts,
+                 String chainName, int chainStep, int chainTotal,
+                 String chainFromTrail,
+                 String voiceLoopFollowsTrail) {
+        this(hands, engine, pack, trail, ui, modelId,
+                grammarSettingOn, maxSteps, copilotEnabled,
+                autoReadEnabled, chunkPref, threadsSetting,
+                fallbackEngineId, desktopModeOn,
+                prefixCacheSettingOn, liveStatsOn, stepShotsOn,
+                endViewSetting, screenAwakeSettingOn,
+                batteryGuardSettingOn, plannerStyle, retryOverride,
+                retryOf, resumedFrom, grantBook, tabsEnabled,
+                seedFacts, chainName, chainStep, chainTotal,
+                chainFromTrail, voiceLoopFollowsTrail, false);
+    }
+
+    /** v3.27: the R13 signature, kept as a delegating
+     *  overload so its one caller (the unattended service)
+     *  keeps its exact behaviour — no cloud brain: an
+     *  unattended run plans on-device whatever the brain
+     *  setting says (see the v3.29 notes). */
+    public Agent(Hands hands, ModelEngine engine, PolicyPacks.Pack pack,
+                 Trail trail, Ui ui, String modelId,
+                 boolean grammarSettingOn, int maxSteps,
+                 boolean copilotEnabled, boolean autoReadEnabled,
+                 int chunkPref, int threadsSetting,
+                 String fallbackEngineId, boolean desktopModeOn,
+                 boolean prefixCacheSettingOn, boolean liveStatsOn,
+                 boolean stepShotsOn, int endViewSetting,
+                 boolean screenAwakeSettingOn,
+                 boolean batteryGuardSettingOn,
+                 int plannerStyle, String retryOverride,
+                 String retryOf, String resumedFrom,
+                 GrantBook grantBook, boolean tabsEnabled,
+                 java.util.List<String[]> seedFacts,
+                 String chainName, int chainStep, int chainTotal,
+                 String chainFromTrail,
+                 String voiceLoopFollowsTrail,
+                 boolean unattendedRun) {
+        this(hands, engine, pack, trail, ui, modelId,
+                grammarSettingOn, maxSteps, copilotEnabled,
+                autoReadEnabled, chunkPref, threadsSetting,
+                fallbackEngineId, desktopModeOn,
+                prefixCacheSettingOn, liveStatsOn, stepShotsOn,
+                endViewSetting, screenAwakeSettingOn,
+                batteryGuardSettingOn, plannerStyle, retryOverride,
+                retryOf, resumedFrom, grantBook, tabsEnabled,
+                seedFacts, chainName, chainStep, chainTotal,
+                chainFromTrail, voiceLoopFollowsTrail,
+                unattendedRun, null);
+    }
+
+    /** v3.29: the fullest constructor — as the v3.27 one,
+     *  plus the run's cloud brain (see the field). Only the
+     *  Activity's start path passes one, and only on a
+     *  Fireworks-chosen run with a key set. */
+    public Agent(Hands hands, ModelEngine engine, PolicyPacks.Pack pack,
+                 Trail trail, Ui ui, String modelId,
+                 boolean grammarSettingOn, int maxSteps,
+                 boolean copilotEnabled, boolean autoReadEnabled,
+                 int chunkPref, int threadsSetting,
+                 String fallbackEngineId, boolean desktopModeOn,
+                 boolean prefixCacheSettingOn, boolean liveStatsOn,
+                 boolean stepShotsOn, int endViewSetting,
+                 boolean screenAwakeSettingOn,
+                 boolean batteryGuardSettingOn,
+                 int plannerStyle, String retryOverride,
+                 String retryOf, String resumedFrom,
+                 GrantBook grantBook, boolean tabsEnabled,
+                 java.util.List<String[]> seedFacts,
+                 String chainName, int chainStep, int chainTotal,
+                 String chainFromTrail,
+                 String voiceLoopFollowsTrail,
+                 boolean unattendedRun,
+                 CloudBrain cloudBrain) {
         this.hands = hands;
         this.engine = engine;
         this.pack = pack;
@@ -818,6 +984,74 @@ public class Agent {
         this.resumedFrom = resumedFrom;
         this.grantBook = grantBook;
         this.tabsEnabled = tabsEnabled;
+        this.seedFacts = seedFacts;
+        this.chainName = chainName;
+        this.chainStep = chainStep;
+        this.chainTotal = chainTotal;
+        this.chainFromTrail = chainFromTrail;
+        this.voiceLoopFollowsTrail = voiceLoopFollowsTrail;
+        this.unattendedRun = unattendedRun;
+        this.cloudBrain = cloudBrain;
+    }
+
+    /** v3.23: the v3.18 fullest signature, kept as a delegating
+     *  overload so every existing caller (chain steps, the host
+     *  harness's scripted chain runs) keeps its exact behaviour
+     *  — no voice-loop stamps. */
+    public Agent(Hands hands, ModelEngine engine, PolicyPacks.Pack pack,
+                 Trail trail, Ui ui, String modelId,
+                 boolean grammarSettingOn, int maxSteps,
+                 boolean copilotEnabled, boolean autoReadEnabled,
+                 int chunkPref, int threadsSetting,
+                 String fallbackEngineId, boolean desktopModeOn,
+                 boolean prefixCacheSettingOn, boolean liveStatsOn,
+                 boolean stepShotsOn, int endViewSetting,
+                 boolean screenAwakeSettingOn,
+                 boolean batteryGuardSettingOn,
+                 int plannerStyle, String retryOverride,
+                 String retryOf, String resumedFrom,
+                 GrantBook grantBook, boolean tabsEnabled,
+                 java.util.List<String[]> seedFacts,
+                 String chainName, int chainStep, int chainTotal,
+                 String chainFromTrail) {
+        this(hands, engine, pack, trail, ui, modelId,
+                grammarSettingOn, maxSteps, copilotEnabled,
+                autoReadEnabled, chunkPref, threadsSetting,
+                fallbackEngineId, desktopModeOn,
+                prefixCacheSettingOn, liveStatsOn, stepShotsOn,
+                endViewSetting, screenAwakeSettingOn,
+                batteryGuardSettingOn, plannerStyle, retryOverride,
+                retryOf, resumedFrom, grantBook, tabsEnabled,
+                seedFacts, chainName, chainStep, chainTotal,
+                chainFromTrail, null);
+    }
+
+    /** v3.18: the pre-R9 fullest signature, kept as a delegating
+     *  overload so every existing caller (route replays, watched
+     *  runs, the host harness's scripted runs) keeps its exact
+     *  behaviour — no seeds, no chain stamps. */
+    public Agent(Hands hands, ModelEngine engine, PolicyPacks.Pack pack,
+                 Trail trail, Ui ui, String modelId,
+                 boolean grammarSettingOn, int maxSteps,
+                 boolean copilotEnabled, boolean autoReadEnabled,
+                 int chunkPref, int threadsSetting,
+                 String fallbackEngineId, boolean desktopModeOn,
+                 boolean prefixCacheSettingOn, boolean liveStatsOn,
+                 boolean stepShotsOn, int endViewSetting,
+                 boolean screenAwakeSettingOn,
+                 boolean batteryGuardSettingOn,
+                 int plannerStyle, String retryOverride,
+                 String retryOf, String resumedFrom,
+                 GrantBook grantBook, boolean tabsEnabled) {
+        this(hands, engine, pack, trail, ui, modelId,
+                grammarSettingOn, maxSteps, copilotEnabled,
+                autoReadEnabled, chunkPref, threadsSetting,
+                fallbackEngineId, desktopModeOn,
+                prefixCacheSettingOn, liveStatsOn, stepShotsOn,
+                endViewSetting, screenAwakeSettingOn,
+                batteryGuardSettingOn, plannerStyle, retryOverride,
+                retryOf, resumedFrom, grantBook, tabsEnabled,
+                null, null, 0, 0, null, null);
     }
 
     /** v3.7: an end-of-run view the model can name, or Card —
@@ -851,6 +1085,8 @@ public class Agent {
         assistsUsed = 0;
         asksUsed = 0;
         askStopPending = false;
+        // v3.31: no bypassed figures are this run's yet.
+        groundingBypassed.clear();
         // v3.0: the run's opening record — the trail is self-
         // describing from its first line (the answer card reads
         // the goal from here; pre-v3.0 trails have no such event
@@ -890,7 +1126,74 @@ public class Agent {
         if (resumedFrom != null) {
             runFields.put("resumed_from", resumedFrom);
         }
+        // v3.18 (R9): the chain stamps ride ONLY on a chain
+        // step's record — an ordinary run's opening record is
+        // byte-identical to v3.17's.
+        if (chainName != null) {
+            runFields.put("chain_name", chainName);
+            runFields.put("chain_step", Long.valueOf(chainStep));
+            runFields.put("chain_total", Long.valueOf(chainTotal));
+        }
+        // v3.23 (R12): the voice-loop stamps ride ONLY on a
+        // loop-started run's record — an ordinary run's
+        // opening record is byte-identical to v3.22's.
+        if (voiceLoopFollowsTrail != null) {
+            runFields.put("via_voice_loop", "true");
+            if (voiceLoopFollowsTrail.length() > 0) {
+                runFields.put("follows_trail", voiceLoopFollowsTrail);
+            }
+        }
+        // v3.27 (R13): the unattended stamp rides ONLY on an
+        // unattended run's record — an attended run's opening
+        // record is byte-identical to v3.26's.
+        if (unattendedRun) {
+            runFields.put("unattended", Boolean.TRUE);
+        }
         trail.record("run", 0, runFields);
+        // v3.18 (R9 — chaining): seed the inherited facts, if
+        // any. The "chain_seed" event is recorded BEFORE the
+        // scratchpad is touched (record-before-touch, the note
+        // discipline), then each fact enters through seedIn
+        // under its provenance stamp — the prompt's FACTS block
+        // labels it "previous step", and the done-grounding
+        // guard sees it as evidence like any noted fact. An
+        // ordinary run (no seeds) records nothing and seeds
+        // nothing: its trail and prompt stay byte-identical
+        // to v3.17's.
+        if (seedFacts != null && !seedFacts.isEmpty()) {
+            java.util.List<Object> seedFactList =
+                    new java.util.ArrayList<Object>();
+            java.util.List<Object> seedStampList =
+                    new java.util.ArrayList<Object>();
+            String seedFromGoal = "";
+            for (int i = 0; i < seedFacts.size(); i++) {
+                String[] pair = seedFacts.get(i);
+                if (pair == null || pair.length < 2
+                        || pair[0] == null) continue;
+                seedFactList.add(pair[0]);
+                seedStampList.add(pair[1] == null ? "" : pair[1]);
+                if (i == 0 && pair[1] != null) {
+                    // The stamp is "previous step: <goal>" —
+                    // the event names the goal plainly too.
+                    String prefix = "previous step: ";
+                    seedFromGoal = pair[1].startsWith(prefix)
+                            ? pair[1].substring(prefix.length())
+                            : pair[1];
+                }
+            }
+            trail.record("chain_seed", 0, Trail.fields(
+                    "facts", seedFactList,
+                    "stamps", seedStampList,
+                    "from_goal", seedFromGoal,
+                    "from_trail", (chainFromTrail == null)
+                            ? "" : chainFromTrail));
+            for (int i = 0; i < seedFacts.size(); i++) {
+                String[] pair = seedFacts.get(i);
+                if (pair == null || pair.length < 2
+                        || pair[0] == null) continue;
+                scratchpad.seedIn(pair[0], pair[1]);
+            }
+        }
         List<String> history = new ArrayList<String>();
         // v1.8: parallel to history — for a history entry that is a
         // read result, the URL of the page that was read (null for
@@ -960,6 +1263,12 @@ public class Agent {
         // v1.6 error-page recovery state: failed URLs that have
         // already had their one auto-reload this run.
         Set<String> recoveredUrls = new LinkedHashSet<String>();
+        // v3.26 DDG region recovery state: search queries whose
+        // region-picker landing has already had its one recovery
+        // this run (the recoveredUrls discipline, keyed by query
+        // rather than URL — the picker can be served from more
+        // than one DDG URL, the query is the stable key).
+        Set<String> regionRecoveredQueries = new LinkedHashSet<String>();
         // v2.5: how many dead-result detours this run has spent
         // (DETOUR_CAP) — run-global; the detour's page state
         // (ts.lastResultsUrl / ts.arrivedViaResultsLink) is per-tab
@@ -968,6 +1277,9 @@ public class Agent {
         // v1.6 empty-map correction count (the cap itself lives in
         // RelevanceGuard.EMPTY_MAP_CORRECTION_CAP).
         int emptyMapCorrections = 0;
+        // v3.26 empty-page correction count (the cap itself lives
+        // in RelevanceGuard.EMPTY_PAGE_CORRECTION_CAP).
+        int emptyPageCorrections = 0;
         // v2.0 pagination-guard correction count (the cap itself
         // lives in RelevanceGuard.PAGINATION_CORRECTION_CAP).
         int paginationCorrections = 0;
@@ -981,6 +1293,45 @@ public class Agent {
         // v3.15 and live in the TabState.
         int verifyCorrections = 0;
         int crossCorrections = 0;
+        // v3.31 (fact-grounding guard): this run's READ CORPUS —
+        // the text of every successful read result the planner
+        // received (its own read / read_file results) and of
+        // every read the loop performed for it (the arrival
+        // auto-read's section, the thin-map fallback's chunk),
+        // appended as those reads land (see the appends at the
+        // auto-read, the thin fallback and the post-execute read
+        // bookkeeping). GroundingGuard judges every note and
+        // done against it. Read text ONLY, by construction:
+        // notes never enter it, so a figure can never ground
+        // itself by being noted first (the Nov 1, 2026 trained
+        // run's laundering channel — see GroundingGuard).
+        // Run-global, not per-tab: a done given from one tab may
+        // honestly cite what the run read in another (the
+        // scratchpad discipline's own bridge rule is about
+        // notes; the corpus is the run's reading, whole).
+        StringBuilder readCorpus = new StringBuilder();
+        // v3.31: the corpus opens with the run's chain seed, when
+        // it has one. A seed is not the planner's own noting: it
+        // is a previous step's delivered findings, handed over
+        // through the trail-recorded chain_seed event before the
+        // first decide and shown to the planner stamped with
+        // their provenance — the R9 contract is that a seeded
+        // step may answer FROM its seed. Seeding the corpus with
+        // exactly those fact texts keeps that contract true
+        // under this guard; the planner still cannot ground any
+        // NEW figure by noting it first.
+        if (seedFacts != null) {
+            for (int i = 0; i < seedFacts.size(); i++) {
+                String[] pair = seedFacts.get(i);
+                if (pair != null && pair.length >= 1
+                        && pair[0] != null) {
+                    readCorpus.append(pair[0]).append('\n');
+                }
+            }
+        }
+        // v3.31: grounding corrections spent this run (the cap
+        // itself lives in GroundingGuard.GROUNDING_CORRECTION_CAP).
+        int groundingCorrections = 0;
         // v3.1 repeat-action guard state: the semantic keys of
         // the actions this run has SUCCESSFULLY executed (the
         // ledger RelevanceGuard.repeatActionReason judges
@@ -1029,8 +1380,20 @@ public class Agent {
             try {
                 perception = hands.perceive();
             } catch (Exception e) {
-                stop(step, "error", "perceive failed: " + e.getMessage());
-                return;
+                // v3.25 (accessibility eyes): the DOM perception
+                // failed outright — before the honest stop, one
+                // chance for the eyes. They carry the step only
+                // with a real map of their own (tryEyes enforces
+                // non-thin); anything less and the stop below is
+                // exactly v3.24's, word for word.
+                perception = tryEyes(step, "dom_failed", null,
+                        String.valueOf(e.getMessage()), history,
+                        historyReadUrls, historyTabs);
+                if (perception == null) {
+                    stop(step, "error",
+                            "perceive failed: " + e.getMessage());
+                    return;
+                }
             }
             String rendered = perception.render(goal);
             trail.record("perceive", step, Trail.fields(
@@ -1213,6 +1576,290 @@ public class Agent {
                 }
             }
 
+            // -- redirect-shim settle (v3.28) -----------------------
+            // Field evidence (the Nov 1, 2026 v3.26 device trail
+            // trail-20261101-005359): the planner tapped the
+            // AccuWeather result and the tap landed on
+            // DuckDuckGo's redirect shim (duckduckgo.com/l/?uddg=
+            // ..., a ~200-byte stub) — and the app perceived the
+            // stub as a settled empty page through the whole
+            // thin-map ritual and a failed planner read, until
+            // the budget died one redirect away from the
+            // forecast. The hands' settle wait could not see it:
+            // the stub itself finishes loading (the load
+            // callbacks fire for IT), so nothing is in flight
+            // when the step perceives; the forward the stub
+            // exists to make simply had not happened. Now the
+            // loop owns it, before any content judgement (the
+            // region recovery below, the read-chunk sizing, the
+            // thin ritual): a shim URL (RedirectShims) is waited
+            // out with bounded re-perceptions; a stub that still
+            // has not resolved is bypassed — the loop navigates
+            // to the decoded destination itself, the address the
+            // tapped link pointed at all along. The stub is
+            // never the page the planner decides on: every exit
+            // carries the destination's perception, or — when
+            // even the direct navigation fails — the stub's
+            // perception WITH a history note naming it for what
+            // it is and the destination to goto directly.
+            if (RedirectShims.isShim(perception.url)) {
+                String shimUrl = perception.url;
+                String shimDest = RedirectShims.destination(shimUrl);
+                trail.record("recover", step, Trail.fields(
+                        "phase", "redirect_shim",
+                        "url", shimUrl,
+                        "destination",
+                        shimDest == null ? "" : shimDest));
+                ui.feed("Step " + step + ": the tap landed on a "
+                        + "redirect stub, not the destination; "
+                        + "waiting for it to resolve");
+                int shimWaits = 0;
+                while (RedirectShims.isShim(perception.url)
+                        && shimWaits < RedirectShims.WAIT_ATTEMPTS) {
+                    shimWaits++;
+                    sleepQuietly(RedirectShims.waitSleepMs());
+                    if (ui.stopRequested()) {
+                        stop(step, "stopped", "user pressed Stop");
+                        return;
+                    }
+                    Eyes.Perception freshShim = null;
+                    try {
+                        freshShim = hands.perceive();
+                    } catch (Exception e) {
+                        break;
+                    }
+                    if (freshShim == null) break;
+                    perception = freshShim;
+                    rendered = perception.render(goal);
+                    trail.record("perceive", step, Trail.fields(
+                            "url", perception.url,
+                            "title", perception.title,
+                            "text_preview",
+                            truncate(perception.textPreview, 240),
+                            "elements",
+                            Long.valueOf(perception.elements.size()),
+                            "map_chars",
+                            Long.valueOf(rendered.length()),
+                            "signature", perception.signature()));
+                }
+                if (RedirectShims.isShim(perception.url)
+                        && shimDest != null) {
+                    trail.record("recover", step, Trail.fields(
+                            "phase", "redirect_shim_goto",
+                            "url", perception.url,
+                            "destination", shimDest));
+                    ui.feed("Step " + step + ": the redirect stub "
+                            + "did not resolve; going to the "
+                            + "destination directly: " + shimDest);
+                    boolean shimNavOk = true;
+                    try {
+                        hands.gotoUrl(shimDest);
+                    } catch (Exception e) {
+                        shimNavOk = false;
+                    }
+                    if (shimNavOk) {
+                        try {
+                            perception = hands.perceive();
+                        } catch (Exception e) {
+                            shimNavOk = false;
+                        }
+                    }
+                    if (shimNavOk) {
+                        rendered = perception.render(goal);
+                        trail.record("perceive", step, Trail.fields(
+                                "url", perception.url,
+                                "title", perception.title,
+                                "text_preview",
+                                truncate(perception.textPreview, 240),
+                                "elements",
+                                Long.valueOf(perception.elements.size()),
+                                "map_chars",
+                                Long.valueOf(rendered.length()),
+                                "signature", perception.signature()));
+                    }
+                }
+                boolean leftShim = !RedirectShims.isShim(perception.url);
+                addHistory(history, historyReadUrls, historyTabs,
+                        leftShim
+                        ? "step " + step + ": the link you tapped "
+                        + "led through a redirect stub page, so "
+                        + "the app waited for the redirect and "
+                        + "you are now on the page it pointed to."
+                        : "step " + step + ": the link you tapped "
+                        + "led to a redirect stub page that never "
+                        + "resolved — an empty forwarding page, "
+                        + "not a readable page, so do not try to "
+                        + "read it."
+                        + (shimDest != null
+                                ? " It was forwarding to " + shimDest
+                                + " — goto that address directly, or "
+                                + "go back and pick a different result."
+                                : " Go back and pick a different "
+                                + "result."),
+                        null);
+                trimHistory(history, historyReadUrls, historyTabs);
+                if (ui.stopRequested()) {
+                    stop(step, "stopped", "user pressed Stop");
+                    return;
+                }
+                // Fall through with the current perception —
+                // the destination's, or the stub's with the
+                // note above telling the planner what it is.
+            }
+
+            // -- DDG region-page recovery (v3.26) -------------------
+            // Field evidence (the Nov 1, 2026 device trail
+            // trail-20261101-002036): the fallback search executed
+            // through DuckDuckGo and the WebView landed on DDG's
+            // region-picker page ("All Regions / Argentina /
+            // Australia / ..."). The v2.1 results recognition
+            // counts a duckduckgo.com URL carrying q= as results,
+            // so the planner read the picker AS the results (its
+            // step-8 read extracted the country list) and the run
+            // died at the step cap on the wrong page. Prevention
+            // rides the fallback URL itself since this version
+            // (SearchEngines pins kl=us-en); this block is the
+            // backstop for a landing the pin did not prevent —
+            // deterministic, no planner involvement, the
+            // error-page recovery's shape: the picker is recognised
+            // by SearchEngines.isRegionPage (DDG host + the
+            // picker's text signature), the step's search is
+            // re-issued once by navigating to the region-pinned
+            // results URL, and the step continues with the fresh
+            // perception. One recovery per query per run (keyed in
+            // regionRecoveredQueries): if the re-issue lands on
+            // the picker again, the step falls through with it and
+            // the history note below is the planner's warning.
+            // Gated on the run actually having executed a search
+            // (ts.lastExecutedSearchQuery) through the DDG
+            // fallback, so a picker reached any other way is left
+            // to the planner like any other page.
+            // v3.28: the v3.26 trail on this very code corrected
+            // the brief — the "picker page" was the RESULTS page
+            // wearing the picker as furniture (its map held the
+            // result links all along), and this recovery fired
+            // on it and navigated to the URL the tab was already
+            // on, a no-op. Two amendments: the gate now uses the
+            // three-arg detector (a map holding result links is
+            // a results page, whatever its text says), and when
+            // the recovery URL IS the current URL the block
+            // records and notes but never navigates — re-issuing
+            // would only reload the page the planner is looking
+            // at.
+            if (SearchEngines.DDG.equals(fallbackEngineId)
+                    && ts.lastExecutedSearchQuery != null
+                    && !regionRecoveredQueries.contains(
+                            ts.lastExecutedSearchQuery)
+                    && SearchEngines.isRegionPage(perception.url,
+                            perception.textPreview,
+                            perception.elements)) {
+                String regionQuery = ts.lastExecutedSearchQuery;
+                regionRecoveredQueries.add(regionQuery);
+                String recoveryUrl = SearchEngines.searchUrlForQuery(
+                        fallbackEngineId, regionQuery);
+                boolean regionSameUrl =
+                        recoveryUrl.equals(perception.url);
+                trail.record("recover", step, Trail.fields(
+                        "phase", "ddg_region",
+                        "url", perception.url,
+                        "recovered_url", recoveryUrl,
+                        "query", regionQuery));
+                ui.feed(regionSameUrl
+                        ? "Step " + step + ": search landed on "
+                        + "DuckDuckGo's region picker, not results; "
+                        + "the region-pinned address is already "
+                        + "open, so there is nothing to re-issue"
+                        : "Step " + step + ": search landed on "
+                        + "DuckDuckGo's region picker, not results; "
+                        + "re-issuing it with the US English region "
+                        + "pinned");
+                boolean regionNavOk = true;
+                if (!regionSameUrl) {
+                    try {
+                        hands.gotoUrl(recoveryUrl);
+                    } catch (Exception e) {
+                        regionNavOk = false;
+                    }
+                    if (regionNavOk) {
+                        try {
+                            perception = hands.perceive();
+                        } catch (Exception e) {
+                            regionNavOk = false;
+                        }
+                    }
+                }
+                if (regionSameUrl) {
+                    addHistory(history, historyReadUrls, historyTabs,
+                            "step " + step + ": your search landed "
+                            + "on DuckDuckGo's region picker page (a "
+                            + "list of countries), not on results. "
+                            + "The app did not re-issue the search: "
+                            + "the region-pinned results address is "
+                            + "the page already open, so re-issuing "
+                            + "would only reload it. Do not read "
+                            + "this page as results; goto a results "
+                            + "page directly or search a specific "
+                            + "site instead.",
+                            null);
+                    trimHistory(history, historyReadUrls, historyTabs);
+                    if (ui.stopRequested()) {
+                        stop(step, "stopped", "user pressed Stop");
+                        return;
+                    }
+                } else if (regionNavOk) {
+                    rendered = perception.render(goal);
+                    trail.record("perceive", step, Trail.fields(
+                            "url", perception.url,
+                            "title", perception.title,
+                            "text_preview",
+                            truncate(perception.textPreview, 240),
+                            "elements",
+                            Long.valueOf(perception.elements.size()),
+                            "map_chars",
+                            Long.valueOf(rendered.length()),
+                            "signature", perception.signature()));
+                    boolean stillPicker = SearchEngines.isRegionPage(
+                            perception.url, perception.textPreview,
+                            perception.elements);
+                    addHistory(history, historyReadUrls, historyTabs,
+                            stillPicker
+                            ? "step " + step + ": your search landed "
+                            + "on DuckDuckGo's region picker page (a "
+                            + "list of countries), not on results. "
+                            + "The app re-issued the search with the "
+                            + "US English region pinned and landed "
+                            + "here again. Do not read this page as "
+                            + "results; goto a results page or search "
+                            + "differently."
+                            : "step " + step + ": your search landed "
+                            + "on DuckDuckGo's region picker page (a "
+                            + "list of countries), not on results, so "
+                            + "the app re-issued the search with the "
+                            + "US English region pinned. The results "
+                            + "are the page in front of you now.",
+                            null);
+                    trimHistory(history, historyReadUrls, historyTabs);
+                    if (ui.stopRequested()) {
+                        stop(step, "stopped", "user pressed Stop");
+                        return;
+                    }
+                    // Fall through with the fresh perception —
+                    // even if it is the picker again (the query's
+                    // one recovery is spent; the note above tells
+                    // the planner what this page is).
+                } else {
+                    addHistory(history, historyReadUrls, historyTabs,
+                            "step " + step + ": your search landed on "
+                            + "DuckDuckGo's region picker page (a list "
+                            + "of countries), not on results, and "
+                            + "re-issuing the search failed. Do not "
+                            + "read that page as results; goto a "
+                            + "results page or search differently.",
+                            null);
+                    trimHistory(history, historyReadUrls, historyTabs);
+                }
+            }
+
             // v2.9 (item 3): the read chunk size for THIS
             // perception, settled before the auto-read below and
             // refreshed again inside the decide loop (a re-perceive
@@ -1221,6 +1868,269 @@ public class Agent {
             // Auto is this judgement, Large/Small force it.
             currentReadChunkChars = Settings.readChunkChars(chunkPref,
                     perceptionWeight(perception, rendered));
+
+            // -- thin-map recovery (v3.24) ---------------------------
+            // Field evidence (the Oct 25, 2026 weather run, R14
+            // gap 3): the planner opened the right forecast
+            // result and the destination's element map came back
+            // empty — a heavy script-driven page answering the
+            // eyes before its interactive surface existed. The
+            // planner then stepped blind until the stuck
+            // detector stopped the run. Now a thin map (fewer
+            // than ThinMap.THIN_ELEMENT_LIMIT elements) is the
+            // loop's business, deterministically, like the
+            // error-page recovery above: wait with a short
+            // backoff and re-perceive, up to ThinMap.MAX_ATTEMPTS
+            // times, every attempt on the trail ("thin_map").
+            // A map that fills in is an ordinary perception and
+            // the step proceeds untouched. A map STILL thin
+            // after the last attempt is a page the eyes cannot
+            // see into: the loop reads its text itself and the
+            // chunk rides the step's history as a read-shaped
+            // entry (the fallback tail below gives the full
+            // delivery rules and their disclosed adaptations),
+            // so the planner decides this step with text in
+            // front of it instead of a blind map. The ritual runs once per URL
+            // per tab (ts.thinSettledUrl): a page that stays
+            // invisible does not tax every later step with the
+            // backoffs again. Error pages never reach here —
+            // the recovery above owns them first.
+            if (ThinMap.isThin(perception)
+                    && !perception.url.equals(ts.thinSettledUrl)) {
+                int thinAttempts = 0;
+                while (ThinMap.isThin(perception)
+                        && thinAttempts < ThinMap.MAX_ATTEMPTS) {
+                    thinAttempts++;
+                    int backoff = ThinMap.backoffMs(thinAttempts);
+                    trail.record("thin_map", step, Trail.fields(
+                            "phase", "retry",
+                            "attempt", Long.valueOf(thinAttempts),
+                            "backoff_ms", Long.valueOf(backoff),
+                            "elements",
+                            Long.valueOf(perception.elements.size()),
+                            "url", perception.url));
+                    ui.feed("Step " + step + ": page map is nearly "
+                            + "empty (" + perception.elements.size()
+                            + " elements); waiting for the page to "
+                            + "settle and re-checking");
+                    sleepQuietly(ThinMap.backoffSleepMs(thinAttempts));
+                    if (ui.stopRequested()) {
+                        stop(step, "stopped", "user pressed Stop");
+                        return;
+                    }
+                    Eyes.Perception freshThin = null;
+                    try {
+                        freshThin = hands.perceive();
+                    } catch (Exception e) {
+                        trail.record("thin_map", step, Trail.fields(
+                                "phase", "retry_error",
+                                "attempt", Long.valueOf(thinAttempts),
+                                "error", String.valueOf(e.getMessage())));
+                    }
+                    if (freshThin == null) {
+                        // The re-perception itself failed; keep
+                        // the last perception and let the
+                        // fallback below judge the step.
+                        break;
+                    }
+                    perception = freshThin;
+                    rendered = perception.render(goal);
+                    trail.record("perceive", step, Trail.fields(
+                            "url", perception.url,
+                            "title", perception.title,
+                            "text_preview",
+                            truncate(perception.textPreview, 240),
+                            "elements",
+                            Long.valueOf(perception.elements.size()),
+                            "map_chars",
+                            Long.valueOf(rendered.length()),
+                            "signature", perception.signature()));
+                }
+                if (!ThinMap.isThin(perception)) {
+                    trail.record("thin_map", step, Trail.fields(
+                            "phase", "recovered",
+                            "attempts", Long.valueOf(thinAttempts),
+                            "elements",
+                            Long.valueOf(perception.elements.size()),
+                            "url", perception.url));
+                    ui.feed("Step " + step + ": the page map filled "
+                            + "in (" + perception.elements.size()
+                            + " elements)");
+                    currentReadChunkChars = Settings.readChunkChars(
+                            chunkPref,
+                            perceptionWeight(perception, rendered));
+                } else {
+                    // Still thin: settle this URL for the tab
+                    // and give the step the page's TEXT instead
+                    // of a blind map. The delivery is deliberately
+                    // NOT the auto-read machinery: the fallback
+                    // stamps no arrival state (ts.autoReadUrl
+                    // stays unset, so the arrival guard never
+                    // mistakes a scout read for an arrival), no
+                    // completion totals (a planner read of this
+                    // page still executes and still completes it
+                    // itself), and no style read-page tracking.
+                    // The chunk rides history as a read-shaped
+                    // entry, the one channel every guard already
+                    // understands. Adaptations disclosed in
+                    // BUILD_NOTES (v3.24): the extraction itself
+                    // is gated on autoReadEnabled -- a run with
+                    // loop-reading off gets the retries and the
+                    // note, never a loop read -- and a page whose
+                    // text an earlier arrival read already put in
+                    // the prompt is not read twice.
+                    ts.thinSettledUrl = perception.url;
+
+                    // v3.25 (accessibility eyes): the map stayed
+                    // thin through every retry — before the loop
+                    // settles for the page's text, one more sense
+                    // may see the page itself. When the user's
+                    // enabled accessibility service can read this
+                    // app's WebView subtree and the tree holds a
+                    // real map of THIS page, the step proceeds on
+                    // the eyes' map INSTEAD of the text fallback:
+                    // the elements ride the ordinary map contract
+                    // (same numbers, same rendering, same budget),
+                    // marked source "a11y" in their descriptors
+                    // and on the trail, and read-only — the eyes
+                    // guard in the decide loop refuses element
+                    // actions against them. When the eyes cannot
+                    // see (service off, no tree, a thin tree),
+                    // nothing here changes: the fallback below is
+                    // v3.24's, untouched.
+                    Eyes.Perception eyesPerception = tryEyes(step,
+                            "used", perception, null, history,
+                            historyReadUrls, historyTabs);
+                    boolean eyesServed = eyesPerception != null;
+                    if (eyesServed) {
+                        perception = eyesPerception;
+                        rendered = perception.render(goal);
+                        currentReadChunkChars =
+                                Settings.readChunkChars(chunkPref,
+                                        perceptionWeight(perception,
+                                                rendered));
+                    } else {
+                        boolean textPresent = perception.url != null
+                                && perception.url.equals(ts.autoReadUrl)
+                                && ts.autoReadSection != null;
+                        String thinRead = null;
+                        String unreadReason = null;
+                        if (textPresent) {
+                            unreadReason = "text_already_present";
+                        } else if (!autoReadEnabled) {
+                            unreadReason = "auto_read_off";
+                        } else {
+                            try {
+                                thinRead = hands.read(
+                                        currentReadChunkChars);
+                            } catch (Exception e) {
+                                // Best-effort, like the auto-read:
+                                // the note below still tells the
+                                // planner the map is empty.
+                            }
+                            if (thinRead == null
+                                    || thinRead.startsWith("error")) {
+                                thinRead = null;
+                                unreadReason = "read_failed";
+                            }
+                        }
+                        if (thinRead != null) {
+                            trail.record("thin_map", step, Trail.fields(
+                                    "phase", "fallback_read",
+                                    "attempts", Long.valueOf(thinAttempts),
+                                    "elements",
+                                    Long.valueOf(
+                                            perception.elements.size()),
+                                    "url", perception.url));
+                            trail.record("read", step, Trail.fields(
+                                    "phase", "thin_fallback",
+                                    "url", perception.url,
+                                    "title", perception.title,
+                                    "result", truncate(thinRead, 300)));
+                            // The loop has now read this page once;
+                            // an arrival auto-read of the same URL
+                            // would only duplicate the chunk.
+                            ts.autoReadUrls.add(perception.url);
+                            ui.feed("Step " + step + ": map still nearly "
+                                    + "empty; read the page text instead: "
+                                    + perception.title);
+                            addHistory(history, historyReadUrls,
+                                    historyTabs,
+                                    "step " + step + ": this page's "
+                                    + "element map is nearly empty ("
+                                    + perception.elements.size()
+                                    + " elements) even after waiting, so "
+                                    + "the loop read its text (next "
+                                    + "entry). Answer from the text, or "
+                                    + "use {\"action\":\"read\"} for "
+                                    + "more of it. Do not tap element "
+                                    + "numbers blind.", null);
+                            // v3.31: the fallback's chunk is read
+                            // text the planner receives verbatim
+                            // (the history entry below) — it joins
+                            // the run's read corpus.
+                            readCorpus.append(thinRead).append('\n');
+                            addHistory(history, historyReadUrls,
+                                    historyTabs,
+                                    "step " + step
+                                    + ": {\"action\":\"read\"} -> "
+                                    + thinRead, perception.url);
+                        } else {
+                            trail.record("thin_map", step, Trail.fields(
+                                    "phase", "fallback_unread",
+                                    "attempts", Long.valueOf(thinAttempts),
+                                    "elements",
+                                    Long.valueOf(
+                                            perception.elements.size()),
+                                    "url", perception.url,
+                                    "reason", unreadReason));
+                            ui.feed("Step " + step + ": map still nearly "
+                                    + "empty (" + unreadReason + ")");
+                            if (!textPresent) {
+                                addHistory(history, historyReadUrls,
+                                        historyTabs,
+                                        "step " + step + ": this page's "
+                                        + "element map is nearly empty ("
+                                        + perception.elements.size()
+                                        + " elements) even after waiting, "
+                                        + "and its text was not read for "
+                                        + "you. Use "
+                                        + "{\"action\":\"read\"} to "
+                                        + "read its text yourself. Do not "
+                                        + "tap element numbers blind.",
+                                        null);
+                            }
+                        }
+                        trimHistory(history, historyReadUrls, historyTabs);
+                    }
+                }
+            }
+
+            // v3.25 (accessibility eyes): a URL the ritual has
+            // already settled, whose DOM map is STILL thin on a
+            // later step. The ritual itself does not re-run
+            // (v3.24's discipline), but the eyes are consulted
+            // per step for as long as the DOM cannot see the
+            // page — otherwise the planner would lose the eyes'
+            // map the moment it acted on the settling step's
+            // evidence, and a page that never fills its DOM map
+            // would be a one-step read followed by blindness.
+            // With the service off this consults a null and
+            // changes nothing: no record, no feed, no time.
+            if (ThinMap.isThin(perception)
+                    && perception.url.equals(ts.thinSettledUrl)) {
+                Eyes.Perception eyesPerception = tryEyes(step,
+                        "used", perception, null, history,
+                        historyReadUrls, historyTabs);
+                if (eyesPerception != null) {
+                    perception = eyesPerception;
+                    rendered = perception.render(goal);
+                    currentReadChunkChars =
+                            Settings.readChunkChars(chunkPref,
+                                    perceptionWeight(perception,
+                                            rendered));
+                }
+            }
 
             // -- auto-read on arrival (v1.3) --------------------------
             // A question goal + a page whose title/URL matches a
@@ -1269,6 +2179,13 @@ public class Agent {
                             ts.autoReadUrls.add(perception.url);
                             ts.autoReadUrl = perception.url;
                             ts.autoReadSection = autoReadSection(autoResult);
+                            // v3.31: the auto-read's section — the
+                            // exact string the prompt surfaces —
+                            // joins the run's read corpus.
+                            if (ts.autoReadSection != null) {
+                                readCorpus.append(ts.autoReadSection)
+                                        .append('\n');
+                            }
                             // v1.9: did this extraction reach the end
                             // of the page text? Feed the shared
                             // completion map (a planner read on a
@@ -1440,8 +2357,14 @@ public class Agent {
                 // see it whole); only the prompt's copy is
                 // chosen, by MapDelta. The style's posture line
                 // rides the same assembly (null under Balanced).
+                // v3.24: a FULL block is the budget-trimmed
+                // render (MapDelta.budgetRender) — goal-ranked,
+                // token-capped, floor-protected — not the
+                // standing render whole; `rendered` still names
+                // the full render everywhere else it is used.
                 MapDelta.Block mapBlock = MapDelta.choose(ts.deltaState,
-                        perception, goal, rendered);
+                        perception, goal,
+                        MapDelta.budgetRender(perception, goal));
                 // v3.15 (R7): the tab roster — one line naming
                 // every open tab (number + host, the active one
                 // marked), so the planner can reason about
@@ -1500,8 +2423,25 @@ public class Agent {
                     }
                 }
                 String prompt = fit.prompt;
-                String raw = engine.generate(prompt, MAX_TOKENS_PER_STEP);
-                ModelEngine.Stats stats = engine.lastStats();
+                // v3.29: the decide's brain — this run's cloud
+                // brain when it carries one, the on-device
+                // engine otherwise. Both return planner text
+                // or an "ERROR: ..." string and both leave a
+                // Stats snapshot, so everything below — the
+                // tallies, the engine-error stop, the parse,
+                // the guards, the Governor — is one road for
+                // both brains.
+                String raw;
+                ModelEngine.Stats stats;
+                if (cloudBrain != null) {
+                    raw = cloudBrain.generate(prompt,
+                            MAX_TOKENS_PER_STEP);
+                    stats = cloudBrain.lastStats();
+                } else {
+                    raw = engine.generate(prompt,
+                            MAX_TOKENS_PER_STEP);
+                    stats = engine.lastStats();
+                }
                 // v2.5: the run summary's token tallies — every
                 // decide counts, including a race re-decide (it
                 // really did spend the tokens again).
@@ -1715,6 +2655,89 @@ public class Agent {
                     }
                 }
 
+                // -- fact-grounding guard (v3.31) — field evidence
+                //    (the Nov 1, 2026 trained-planner weather run):
+                //    the planner read only the NWS landing page —
+                //    2,036 chars of menus and footer, no forecast —
+                //    then NOTED "High 60°F, Low 40°F, Chance of
+                //    rain 20%" and answered done with the same
+                //    figures, present in nothing it had read. The
+                //    note also laundered the done past the v3.0
+                //    evidence rule above (the scratchpad is part
+                //    of that evidence), so this guard judges BOTH
+                //    actions, the note first of all, against the
+                //    run's READ CORPUS (readCorpus: read text
+                //    only, notes never enter it): every numeric
+                //    token in the fact / summary must appear as a
+                //    standalone token in text the run read, or
+                //    the action is corrected with the figures
+                //    named. A figureless candidate passes
+                //    untouched, so the honest "I could not find
+                //    it" exit stays open. Consulted before the
+                //    Governor ever sees the action; after
+                //    GroundingGuard.GROUNDING_CORRECTION_CAP
+                //    corrections the verdict is BYPASSED — the
+                //    action proceeds exactly as written (the
+                //    guard never rewrites planner text) and a
+                //    "guard" event with outcome "bypassed" names
+                //    the figures, which also ride the run_summary
+                //    (stop() reads groundingBypassed). Judged for
+                //    every pack and style, attended and
+                //    unattended alike: this is the loop both
+                //    share.
+                if ("note".equals(action.action)
+                        || "done".equals(action.action)) {
+                    String candidate = "note".equals(action.action)
+                            ? action.fact : action.summary;
+                    GroundingGuard.Verdict verdict =
+                            GroundingGuard.judge(candidate,
+                                    readCorpus.toString(),
+                                    groundingCorrections);
+                    if (verdict.outcome
+                            == GroundingGuard.Outcome.CORRECT) {
+                        groundingCorrections++;
+                        trail.record("guard", step, Trail.fields(
+                                "action", action.toMap(),
+                                "outcome", "correct",
+                                "reason", verdict.reason));
+                        ui.feed("Step " + step + ": guard corrected "
+                                + action.describe(null)
+                                + "  [figures in nothing read -> "
+                                + "not executed]");
+                        addHistory(history, historyReadUrls, historyTabs,
+                                "step " + step + ": " + action.toJson()
+                                + " -> corrected by guard: "
+                                + verdict.reason + ".",
+                                null);
+                        trimHistory(history, historyReadUrls, historyTabs);
+                        // A correction is not stagnation.
+                        unchanged = 0;
+                        ts.lastSignature = null;
+                        continue steps;
+                    }
+                    if (verdict.outcome
+                            == GroundingGuard.Outcome.BYPASSED) {
+                        for (int gi = 0;
+                                gi < verdict.ungrounded.size();
+                                gi++) {
+                            String fig = verdict.ungrounded.get(gi);
+                            if (!groundingBypassed.contains(fig)) {
+                                groundingBypassed.add(fig);
+                            }
+                        }
+                        trail.record("guard", step, Trail.fields(
+                                "action", action.toMap(),
+                                "outcome", "bypassed",
+                                "reason", verdict.reason));
+                        ui.feed("Step " + step + ": grounding guard "
+                                + "bypassed (cap spent) for "
+                                + action.describe(null)
+                                + "  [figures in nothing read]");
+                        // No continue: the action proceeds below,
+                        // exactly as the planner wrote it.
+                    }
+                }
+
                 if ("done".equals(action.action)) {
                     stop(step, "done", action.summary == null ? "goal complete" : action.summary);
                     return;
@@ -1798,6 +2821,60 @@ public class Agent {
                 // uses it.
                 ElementInfo element = null;
                 if (action.el >= 1) element = perception.get(action.el);
+
+                // -- accessibility-eyes guard (v3.25: agent-loop
+                //    correction, absolute — no cap, no fall-through)
+                // The step's map came from the accessibility eyes:
+                // its elements are read-only evidence. An element
+                // action against one must never reach the hands —
+                // the browser hands address the DOM stash by
+                // number, so the number would strike whatever DOM
+                // element holds it, a different element than the
+                // one the planner read. Corrected like the guards
+                // around this one, but without their caps: there
+                // is no count of corrections after which acting on
+                // it becomes safe, so it never falls through (a
+                // planner that insists burns steps, and the step
+                // cap ends the run honestly). Non-element actions
+                // (read, scroll, back, goto, search, note, ask,
+                // done) are untouched: an eyes step keeps its full
+                // non-element vocabulary.
+                if (element != null && A11yMap.SOURCE.equals(
+                        element.source)
+                        && ("tap".equals(action.action)
+                                || "type".equals(action.action)
+                                || "choose".equals(action.action)
+                                || "toggle".equals(action.action))) {
+                    trail.record("guard", step, Trail.fields(
+                            "action", action.toMap(),
+                            "element", element.descriptor(),
+                            "outcome", "correct",
+                            "reason", "accessibility eyes are "
+                                    + "read-only: element "
+                                    + action.el + " came from the "
+                                    + "node tree, not the browser "
+                                    + "map, and cannot be acted on"));
+                    ui.feed("Step " + step + ": guard corrected "
+                            + action.describe(element)
+                            + "  [accessibility eyes are read-only"
+                            + " -> not executed]");
+                    addHistory(history, historyReadUrls, historyTabs,
+                            "step " + step + ": " + action.toJson()
+                            + " -> corrected by guard: element "
+                            + action.el + " (\"" + element.name
+                            + "\") came from the accessibility "
+                            + "eyes, which are read-only — it "
+                            + "cannot be tapped or typed into. "
+                            + "Read the page, note the facts you "
+                            + "need, or navigate; the browser map "
+                            + "is tried again on later steps.",
+                            null);
+                    trimHistory(history, historyReadUrls, historyTabs);
+                    // A correction is not stagnation.
+                    unchanged = 0;
+                    ts.lastSignature = null;
+                    continue steps;
+                }
 
                 // -- repeat-action guard (v3.1: agent-loop correction,
                 //    capped per key per run) — field evidence
@@ -2153,6 +3230,53 @@ public class Agent {
                     continue steps;
                 }
 
+                // -- empty-page correction (v3.26: agent-loop, capped
+                //    per run) — a READ against a provably empty page
+                //    (ZERO elements AND no text AND a hostless URL —
+                //    about:blank, the browser's empty room) can only
+                //    error "no readable text found on this page".
+                //    Field evidence: the Nov 1, 2026 weather run
+                //    opened on about:blank and the planner read it
+                //    five times (steps 1-5 of 10) before searching.
+                //    Correct the proposal through the same guard
+                //    machinery instead of executing a guaranteed
+                //    failure; the judgement is the pure
+                //    RelevanceGuard.emptyPageReason (its triple is
+                //    what keeps a text-bearing page's reads, a
+                //    sparse hosted page, and error pages — the
+                //    recovery above owns those — out of this rule;
+                //    tap/type at zero elements are the v1.6 rule's,
+                //    directly above). After the cap
+                //    (RelevanceGuard.EMPTY_PAGE_CORRECTION_CAP per
+                //    run) the proposal falls through and the stuck
+                //    logic owns the repeat, as with the other guards.
+                String emptyPageReason = RelevanceGuard.emptyPageReason(
+                        action, perception.url, perception.elements.size(),
+                        perception.textPreview, emptyPageCorrections);
+                if (emptyPageReason != null) {
+                    emptyPageCorrections++;
+                    trail.record("guard", step, Trail.fields(
+                            "action", action.toMap(),
+                            "outcome", "correct",
+                            "reason", emptyPageReason));
+                    ui.feed("Step " + step + ": guard corrected "
+                            + action.describe(element)
+                            + "  [empty page -> not executed]");
+                    addHistory(history, historyReadUrls, historyTabs,
+                            "step " + step + ": " + action.toJson()
+                            + " -> corrected by guard: this page is "
+                            + "completely empty (no elements, no text, "
+                            + "no host). There is nothing here to read. "
+                            + "Use {\"action\":\"search\"} or "
+                            + "{\"action\":\"goto\"} to reach a real "
+                            + "page first.", null);
+                    trimHistory(history, historyReadUrls, historyTabs);
+                    // A correction is not stagnation.
+                    unchanged = 0;
+                    ts.lastSignature = null;
+                    continue steps;
+                }
+
                 // -- ask guard (v3.12, R4: agent-loop, permanent) --
                 // Asking is capped per run and may not repeat back
                 // to back: ASK_CAP questions a run, and never two
@@ -2247,6 +3371,11 @@ public class Agent {
                     governFields.put("grant_used", grantUsed.stamp());
                 }
                 trail.record("govern", step, governFields);
+                // v3.32: record-before-execute is checked, not
+                // assumed — a govern record that never reached
+                // the trail file stops the run before anything
+                // (approval included) acts on the decision.
+                if (stopIfTrailBroken(step, "govern")) return;
                 ui.feed("Step " + step + ": " + action.describe(element)
                         + "  [" + decision.classification + " -> " + decision.outcome + "]"
                         + modelStatsLine(stats));
@@ -2271,6 +3400,10 @@ public class Agent {
                                 "classification", decision.classification,
                                 "action", action.toMap(),
                                 "approved", Boolean.valueOf(approved)));
+                        // v3.32: an approval that never reached
+                        // the trail file is not an approval the
+                        // run may act on.
+                        if (stopIfTrailBroken(step, "approval")) return;
                         if (!approved) {
                             stop(step, "denied", "approver declined the action");
                             return;
@@ -2283,6 +3416,10 @@ public class Agent {
                         "action", action.toMap(),
                         "classification", decision.classification,
                         "element", element == null ? null : element.descriptor()));
+                // v3.32: the execute record is the last word
+                // before the hands move; if it is not on disk,
+                // they do not move.
+                if (stopIfTrailBroken(step, "execute")) return;
                 String result;
                 try {
                     // v3.0 (item 1): a note's body is the notebook,
@@ -2567,6 +3704,15 @@ public class Agent {
                                 Integer.valueOf(total));
                     }
                 }
+                // v3.31: a successful read / read_file result
+                // joins the run's read corpus — the result string
+                // is the text the planner receives (carried into
+                // history nearly whole just below). A failed read
+                // read nothing and contributes nothing.
+                if (ok && ("read".equals(action.action)
+                        || "read_file".equals(action.action))) {
+                    readCorpus.append(result).append('\n');
+                }
                 trail.record("result", step, Trail.fields(
                         "ok", Boolean.valueOf(ok), "result", truncate(result, 300)));
                 ui.feed("   -> " + truncate(result, 160));
@@ -2734,6 +3880,11 @@ public class Agent {
         boolean navigatedSinceSearch = false;
         String lastResultsUrl = null;
         boolean arrivedViaResultsLink = false;
+        /** v3.24: the URL whose thin-map ritual (retries +
+         *  fallback read) already ran to its end this run, so
+         *  later steps on the same page do not pay the
+         *  backoffs again; a different URL re-arms it. */
+        String thinSettledUrl = null;
     }
 
     /** The run's tab book: the loop's mirror of the browser's
@@ -3278,6 +4429,9 @@ public class Agent {
             governFields.put("grant_used", grantUsed.stamp());
         }
         trail.record("govern", step, governFields);
+        // v3.32: a replay is a governed run — the same
+        // record-before-execute gate as the planner loop's.
+        if (stopIfTrailBroken(step, "govern")) return false;
         ui.feed("Step " + step + ": " + a.describe(element)
                 + "  [" + decision.classification + " -> "
                 + decision.outcome + "]");
@@ -3299,6 +4453,12 @@ public class Agent {
                         "approved", Boolean.valueOf(approved),
                         "provenance", "route_replay",
                         "route_step", Long.valueOf(step)));
+                // v3.32: as in the planner loop — an approval
+                // that never reached the trail file does not
+                // carry the step.
+                if (stopIfTrailBroken(step, "approval")) {
+                    return false;
+                }
                 if (!approved) {
                     stop(step, "denied", "approver declined the action");
                     return false;
@@ -3311,6 +4471,9 @@ public class Agent {
                 "element", element == null ? null : element.descriptor(),
                 "provenance", "route_replay",
                 "route_step", Long.valueOf(step)));
+        // v3.32: the execute record gates the replay's hands
+        // exactly as it gates the planner loop's.
+        if (stopIfTrailBroken(step, "execute")) return false;
         String result;
         try {
             result = execute(a);
@@ -3348,6 +4511,41 @@ public class Agent {
         return "error: unhandled action " + a.action;
     }
 
+    /**
+     * v3.32: the record-before-execute promise, enforced. The
+     * class doc at Trail has always promised that the govern
+     * and execute records are on disk BEFORE the action runs;
+     * through v3.31 nothing checked — Trail.record swallowed
+     * its write failures and the loop executed anyway, so a
+     * full disk or a storage fault meant a consequential
+     * action with no durable account of its decision. Called
+     * immediately after the govern, approval and execute
+     * records are written: when the trail is file-backed and
+     * its latest write did not land, the run stops here —
+     * the action is NOT executed — with the failure named in
+     * the feed and in the stop record (which itself lands in
+     * the trail's in-memory copy, so the account of the
+     * failure survives even when the file does not). A
+     * memory-only trail (the host harness's shape) has no
+     * file to fail against and never trips this. Returns
+     * true when it stopped the run.
+     */
+    private boolean stopIfTrailBroken(int step, String recordedWhat) {
+        if (trail == null || !trail.fileBacked()
+                || trail.fileWritten()) {
+            return false;
+        }
+        String err = trail.lastWriteError();
+        ui.feed("Step " + step + ": the trail file could not be "
+                + "written (" + err + ") - stopping instead of "
+                + "acting unrecorded.");
+        stop(step, "error", "trail write failure: the "
+                + recordedWhat + " record did not reach the trail "
+                + "file (" + err + "), so the action was not "
+                + "executed");
+        return true;
+    }
+
     private void stop(int step, String reason, String summary) {
         trail.record("stop", step, Trail.fields(
                 "reason", reason, "summary", summary,
@@ -3369,7 +4567,7 @@ public class Agent {
         // the feature). With it off, the record, the line and the
         // status are byte-for-byte v3.5's.
         if (liveStatsOn) {
-            trail.record("run_summary", step, Trail.fields(
+            Map<String, Object> summaryFields = Trail.fields(
                     "outcome", reason,
                     "model", modelId,
                     "grammar_setting", Boolean.valueOf(grammarSettingOn),
@@ -3380,7 +4578,14 @@ public class Agent {
                     "reuse_percent", Long.valueOf(
                             reusePercent(totalPromptTokens, totalReusedTokens)),
                     "gen_tokens", Long.valueOf(totalGenTokens),
-                    "gen_ms", Long.valueOf(totalGenMs)));
+                    "gen_ms", Long.valueOf(totalGenMs));
+            // v3.31: a run that finished on bypassed (ungrounded)
+            // figures names them in its closing account too.
+            if (!groundingBypassed.isEmpty()) {
+                summaryFields.put("grounding_bypassed",
+                        GroundingGuard.figureList(groundingBypassed));
+            }
+            trail.record("run_summary", step, summaryFields);
             ui.feed(runSummaryLine(reason, step, seconds,
                     totalPromptTokens, totalReusedTokens,
                     totalGenTokens, totalGenMs));
@@ -3391,7 +4596,7 @@ public class Agent {
                                     totalReusedTokens)
                             : ""));
         } else {
-            trail.record("run_summary", step, Trail.fields(
+            Map<String, Object> summaryFields = Trail.fields(
                     "outcome", reason,
                     "model", modelId,
                     "grammar_setting", Boolean.valueOf(grammarSettingOn),
@@ -3400,7 +4605,13 @@ public class Agent {
                     "prompt_tokens", Long.valueOf(totalPromptTokens),
                     "reused_tokens", Long.valueOf(totalReusedTokens),
                     "reuse_percent", Long.valueOf(
-                            reusePercent(totalPromptTokens, totalReusedTokens))));
+                            reusePercent(totalPromptTokens, totalReusedTokens)));
+            // v3.31: see the live-stats branch above.
+            if (!groundingBypassed.isEmpty()) {
+                summaryFields.put("grounding_bypassed",
+                        GroundingGuard.figureList(groundingBypassed));
+            }
+            trail.record("run_summary", step, summaryFields);
             ui.feed(runSummaryLine(reason, step, seconds,
                     totalPromptTokens, totalReusedTokens));
             ui.status("Agent stopped: " + reason);
@@ -3499,6 +4710,71 @@ public class Agent {
      *  guard can judge a done against the ACTIVE tab's entries
      *  only. No longer static for exactly that reason; every
      *  caller is the loop or its own helpers. */
+    /** v3.25 (accessibility eyes): the history note that rides
+     *  an eyes-served step. The planner is told plainly where
+     *  this step's map came from and what it may not do with
+     *  the numbers — the same disclosure shape as the thin-map
+     *  fallback's note ("do not tap element numbers blind"),
+     *  except the eyes' numbers are real elements it may read,
+     *  just never act on. */
+    private static String a11yEyesNote(int step) {
+        return "step " + step + ": this step's element map came "
+                + "from the accessibility eyes (the browser map "
+                + "could not see this page). The eyes are "
+                + "READ-ONLY: their numbers describe the page so "
+                + "you can read it and note facts, but you cannot "
+                + "tap, type, choose or toggle them — the guard "
+                + "will correct any such action. Use read, scroll, "
+                + "back or goto; the browser map is tried again "
+                + "on later steps.";
+    }
+
+    /** v3.25 (accessibility eyes): one consultation of the eyes
+     *  for a step whose DOM perception cannot serve it. Returns
+     *  the eyes' perception when they can carry the step — a
+     *  non-thin map of the SAME page (when `dom` is non-null, a
+     *  tree read at another URL is stale evidence and is
+     *  refused) — and records the swap on the trail
+     *  ("a11y_perception", with the phase the caller names) and
+     *  in the step's history (a11yEyesNote). Returns null,
+     *  recording nothing, when the eyes cannot see: hands
+     *  without eyes (the default), a service that is off, no
+     *  tree, a thin tree, or a tree from another page. A hands
+     *  failure is swallowed the same way — the eyes are a
+     *  fallback sense, never a new way for a step to die. When
+     *  the service is not enabled this returns null without a
+     *  trace, so an eyes-less run's trail is v3.24's exactly. */
+    private Eyes.Perception tryEyes(int step, String phase,
+            Eyes.Perception dom, String domError,
+            List<String> history, List<String> historyReadUrls,
+            List<Integer> historyTabs) {
+        Eyes.Perception eyes = null;
+        try {
+            eyes = hands.perceiveA11y();
+        } catch (Exception e) {
+            eyes = null;
+        }
+        if (eyes == null || ThinMap.isThin(eyes)) return null;
+        if (dom != null && !dom.url.equals(eyes.url)) return null;
+        Map<String, Object> fields = Trail.fields(
+                "phase", phase,
+                "url", eyes.url,
+                "elements", Long.valueOf(eyes.elements.size()));
+        if (dom != null) {
+            fields.put("dom_elements",
+                    Long.valueOf(dom.elements.size()));
+        }
+        if (domError != null) fields.put("error", domError);
+        trail.record("a11y_perception", step, fields);
+        ui.feed("Step " + step + ": the accessibility eyes can "
+                + "see this page (" + eyes.elements.size()
+                + " elements, read-only)");
+        addHistory(history, historyReadUrls, historyTabs,
+                a11yEyesNote(step), null);
+        trimHistory(history, historyReadUrls, historyTabs);
+        return eyes;
+    }
+
     private void addHistory(List<String> history,
                             List<String> historyReadUrls,
                             List<Integer> historyTabs,
@@ -3523,6 +4799,17 @@ public class Agent {
         if (s == null) return "";
         if (s.length() <= max) return s;
         return s.substring(0, max) + "...";
+    }
+
+    /** v3.24: the thin-map backoff's sleep — the wait
+     *  action's own discipline (an interrupt restores the
+     *  flag and the wait simply ends early). */
+    private static void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**
@@ -4046,7 +5333,23 @@ public class Agent {
         sb.append("Elements:\n");
         sb.append(rendered);
         if (p.textPreview != null && p.textPreview.length() > 0) {
-            sb.append("Page text: ").append(p.textPreview).append('\n');
+            // v3.28: on DuckDuckGo pages the preview's head is
+            // the region picker's furniture, not the page (the
+            // Nov 1, 2026 v3.26 trail: the planner read the
+            // country list, concluded it was stranded, and
+            // re-proposed its search five times). The planner
+            // is shown the text with the furniture stripped;
+            // the perception itself keeps the raw preview —
+            // the trail records it and the region detector
+            // judges it. A page that is all furniture shows no
+            // Page text line at all, which is the honest
+            // preview of a bare picker.
+            String shownText = SearchEngines.stripRegionFurniture(
+                    p.url, p.textPreview);
+            if (shownText.length() > 0) {
+                sb.append("Page text: ").append(shownText)
+                        .append('\n');
+            }
         }
         if (autoReadText != null && autoReadText.length() > 0) {
             sb.append(autoReadText).append('\n');

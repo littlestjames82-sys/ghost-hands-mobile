@@ -70,6 +70,27 @@ public final class SpeakText {
     }
 
     /**
+     * v3.18 (R9): the combined chain card, spoken: the chain's
+     * name, then each step's own spoken card under its step
+     * number — every section through of(), so the scrub
+     * discipline (no raw URLs, named sources) holds for the
+     * whole chain.
+     */
+    public static String ofChain(ChainCard chain) {
+        if (chain == null) return "";
+        StringBuilder sb = new StringBuilder();
+        sb.append("Chain: ").append(scrub(chain.displayName()))
+                .append(". ");
+        for (int i = 0; i < chain.sections.size(); i++) {
+            ChainCard.Section s = chain.sections.get(i);
+            sb.append("Step ").append(s.number).append(" of ")
+                    .append(chain.sections.size()).append(": ");
+            sb.append(of(s.card)).append(" ");
+        }
+        return sb.toString().replaceAll("\\s+", " ").trim();
+    }
+
+    /**
      * The source's spoken name: the title when there is one,
      * else the URL's host with any "www." dropped ("weather.gov",
      * never the whole URL). "" when neither exists.

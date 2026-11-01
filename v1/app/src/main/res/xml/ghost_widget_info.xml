@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v3.23 (Everything Train R12): the widget's provider
+     info. updatePeriodMillis is 0 — the system never polls
+     for us; MainActivity pushes a refresh at each run
+     transition and verdict, and WidgetState's marker
+     judgement keeps a frozen board honest. -->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:minWidth="180dp"
+    android:minHeight="110dp"
+    android:targetCellWidth="4"
+    android:targetCellHeight="2"
+    android:updatePeriodMillis="0"
+    android:initialLayout="@layout/ghost_widget"
+    android:previewImage="@drawable/mascot_header"
+    android:resizeMode="horizontal|vertical"
+    android:widgetCategory="home_screen"
+    android:description="@string/widget_description" />

@@ -1,6 +1,7 @@
 package com.ghosthands.app;
 
 import android.Manifest;
+import android.animation.Animator;
 import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
@@ -28,6 +29,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.speech.RecognitionListener;
@@ -45,6 +47,7 @@ import android.view.WindowManager;
 import android.view.animation.AccelerateDecelerateInterpolator;
 import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
+import android.view.animation.LinearInterpolator;
 import android.view.inputmethod.EditorInfo;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
@@ -192,6 +195,8 @@ public class MainActivity extends Activity {
     private static final int REQ_RECORD_AUDIO = 7301;
     // v3.16 (R8): the system file picker's request code.
     private static final int REQ_PICK_FILE = 7302;
+    // v3.30: the trained-model import picker's request code.
+    private static final int REQ_IMPORT_MODEL = 7303;
     private Button micBtn;
     private SpeechRecognizer speechRec;
     private boolean speechListening = false;
@@ -207,9 +212,29 @@ public class MainActivity extends Activity {
     // canonical name is Settings.KEY_MODEL_ID and the value rides
     // the settings model; this field mirrors it.
     private static final String PREFS_NAME = "ghosthands";
+
+    // v3.22 (R11): the launch extras the release's two new
+    // doors ride — a share prefill (ShareIntakeActivity) and
+    // the QS tile's clipboard ask (GhostTileService) — plus
+    // the intake's open-on-Saved-Goals ask. Consumed exactly
+    // once by consumeLaunchExtras (handleIntent's first
+    // step): a stale extra must never fire twice.
+    public static final String EXTRA_PREFILL_GOAL =
+            "prefill_goal";
+    public static final String EXTRA_CLIPBOARD_GOAL =
+            "clipboard_goal";
+    public static final String EXTRA_OPEN_GOALS =
+            "open_goals";
     private String activeModelId = ModelStore.DEFAULT_ID;
     private Button modelQ4Btn;
     private Button modelQ5Btn;
+    // v3.30: the trained planner's picker chip and its import
+    // action (BRAIN section). The import runs on a worker
+    // thread under `importing`, which locks the brain chips
+    // like a download does.
+    private Button modelTrainedBtn;
+    private Button importModelBtn;
+    private boolean importing = false;
 
     // v2.6.1 (grammar kill-switch): the persisted "Output grammar
     // lock" choice, resolved at launch; it defaults to OFF — the
@@ -241,6 +266,8 @@ public class MainActivity extends Activity {
     // VOICE & SPEECH section controls.
     private Button voiceBtn;
     private Button speakFinishBtn;
+    // v3.23 (R12): the voice loop's one switch.
+    private Button voiceLoopBtn;
     // ALERTS section controls.
     private Button buzzBtn;
     // DATA section controls + the About footer's line.
@@ -250,6 +277,14 @@ public class MainActivity extends Activity {
     // v3.6 section controls (second settings wave).
     // BRAIN: the CPU thread chips.
     private Button[] threadChips;
+    // v3.29: the BRAIN section's planner-brain chips, the
+    // Fireworks API key field and the brain status line.
+    // The key is NOT a Settings value (see CloudBrain): it
+    // is read from and written to the private preferences
+    // directly, under CloudBrain.PREF_API_KEY.
+    private Button[] brainChips;
+    private EditText cloudKeyEdit;
+    private TextView cloudBrainStatus;
     // READING: the fallback-engine chips + the desktop switch.
     private Button[] fallbackChips;
     private Button desktopBtn;
@@ -315,6 +350,13 @@ public class MainActivity extends Activity {
     // and the window's hour chips in their collapsible box.
     private Button finishBeepBtn;
     private Button quietBtn;
+    // v3.18 (R9): the smart-checks and briefing toggles.
+    private Button condBtn;
+    private Button briefingBtn;
+    // v3.27 (R13): the unattended grants status line (ALERTS)
+    // — a readout, not a control: the grants live in Android's
+    // settings, and the per-goal opt-in lives on goal rows.
+    private TextView unattendedText;
     private LinearLayout quietBox;
     private Button[] quietStartChips;
     private Button[] quietEndChips;
@@ -372,6 +414,14 @@ public class MainActivity extends Activity {
     private GradientDrawable pillHalo;
     private ValueAnimator pulseAnimator;
 
+    // v3.17 (Mascot Interlude): the studio ghost on the Agent
+    // screen — a header tile beside the pill and a hero tile
+    // in the model card, both driven by one MascotState (the
+    // pure decisions; this class owns only views/animators).
+    private final MascotState mascot = new MascotState();
+    private MascotDriver mascotHeaderDriver;
+    private MascotDriver mascotHeroDriver;
+
     private Agent agent;
     private Trail currentTrail;
     private PolicyPacks.Pack pack;
@@ -397,6 +447,29 @@ public class MainActivity extends Activity {
     private volatile String askAnswerText = null;
     private volatile boolean voiceForAsk = false;
 
+    // v3.23 (R12 — widget + voice loop): the widget's run-state
+    // mirror (WidgetState's store, loaded at launch, written at
+    // every run transition beside a GhostWidget.refresh), and
+    // the voice loop's wiring: the machine (pure, VoiceLoop),
+    // its third recognizer route (voiceForFollowUp — mutually
+    // exclusive with voiceForAsk; setting one clears the
+    // other), the one pending loop start the next Start
+    // consumes (the pendingRetry discipline), and the run pins
+    // the finish's arm judgement reads (loop-started, follows
+    // trail, agent-run kind), snapshotted at finishRunUi's top
+    // into the finish* fields so a queued next start can never
+    // rewrite the finish being spoken about.
+    private WidgetState widgetState = WidgetState.idle();
+    private final VoiceLoop voiceLoop = new VoiceLoop();
+    private volatile boolean voiceForFollowUp = false;
+    private boolean pendingLoopStart = false;
+    private String pendingLoopFollowsTrail = null;
+    private boolean runLoopStarted = false;
+    private String runLoopFollowsTrail = null;
+    private boolean runIsAgentRun = false;
+    private boolean finishWasAgentRun = false;
+    private boolean finishWasLoopStarted = false;
+
     // v3.12 (R4 — strategy retry): the live card's retry row
     // (Runtime-built from RetryStrategy's pure mapping over the
     // card's own trail), the trail the live card belongs to,
@@ -410,6 +483,53 @@ public class MainActivity extends Activity {
     private File lastCardTrailFile = null;
     private RetryStrategy.Option pendingRetryOption = null;
     private String pendingRetryOf = null;
+
+    // v3.18 (R9 — chaining + briefing): the chain stores (one
+    // JSON preferences value each), the run pins for a chain
+    // step in flight, the one pending chain step the next
+    // Start will consume (the retry pair's discipline —
+    // consumed and cleared at the top of doStartAgent), and
+    // the live card's chain state. cardChainMode says what
+    // the continuation row under the card offers: nothing, the
+    // next step, the finished chain's combined card, a paused
+    // chain's retry — or an ad-hoc "continue with these
+    // findings" on an ordinary done run. cardChainTrailFile
+    // guards the row: it renders only for the trail the chain
+    // block was computed over, so a card opened from History
+    // never offers a stale continuation.
+    private GoalChains goalChains;
+    private GoalChains.ChainRun chainRun;
+    private String runChainName = null;
+    private int runChainStep = 0;
+    private int runChainTotal = 0;
+    private static final int CHAIN_NONE = 0;
+    private static final int CHAIN_NEXT = 1;
+    private static final int CHAIN_COMBINED = 2;
+    private static final int CHAIN_PAUSED = 3;
+    private static final int CHAIN_ADHOC = 4;
+    private int cardChainMode = CHAIN_NONE;
+    private File cardChainTrailFile = null;
+    private ChainCard lastChainCard = null;
+    private String chainCardText = null;
+    private LinearLayout chainBtnRow;
+    private TextView briefingBanner;
+    private LinearLayout chainsListBox;
+    private static final String PREF_BRIEFING_DAY = "briefing_day";
+    private BriefingLog briefingLog;
+
+    /** v3.18 (R9): the pending chain step a continuation tap
+     *  minted — consumed by the next Start like a pending
+     *  retry. Carries the step's goal text (already
+     *  {prev}-substituted), its pack, and the run state the
+     *  step continues. */
+    private static final class PendingChainStep {
+        String chainName;
+        int stepIndex;
+        String goalText;
+        String packId;
+        String noteLine;
+    }
+    private PendingChainStep pendingChainStep = null;
 
     // v3.13 (R5 — the trust pack): resume + site grants.
     // The launch's resume offer (a surviving marker the launch
@@ -446,6 +566,7 @@ public class MainActivity extends Activity {
     // record — appendSpikeLog).
     private Button a11ySpikeBtn;
     private TextView a11yGateText;
+    private TextView a11yEyesText;
     private TextView a11yResultText;
     private EditText a11yXEdit;
     private EditText a11yYEdit;
@@ -526,6 +647,11 @@ public class MainActivity extends Activity {
     private ScrollView routesScroll;
     private ScrollView historyScroll;
     private ScrollView settingsScroll;
+    // v3.20 (R10): the mission board screen — a derived view
+    // (MissionBoard), rebuilt on every entry, never stored.
+    private ScrollView missionScroll;
+    private LinearLayout missionBoardBox;
+    private TextView missionLiveRow;
     private LinearLayout goalsListBox;
     private LinearLayout routesListBox;
     private LinearLayout historyListBox;
@@ -534,6 +660,63 @@ public class MainActivity extends Activity {
     private TextView historyCardText;
     private AnswerCard historyCard = null;
     private Button historyListenBtn;
+    // v3.22 (R11): the templates shelf — a render of
+    // GoalTemplates.all() on the Goals screen, with at most
+    // one slot form open (the accordion discipline). The
+    // open form's fields are rebuilt with the shelf; the
+    // values are asked of GoalTemplates at every keystroke
+    // (the pure validation gates Create — no second logic).
+    private LinearLayout templatesBox;
+    private String openTemplateId = null;
+    private final java.util.Map<String, EditText>
+            templateSlotEdits =
+                    new java.util.LinkedHashMap<String, EditText>();
+    private Button templateCreateBtn = null;
+    // v3.20 (R10): run-compare — the two selected trails and
+    // their distillations. Session state only: entering the
+    // History screen starts unselected, and nothing here is
+    // ever persisted (selection by file, sides by RunCompare).
+    private File compareFileA = null;
+    private File compareFileB = null;
+    private RunCompare.Side compareSideA = null;
+    private RunCompare.Side compareSideB = null;
+    private TextView compareHeadText;
+    private LinearLayout compareBox;
+    // v3.20 (R10): ask-about-a-run — one panel per card slot
+    // (the live Agent card, the History card), each with its
+    // own session: the trail it is about, its digest (built
+    // once, lazily), the grounded pairs so far, and the thread
+    // text. Session state only — navigation discards it, and
+    // nothing here is ever persisted or written to a trail.
+    private static final class QaSession {
+        File file = null;
+        RunDigest.Digest digest = null;
+        final List<RunQa.Pair> priors =
+                new ArrayList<RunQa.Pair>();
+        final StringBuilder thread = new StringBuilder();
+        boolean busy = false;
+
+        void reset() {
+            file = null;
+            digest = null;
+            priors.clear();
+            thread.setLength(0);
+            busy = false;
+        }
+    }
+    private final QaSession qaLiveSession = new QaSession();
+    private final QaSession qaHistSession = new QaSession();
+    private File historyCardFile = null;
+    private LinearLayout qaLiveBox;
+    private LinearLayout qaHistBox;
+    private EditText qaLiveEdit;
+    private EditText qaHistEdit;
+    private Button qaLiveAskBtn;
+    private Button qaHistAskBtn;
+    private TextView qaLiveThread;
+    private TextView qaHistThread;
+    private TextView qaLiveStatus;
+    private TextView qaHistStatus;
     // The drawer layer (over everything), its scrim and panel,
     // and whether the last render left it shown — the panel's
     // slide follows nav.drawerOpen(); this flag only tracks
@@ -619,16 +802,50 @@ public class MainActivity extends Activity {
                 Downloads.PREF_DOWNLOADS, null));
         pageWatches = PageWatches.parse(prefs.getString(
                 PageWatches.PREF_PAGE_WATCHES, null));
+        // v3.18 (R9): the chain stores, the deferral book, and
+        // the briefing log, same discipline again — loaded
+        // before any continuation can be offered, any deferred
+        // check pruned, or any briefing composed.
+        goalChains = GoalChains.parse(prefs.getString(
+                GoalChains.PREF_CHAINS, null));
+        chainRun = GoalChains.ChainRun.parse(prefs.getString(
+                GoalChains.PREF_CHAIN_RUN, null));
+        briefingLog = BriefingLog.parse(prefs.getString(
+                BriefingLog.PREF_BRIEFING_LOG, null));
+        // v3.23 (R12): the widget's run-state store, same
+        // discipline — loaded before any transition can write
+        // it or any render can read it.
+        widgetState = WidgetState.parse(prefs.getString(
+                WidgetState.PREF_WIDGET_STATE, null));
         Alerts.ensureChannels(this);
         Alerts.armAllChecks(this, savedGoals);
         Alerts.armAllPageWatches(this, pageWatches);
+        pruneDeferrals(prefs);
+        checkUnattendedMissed(prefs);
+        maybeBriefing();
         handleIntent(getIntent());
         // v2.6: a surviving run marker means the previous run never
         // reached a stop — say so before anything else speaks.
         checkRunMarker();
+        // v3.23 (R12): the widget's launch correction — judge
+        // the stored run state against the marker that survived
+        // (or did not), persist the judged phase back so the
+        // correction survives, and push a fresh board: opening
+        // the app always corrects the widget.
+        correctWidgetAtLaunch();
         refreshModelUi();
         if (!store.ready(activeSpec())) {
-            startDownload();
+            // v3.30: an import-sourced choice is never
+            // auto-downloaded at launch (there is nothing
+            // to download) — say what brings it in instead.
+            if (activeSpec().isImport()) {
+                feed("Trained planner chosen but not imported "
+                        + "yet — Settings > BRAIN > Import "
+                        + "trained model brings it in from "
+                        + "your Drive file.");
+            } else {
+                startDownload();
+            }
         } else {
             feed("Model ready. Open a page with the address bar, "
                     + "type a goal, and tap Start.");
@@ -649,10 +866,29 @@ public class MainActivity extends Activity {
         // v3.0 (item 5): from here a run that ends is a run that
         // ended off-screen — it owes a finish notification.
         inForeground = false;
+        // v3.23 (R12): the voice loop dies with the screen —
+        // a mic must never outlive the screen that opened it.
+        // The machine closes quietly and the loop's recognizer
+        // session (if its listen is the live one) is torn
+        // down; an ordinary dictation session is untouched
+        // (its own lifecycle is onDestroy's, as always).
+        if (voiceForFollowUp) {
+            voiceForFollowUp = false;
+            if (speechRec != null) {
+                speechRec.destroy();
+                speechRec = null;
+            }
+            speechListening = false;
+        }
+        voiceLoop.closeQuietly();
+        restoreGoalHint();
         // v2.6: the pulse is a live-run signal, not a screensaver;
         // it stops when the app leaves the foreground and resumes
         // (via updatePill) only if a run is still live.
         stopPulse();
+        // v3.17: the mascot's animators stop on the same line,
+        // for the same reason.
+        stopMascotAnimators();
         super.onPause();
     }
 
@@ -674,6 +910,9 @@ public class MainActivity extends Activity {
         releaseAssistStop();
         releaseAsk(false);
         stopPulse();
+        // v3.17: no mascot animator outlives the Activity
+        // (the house rule the spike probe states below).
+        stopMascotAnimators();
         // v3.14 (R6): an armed spike probe dies with the
         // Activity — a countdown must never fire into a
         // destroyed screen.
@@ -704,6 +943,10 @@ public class MainActivity extends Activity {
      *  carries its name — fromCheck, so the run goes readonly). */
     private void handleIntent(Intent intent) {
         if (intent == null) return;
+        // v3.22 (R11): the release's launch extras first —
+        // consumed exactly once, before any other branch
+        // can see the intent twice.
+        consumeLaunchExtras(intent);
         String cardTrail = intent.getStringExtra(Alerts.EXTRA_CARD_TRAIL);
         if (cardTrail != null) {
             showCardForTrailFile(new File(cardTrail), null);
@@ -918,6 +1161,9 @@ public class MainActivity extends Activity {
         } else {
             stopPulse();
         }
+        // v3.17: the mascot re-resolves with the pill, from
+        // the same inputs, at every site the pill is judged.
+        updateMascot();
     }
 
     /** v2.6: the AGENT ACTIVE breathing glow — a soft red halo
@@ -969,6 +1215,583 @@ public class MainActivity extends Activity {
         if (pillWrap != null) {
             pillWrap.setScaleX(1f);
             pillWrap.setScaleY(1f);
+        }
+    }
+
+    // ---------------- v3.17: the mascot ----------------
+    // The studio ghost beside the pill (header tile) and in
+    // the model card (hero tile): a status signal in the
+    // skin, driven by MascotState's pure decisions — this
+    // class owns only views and animators. Like the pill it
+    // only ever moves on the UI thread; like the pulse it
+    // reads reduce-motion at animation time, every time.
+
+    /** The mascot's own violet (the pill halo's family). */
+    private static final int COL_MASCOT_VIOLET =
+            Color.rgb(150, 110, 255);
+
+    /** v3.21: how often a blinking tile re-asks the
+     *  scheduler where the eye is — a blink's closed phase
+     *  is ~70 ms wide, so a 30 ms tick cannot step over
+     *  it. */
+    private static final long BLINK_TICK_MS = 30;
+
+    /** A bundled mascot drawable's id, resolved by name.
+     *  The app has never referenced the generated R class
+     *  (the host harness compiles against android.jar alone,
+     *  where no R exists), so the tiles — the app's first
+     *  drawable resources — resolve theirs by name at
+     *  buildUi, once. */
+    private int mascotDrawableId(String name) {
+        return getResources().getIdentifier(name, "drawable",
+                getPackageName());
+    }
+
+    /** The header tile: the painted studio ghost as a
+     *  bitmap (the v3.17 construction). v3.19 swapped this
+     *  tile for a procedurally drawn ghost; v3.21 swapped
+     *  back at Ryan's direction — the painted art is the
+     *  face again, and the blink (the drawn run's one
+     *  keeper) rides on top of it in the driver, which
+     *  swaps the tile to its closed-eyes cut. */
+    private ImageView mascotBitmapTile() {
+        ImageView v = new ImageView(this);
+        v.setImageResource(mascotDrawableId("mascot_header"));
+        v.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        v.setBackground(roundedBg(COL_CARD,
+                COL_CARD_EDGE, 12));
+        v.setClipToOutline(true);
+        v.setImportantForAccessibility(
+                View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return v;
+    }
+
+    /** Re-resolve the mascot from the same inputs the pill
+     *  reads and apply the display state to both tiles.
+     *  Called at the end of updatePill() itself (so no state
+     *  can drift from the pill's), from applyScreens() (the
+     *  screen gate: the mascot lives on the Agent screen),
+     *  and from the panel/finish hooks via mascotEvent(). */
+    private void updateMascot() {
+        if (mascotHeaderDriver == null) return;
+        boolean onAgent = nav == null
+                || nav.screen() == NavState.AGENT;
+        if (!onAgent) {
+            mascotHeaderDriver.wrap.setVisibility(View.GONE);
+            stopMascotAnimators();
+            return;
+        }
+        mascotHeaderDriver.wrap.setVisibility(View.VISIBLE);
+        mascot.setBase(running, stopping, downloading,
+                approvalPanel != null
+                        && approvalPanel.getVisibility()
+                                == View.VISIBLE,
+                askPanel != null
+                        && askPanel.getVisibility()
+                                == View.VISIBLE);
+        int display = mascot.beginCurrent();
+        int epoch = mascot.epoch();
+        mascotHeaderDriver.show(display, epoch);
+        if (mascotHeroDriver != null) {
+            mascotHeroDriver.show(display, epoch);
+        }
+    }
+
+    /** A mascot event: a panel wait (the panel's visibility
+     *  is already set at the call sites; the state resolves
+     *  from it) or a finish-line one-shot. One-shots are
+     *  live-only — a finish nobody saw earns its
+     *  notification as ever, never a queued hop. */
+    private void mascotEvent(final int state) {
+        if (MascotState.isOneShot(state)) {
+            if (!inForeground) return;
+            mascot.offerOneShot(state);
+        }
+        if (Looper.getMainLooper() == Looper.myLooper()) {
+            updateMascot();
+        } else {
+            runOnUiThread(new Runnable() {
+                @Override public void run() { updateMascot(); }
+            });
+        }
+    }
+
+    /** A header one-shot's animation ended on its own:
+     *  advance the queue and re-resolve — the fall-back is
+     *  whatever the base inputs say now. */
+    private void onMascotOneShotEnd() {
+        mascot.finishCurrent();
+        updateMascot();
+    }
+
+    /** Reduce-motion one-shot settle: the static pose holds
+     *  briefly, then the shot is spent the way an animation
+     *  end spends it. Stale firings (the state moved on)
+     *  spend nothing. */
+    private void settleMascotStatic(int state, int epoch) {
+        if (mascot.current() != state
+                || mascot.epoch() != epoch) return;
+        mascot.finishCurrent();
+        updateMascot();
+    }
+
+    /** Stop every mascot animator and settle a one-shot
+     *  caught mid-play: lifecycle stops (pause, screen
+     *  change, destroy) never leave a hop owed. A held
+     *  droop is not a shot in flight — it survives, held. */
+    private void stopMascotAnimators() {
+        if (mascotHeaderDriver != null) {
+            mascotHeaderDriver.cancelAnimators();
+            mascotHeaderDriver.shownState = MascotState.NONE;
+        }
+        if (mascotHeroDriver != null) {
+            mascotHeroDriver.cancelAnimators();
+            mascotHeroDriver.shownState = MascotState.NONE;
+        }
+        if (mascot.pendingOneShots() > 0
+                && !mascot.heldStopped()) {
+            mascot.finishCurrent();
+        }
+    }
+
+    /** One mascot surface (the header tile or the model-card
+     *  hero): a glow halo behind a rounded bitmap tile, one
+     *  transform animator and one glow animator at a time —
+     *  startPulse()/stopPulse()'s discipline (lazily made,
+     *  idempotent, null-guarded, transform/alpha only, so a
+     *  running pose costs no layout pass over the stage).
+     *
+     *  v3.21: BOTH surfaces are bitmap again (v3.19's drawn
+     *  header is retired — Ryan liked the painted ghost),
+     *  and both blink: while a pose animates, a small ticker
+     *  asks GhostFigure's scheduler whether the eye is in
+     *  its closed phase at this time-in-state and swaps the
+     *  tile between the open-eyes and closed-eyes cuts of
+     *  the same art. The ticker's life is the animators'
+     *  life — started with the pose, stopped by
+     *  cancelAnimators() with the open cut restored — and
+     *  reduce motion never starts it. */
+    private final class MascotDriver {
+        final FrameLayout wrap;
+        final View view;
+        final ImageView tile;
+        final int openRes;
+        final int closedRes;
+        final GradientDrawable glow;
+        final boolean hero;
+        ValueAnimator moveAnimator;
+        ValueAnimator glowAnimator;
+        Runnable pendingSettle;
+        int shownState = MascotState.NONE;
+        int shownEpoch = -1;
+        boolean droopHeld = false;
+        boolean poseCancelled = false;
+        // v3.21: the blink ticker's bookkeeping — the
+        // clock is time in state from the pose's start,
+        // read at the state's own interval scale.
+        long blinkStartMs;
+        float blinkScale = 1f;
+        boolean blinkLive = false;
+        boolean eyesClosed = false;
+
+        MascotDriver(FrameLayout wrap, View view,
+                     GradientDrawable glow, boolean hero,
+                     int openRes, int closedRes) {
+            this.wrap = wrap;
+            this.view = view;
+            this.tile = (ImageView) view;
+            this.openRes = openRes;
+            this.closedRes = closedRes;
+            this.glow = glow;
+            this.hero = hero;
+        }
+
+        /** The blink ticker (v3.21): while it lives, it
+         *  asks the scheduler where the eye is at this
+         *  time-in-state and swaps the tile's cut only on
+         *  a phase change. blinkLive is the loop's whole
+         *  contract: every stop clears it and removes the
+         *  callback, so the ticker can never outlive the
+         *  pose it rides. */
+        private final Runnable blinkTicker = new Runnable() {
+            @Override public void run() {
+                if (!blinkLive) return;
+                boolean closed = GhostFigure.eyesClosedAt(
+                        SystemClock.uptimeMillis() - blinkStartMs,
+                        blinkScale);
+                if (closed != eyesClosed) {
+                    eyesClosed = closed;
+                    tile.setImageResource(
+                            closed ? closedRes : openRes);
+                }
+                tile.postDelayed(this, BLINK_TICK_MS);
+            }
+        };
+
+        float px(float dpVal) {
+            return dpVal
+                    * getResources().getDisplayMetrics().density;
+        }
+
+        int glowColor(int role) {
+            switch (role) {
+                case MascotState.GLOW_CYAN: return COL_CYAN;
+                case MascotState.GLOW_AMBER: return COL_AMBER;
+                default: return COL_MASCOT_VIOLET;
+            }
+        }
+
+        void cancelAnimators() {
+            poseCancelled = true;
+            stopBlink();
+            if (moveAnimator != null
+                    && moveAnimator.isRunning()) {
+                moveAnimator.cancel();
+            }
+            if (glowAnimator != null
+                    && glowAnimator.isRunning()) {
+                glowAnimator.cancel();
+            }
+            if (pendingSettle != null) {
+                view.removeCallbacks(pendingSettle);
+                pendingSettle = null;
+            }
+        }
+
+        /** Start the blink clock for a state whose pose
+         *  just started: time zero is now (the scheduler
+         *  reads time in state, as it did for the drawn
+         *  ghost) and the scale is the state's own. A
+         *  suspended scale (the droop) starts nothing —
+         *  the painted eyes simply stay open. Any ticker
+         *  from a previous pose is stopped first, open
+         *  cut restored. */
+        void startBlink(int state) {
+            stopBlink();
+            blinkScale = GhostFigure.blinkScaleFor(
+                    state, hero);
+            if (blinkScale <= 0f) return;
+            blinkStartMs = SystemClock.uptimeMillis();
+            blinkLive = true;
+            tile.post(blinkTicker);
+        }
+
+        /** Stop the blink and leave the open cut showing:
+         *  a stopped mascot never freezes mid-blink with
+         *  its eyes shut. */
+        void stopBlink() {
+            blinkLive = false;
+            tile.removeCallbacks(blinkTicker);
+            if (eyesClosed) {
+                eyesClosed = false;
+                tile.setImageResource(openRes);
+            }
+        }
+
+        /** Show a display state (the hero first maps it
+         *  through heroStateFor). Re-showing the state
+         *  already shown is a no-op while its pose is
+         *  mid-flight or held, so the frequent updatePill
+         *  calls never restart a bob's phase. */
+        void show(final int displayState, final int epoch) {
+            final int state = hero
+                    ? MascotState.heroStateFor(displayState)
+                    : displayState;
+            final boolean reduce = settings != null
+                    && settings.reduceMotion;
+            if (reduce) {
+                cancelAnimators();
+                applyStaticPose(
+                        MascotState.staticPoseFor(state, hero));
+                shownState = state;
+                shownEpoch = epoch;
+                droopHeld = state
+                        == MascotState.STOPPED_DENIED;
+                if (!hero && MascotState.isOneShot(state)
+                        && state
+                                != MascotState.STOPPED_DENIED) {
+                    pendingSettle = new Runnable() {
+                        @Override public void run() {
+                            pendingSettle = null;
+                            settleMascotStatic(state, epoch);
+                        }
+                    };
+                    view.postDelayed(pendingSettle, 1200);
+                }
+                return;
+            }
+            final MascotState.Pose pose =
+                    MascotState.poseFor(state, hero);
+            if (state == shownState) {
+                if (pose.kind == MascotState.KIND_DROOP
+                        && droopHeld) return;
+                if (MascotState.isOneShot(state)
+                        && epoch == shownEpoch) return;
+                if (!MascotState.isOneShot(state)
+                        && moveAnimator != null
+                        && moveAnimator.isRunning()) return;
+            }
+            cancelAnimators();
+            shownState = state;
+            shownEpoch = epoch;
+            droopHeld = false;
+            startPose(pose, state);
+            startBlink(state);
+        }
+
+        void applyStaticPose(MascotState.Pose pose) {
+            glow.setColor(glowColor(pose.glowRole));
+            glow.setAlpha(pose.glowMin);
+            view.setTranslationY(px(pose.endDyDp));
+            view.setRotation(pose.endRotDeg);
+            view.setAlpha(pose.endAlpha);
+        }
+
+        /** The glow's own loop (float/sway/bounce poses):
+         *  a breathing alpha on its own cycle, the pill
+         *  pulse's shape. */
+        void startGlowLoop(final MascotState.Pose pose) {
+            long period = pose.glowPeriodMs > 0
+                    ? pose.glowPeriodMs : pose.periodMs;
+            glowAnimator = ValueAnimator.ofFloat(0f, 1f);
+            glowAnimator.setDuration(period);
+            glowAnimator.setRepeatCount(ValueAnimator.INFINITE);
+            glowAnimator.setRepeatMode(ValueAnimator.REVERSE);
+            glowAnimator.setInterpolator(
+                    new AccelerateDecelerateInterpolator());
+            glowAnimator.addUpdateListener(
+                    new ValueAnimator.AnimatorUpdateListener() {
+                        @Override public void onAnimationUpdate(
+                                ValueAnimator a) {
+                            float f = ((Float)
+                                    a.getAnimatedValue())
+                                    .floatValue();
+                            glow.setAlpha(pose.glowMin
+                                    + (int) ((pose.glowMax
+                                            - pose.glowMin) * f));
+                        }
+                    });
+            glowAnimator.start();
+        }
+
+        /** The end listener for one-shot poses: a natural
+         *  end advances the shared queue (header only — the
+         *  hero never drives it); a cancel (lifecycle stop,
+         *  pose change) ends nothing. */
+        Animator.AnimatorListener oneShotEnd(
+                final boolean droop) {
+            return new Animator.AnimatorListener() {
+                @Override public void onAnimationStart(
+                        Animator a) { }
+                @Override public void onAnimationEnd(
+                        Animator a) {
+                    if (poseCancelled) return;
+                    if (droop) droopHeld = true;
+                    if (!hero) onMascotOneShotEnd();
+                }
+                @Override public void onAnimationCancel(
+                        Animator a) { }
+                @Override public void onAnimationRepeat(
+                        Animator a) { }
+            };
+        }
+
+        void startPose(final MascotState.Pose pose,
+                       final int state) {
+            poseCancelled = false;
+            glow.setColor(glowColor(pose.glowRole));
+            final float ampPx = px(pose.ampDp);
+            switch (pose.kind) {
+                case MascotState.KIND_FLOAT: {
+                    view.setRotation(0f);
+                    view.setAlpha(1f);
+                    moveAnimator = ValueAnimator.ofFloat(0f, 1f);
+                    moveAnimator.setDuration(pose.periodMs);
+                    moveAnimator.setRepeatCount(
+                            ValueAnimator.INFINITE);
+                    moveAnimator.setRepeatMode(
+                            ValueAnimator.REVERSE);
+                    moveAnimator.setInterpolator(
+                            new AccelerateDecelerateInterpolator());
+                    moveAnimator.addUpdateListener(
+                            new ValueAnimator
+                                    .AnimatorUpdateListener() {
+                                @Override public void onAnimationUpdate(
+                                        ValueAnimator a) {
+                                    float f = ((Float)
+                                            a.getAnimatedValue())
+                                            .floatValue();
+                                    view.setTranslationY(
+                                            (f * 2f - 1f) * ampPx);
+                                }
+                            });
+                    moveAnimator.start();
+                    startGlowLoop(pose);
+                    break;
+                }
+                case MascotState.KIND_SWAY: {
+                    view.setAlpha(1f);
+                    moveAnimator = ValueAnimator.ofFloat(0f, 1f);
+                    moveAnimator.setDuration(pose.periodMs);
+                    moveAnimator.setRepeatCount(
+                            ValueAnimator.INFINITE);
+                    moveAnimator.setRepeatMode(
+                            ValueAnimator.REVERSE);
+                    moveAnimator.setInterpolator(
+                            new AccelerateDecelerateInterpolator());
+                    moveAnimator.addUpdateListener(
+                            new ValueAnimator
+                                    .AnimatorUpdateListener() {
+                                @Override public void onAnimationUpdate(
+                                        ValueAnimator a) {
+                                    float f = ((Float)
+                                            a.getAnimatedValue())
+                                            .floatValue();
+                                    view.setRotation(
+                                            (f * 2f - 1f)
+                                                    * pose.ampDeg);
+                                    view.setTranslationY(
+                                            (f * 2f - 1f) * ampPx);
+                                }
+                            });
+                    moveAnimator.start();
+                    startGlowLoop(pose);
+                    break;
+                }
+                case MascotState.KIND_BOUNCE_LOOP: {
+                    view.setRotation(0f);
+                    view.setAlpha(1f);
+                    moveAnimator = ValueAnimator.ofFloat(0f, 1f);
+                    moveAnimator.setDuration(
+                            MascotState.BOUNCE_CYCLE_MS);
+                    moveAnimator.setRepeatCount(
+                            ValueAnimator.INFINITE);
+                    moveAnimator.setRepeatMode(
+                            ValueAnimator.RESTART);
+                    moveAnimator.setInterpolator(
+                            new LinearInterpolator());
+                    moveAnimator.addUpdateListener(
+                            new ValueAnimator
+                                    .AnimatorUpdateListener() {
+                                @Override public void onAnimationUpdate(
+                                        ValueAnimator a) {
+                                    float f = ((Float)
+                                            a.getAnimatedValue())
+                                            .floatValue();
+                                    float t = f
+                                            * MascotState
+                                                    .BOUNCE_CYCLE_MS;
+                                    view.setTranslationY(
+                                            t < MascotState
+                                                            .BOUNCE_HOP_MS
+                                                    ? -ampPx * (float)
+                                                            Math.sin(
+                                                                    Math.PI
+                                                                            * t
+                                                                            / MascotState.BOUNCE_HOP_MS)
+                                                    : 0f);
+                                }
+                            });
+                    moveAnimator.start();
+                    startGlowLoop(pose);
+                    break;
+                }
+                case MascotState.KIND_HOP: {
+                    view.setRotation(0f);
+                    view.setAlpha(1f);
+                    final long totalMs =
+                            pose.periodMs * pose.cycles;
+                    moveAnimator = ValueAnimator.ofFloat(0f, 1f);
+                    moveAnimator.setDuration(totalMs);
+                    moveAnimator.setInterpolator(
+                            new LinearInterpolator());
+                    moveAnimator.addUpdateListener(
+                            new ValueAnimator
+                                    .AnimatorUpdateListener() {
+                                @Override public void onAnimationUpdate(
+                                        ValueAnimator a) {
+                                    float f = ((Float)
+                                            a.getAnimatedValue())
+                                            .floatValue();
+                                    float local = (f * totalMs)
+                                            % pose.periodMs;
+                                    view.setTranslationY(
+                                            -ampPx * (float)
+                                                    Math.sin(Math.PI
+                                                            * local
+                                                            / pose.periodMs));
+                                }
+                            });
+                    moveAnimator.addListener(oneShotEnd(false));
+                    moveAnimator.start();
+                    glowAnimator = ValueAnimator.ofFloat(0f, 1f);
+                    glowAnimator.setDuration(totalMs);
+                    glowAnimator.setInterpolator(
+                            new LinearInterpolator());
+                    glowAnimator.addUpdateListener(
+                            new ValueAnimator
+                                    .AnimatorUpdateListener() {
+                                @Override public void onAnimationUpdate(
+                                        ValueAnimator a) {
+                                    float f = ((Float)
+                                            a.getAnimatedValue())
+                                            .floatValue();
+                                    glow.setAlpha((int)
+                                            (pose.glowMax
+                                                    * Math.sin(
+                                                            Math.PI
+                                                                    * f)));
+                                }
+                            });
+                    glowAnimator.start();
+                    break;
+                }
+                case MascotState.KIND_DROOP: {
+                    final float ty0 = view.getTranslationY();
+                    final float rot0 = view.getRotation();
+                    final float a0 = view.getAlpha();
+                    final int g0 = glow.getAlpha();
+                    moveAnimator = ValueAnimator.ofFloat(0f, 1f);
+                    moveAnimator.setDuration(pose.periodMs);
+                    moveAnimator.setInterpolator(
+                            new DecelerateInterpolator());
+                    moveAnimator.addUpdateListener(
+                            new ValueAnimator
+                                    .AnimatorUpdateListener() {
+                                @Override public void onAnimationUpdate(
+                                        ValueAnimator a) {
+                                    float f = ((Float)
+                                            a.getAnimatedValue())
+                                            .floatValue();
+                                    view.setTranslationY(ty0
+                                            + (px(pose.endDyDp)
+                                                    - ty0) * f);
+                                    view.setRotation(rot0
+                                            + (pose.endRotDeg
+                                                    - rot0) * f);
+                                    view.setAlpha(a0
+                                            + (pose.endAlpha
+                                                    - a0) * f);
+                                    glow.setAlpha((int) (g0
+                                            + (pose.glowMax
+                                                    - g0) * f));
+                                }
+                            });
+                    moveAnimator.addListener(oneShotEnd(true));
+                    moveAnimator.start();
+                    break;
+                }
+                default: {
+                    // KIND_STATIC never reaches startPose
+                    // (show() applies it directly); a pose the
+                    // driver does not know is a rest pose.
+                    view.setTranslationY(0f);
+                    view.setRotation(0f);
+                    view.setAlpha(1f);
+                    glow.setAlpha(pose.glowMin);
+                    break;
+                }
+            }
         }
     }
 
@@ -1057,6 +1880,36 @@ public class MainActivity extends Activity {
         titleCol.addView(sub);
         header.addView(titleCol, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        // v3.17 (Mascot Interlude): the studio ghost in a
+        // glow-backed tile between the wordmark and the pill —
+        // the pill halo's construction, one size up (halo
+        // behind, tile in front). Passive and non-focusable —
+        // it takes no input and announces nothing (the pill
+        // already speaks the state).
+        // v3.21 (Art Ghost + Blink): the tile's picture is
+        // the PAINTED ghost again — v3.19's drawn ghost is
+        // retired and mascotBitmapTile() (the v3.17 tile)
+        // is the construction once more. The blink came
+        // back with the art: the driver swaps this tile to
+        // its closed-eyes cut on the scheduler's cadence.
+        FrameLayout mascotWrap = new FrameLayout(this);
+        mascotWrap.setPadding(dp(3), dp(3), dp(3), dp(3));
+        GradientDrawable mascotGlow = new GradientDrawable();
+        mascotGlow.setShape(GradientDrawable.RECTANGLE);
+        mascotGlow.setCornerRadius(dp(22));
+        mascotGlow.setColor(COL_MASCOT_VIOLET);
+        mascotGlow.setAlpha(0);
+        mascotWrap.setBackground(mascotGlow);
+        ImageView mascotView = mascotBitmapTile();
+        mascotWrap.addView(mascotView);
+        LinearLayout.LayoutParams mascotLp =
+                new LinearLayout.LayoutParams(dp(46), dp(46));
+        mascotLp.rightMargin = dp(8);
+        header.addView(mascotWrap, mascotLp);
+        mascotHeaderDriver = new MascotDriver(mascotWrap,
+                mascotView, mascotGlow, false,
+                mascotDrawableId("mascot_header"),
+                mascotDrawableId("mascot_header_blink"));
         // v2.6: the pill sits in a padded wrap whose background is
         // the pulse halo (invisible at rest); the pill itself is
         // unchanged from the v1.4 skin.
@@ -1107,11 +1960,54 @@ public class MainActivity extends Activity {
         modelLp.topMargin = dp(12);
         root.addView(modelCard, modelLp);
 
+        // v3.17 (Mascot Interlude): the hero tile greets from
+        // the model card's top row, left of the status line —
+        // the header tile's construction at greeter size. It
+        // shares the mascot's state machine but runs only the
+        // calm poses (MascotState.heroStateFor): the header
+        // tile does the attention work, a 72dp bounce beside
+        // the status text would fight the text.
+        LinearLayout heroRow = new LinearLayout(this);
+        heroRow.setOrientation(LinearLayout.HORIZONTAL);
+        heroRow.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout heroWrap = new FrameLayout(this);
+        heroWrap.setPadding(dp(3), dp(3), dp(3), dp(3));
+        GradientDrawable heroGlow = new GradientDrawable();
+        heroGlow.setShape(GradientDrawable.RECTANGLE);
+        heroGlow.setCornerRadius(dp(22));
+        heroGlow.setColor(COL_MASCOT_VIOLET);
+        heroGlow.setAlpha(0);
+        heroWrap.setBackground(heroGlow);
+        ImageView heroView = new ImageView(this);
+        heroView.setImageResource(
+                mascotDrawableId("mascot_hero"));
+        heroView.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        heroView.setBackground(roundedBg(COL_CARD,
+                COL_CARD_EDGE, 12));
+        heroView.setClipToOutline(true);
+        heroView.setImportantForAccessibility(
+                View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        heroWrap.addView(heroView);
+        heroRow.addView(heroWrap, new LinearLayout.LayoutParams(
+                dp(72), dp(72)));
+        LinearLayout statusCol = new LinearLayout(this);
+        statusCol.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams statusColLp =
+                new LinearLayout.LayoutParams(0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        statusColLp.leftMargin = dp(10);
+        heroRow.addView(statusCol, statusColLp);
+        modelCard.addView(heroRow);
+        mascotHeroDriver = new MascotDriver(heroWrap, heroView,
+                heroGlow, true,
+                mascotDrawableId("mascot_hero"),
+                mascotDrawableId("mascot_hero_blink"));
+
         statusText = new TextView(this);
         statusText.setText("Checking for model...");
         statusText.setTextSize(12);
         statusText.setTextColor(COL_MUTED);
-        modelCard.addView(statusText);
+        statusCol.addView(statusText);
 
         progressBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progressBar.setMax(1000);
@@ -1128,7 +2024,17 @@ public class MainActivity extends Activity {
         downloadBtn.setText("Download model (1.1 GB)");
         styleQuiet(downloadBtn);
         downloadBtn.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { startDownload(); }
+            // v3.30: the card's one action is the active
+            // model's own arrival — a download for the quants,
+            // the import picker for the trained planner.
+            @Override public void onClick(View v) {
+                ModelStore.Spec s = activeSpec();
+                if (s != null && s.isImport()) {
+                    pickTrainedModel();
+                } else {
+                    startDownload();
+                }
+            }
         });
         LinearLayout.LayoutParams dlLp = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1198,6 +2104,39 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1);
         q5Lp.leftMargin = dp(8);
         brainRow.addView(modelQ5Btn, q5Lp);
+        // v3.30: the trained planner — a third brain, chosen
+        // like the quants but arrived by import, not download
+        // (its only home is a file in Ryan's Drive). The chip
+        // selects it through the same onModelPicked path; the
+        // import action under it opens the document picker.
+        modelTrainedBtn = chipButton("Q5 TRAINED");
+        modelTrainedBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { onModelPicked(ModelStore.TRAINED_ID); }
+        });
+        LinearLayout.LayoutParams trLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        trLp.topMargin = dp(8);
+        brainBody.addView(modelTrainedBtn, trLp);
+        importModelBtn = chipButton("Import trained model");
+        importModelBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { pickTrainedModel(); }
+        });
+        LinearLayout.LayoutParams imLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        imLp.topMargin = dp(6);
+        brainBody.addView(importModelBtn, imLp);
+        sectionNote(brainBody, "The trained planner is the "
+                + "Ghost Hands fine-tune of the Q5 brain. It "
+                + "lives only as a 1.1 GB .gguf file in your "
+                + "Google Drive (the ghosthands-trained "
+                + "folder) — there is no download. Import "
+                + "copies the file you pick into the app and "
+                + "verifies it against the trained model "
+                + "(exact size + sha256): only that exact file "
+                + "becomes selectable, and anything else is "
+                + "refused and deleted.");
         // The grammar label is ModelStore.GRAMMAR_LABEL, verbatim.
         TextView grammarLabel = new TextView(this);
         grammarLabel.setText(ModelStore.GRAMMAR_LABEL);
@@ -1239,6 +2178,87 @@ public class MainActivity extends Activity {
                 + "load — switching brains or restarting the app "
                 + "picks the new count up; a loaded model keeps "
                 + "the threads it was loaded with.");
+        // v3.29: the planner brain — the on-device model, or
+        // the opt-in Fireworks cloud brain. The choice is a
+        // Settings value (KEY_BRAIN); the API key is not (it
+        // is a credential — see CloudBrain's doc): the field
+        // below writes it straight to the private
+        // preferences, and it is shown masked.
+        smallLabel(brainBody, "Planner brain — where a run's "
+                + "steps are planned");
+        LinearLayout brainChoiceRow = sectionRow(brainBody);
+        brainChips = new Button[Settings.BRAIN_IDS.length];
+        for (int i = 0; i < Settings.BRAIN_IDS.length; i++) {
+            final String bid = Settings.BRAIN_IDS[i];
+            brainChips[i] = rowChip(brainChoiceRow,
+                    Settings.BRAIN_NAMES[i], i == 0);
+            brainChips[i].setOnClickListener(
+                    new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            onBrainPicked(bid);
+                        }
+                    });
+        }
+        sectionNote(brainBody, "On-device: the planner runs "
+                + "entirely on this phone — nothing leaves it, "
+                + "and a downloaded model is required. Fireworks "
+                + "cloud: each step's prompt (the goal, the "
+                + "page's text and its element map, the run's "
+                + "history) is sent to Fireworks' API, and the "
+                + "reply plans the step — page content leaves "
+                + "the phone while this brain is selected. No "
+                + "model download is needed. Either way the "
+                + "same governor, guards and approvals judge "
+                + "every action.");
+        smallLabel(brainBody, "Fireworks API key — kept only "
+                + "in the app's private storage on this phone, "
+                + "sent only to Fireworks with each request");
+        cloudKeyEdit = new EditText(this);
+        cloudKeyEdit.setSingleLine(true);
+        cloudKeyEdit.setText(fireworksApiKey());
+        cloudKeyEdit.setHint("Paste your Fireworks API key");
+        cloudKeyEdit.setBackground(null);
+        cloudKeyEdit.setTextColor(COL_TEXT);
+        cloudKeyEdit.setHintTextColor(COL_MUTED);
+        cloudKeyEdit.setTextSize(13);
+        cloudKeyEdit.setInputType(
+                android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        cloudKeyEdit.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        cloudKeyEdit.setOnEditorActionListener(
+                new TextView.OnEditorActionListener() {
+                    @Override public boolean onEditorAction(
+                            TextView v, int actionId,
+                            KeyEvent event) {
+                        if (actionId == EditorInfo.IME_ACTION_DONE) {
+                            commitCloudKey();
+                            return true;
+                        }
+                        return false;
+                    }
+                });
+        cloudKeyEdit.setOnFocusChangeListener(
+                new View.OnFocusChangeListener() {
+                    @Override public void onFocusChange(View v,
+                            boolean hasFocus) {
+                        if (!hasFocus) commitCloudKey();
+                    }
+                });
+        LinearLayout.LayoutParams ckLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        ckLp.topMargin = dp(6);
+        brainBody.addView(cloudKeyEdit, ckLp);
+        cloudBrainStatus = new TextView(this);
+        cloudBrainStatus.setTextSize(11);
+        cloudBrainStatus.setTextColor(COL_MUTED);
+        LinearLayout.LayoutParams csLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        csLp.topMargin = dp(6);
+        brainBody.addView(cloudBrainStatus, csLp);
 
         // APPEARANCE (v3.7): the skin's knobs — the accent hue,
         // the feed's text size, and the motion switch.
@@ -1468,6 +2488,19 @@ public class MainActivity extends Activity {
                         onSpeakFinishToggled();
                     }
                 });
+        // v3.23 (R12): the voice loop's one control — the
+        // ONE-CONTROL RULE: this switch, this key, no other.
+        voiceLoopBtn = toggleButton(voiceBody,
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        onVoiceLoopToggled();
+                    }
+                });
+        sectionNote(voiceBody, "Voice loop — after a spoken "
+                + "answer, ask for one follow-up goal out loud. "
+                + "Needs Voice goals and Speak on finish. The "
+                + "follow-up starts as a normal run: approvals "
+                + "still ask, and Stop still works.");
         // v3.7: the spoken rate for Listen and speak-on-finish.
         smallLabel(voiceBody, "Speech rate — Listen and speak "
                 + "on finish");
@@ -1524,6 +2557,30 @@ public class MainActivity extends Activity {
         quietStartChips = hourChips(quietBox, true);
         smallLabel(quietBox, "Quiet until");
         quietEndChips = hourChips(quietBox, false);
+        // v3.18 (R9): smart checks + the morning briefing.
+        condBtn = toggleButton(alertBody, new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                onCheckConditionsToggled();
+            }
+        });
+        briefingBtn = toggleButton(alertBody,
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        onBriefingToggled();
+                    }
+                });
+        sectionNote(alertBody, "Smart check conditions: a "
+                + "scheduled check can wait for the state its "
+                + "record asks for (charging, Wi-Fi) before its "
+                + "reminder posts — it re-checks every 30 minutes "
+                + "and posts anyway after 6 hours, so a check is "
+                + "late, never lost. The conditions on a check "
+                + "are set on its own row in Goals. The morning "
+                + "briefing: on the day's first open, the app "
+                + "shows (and reads, when speech is on) what your "
+                + "watched checks found — changes first, checks "
+                + "that could not complete, then new watches; "
+                + "unchanged checks are counted, not recited.");
         sectionNote(alertBody, "The buzz when a run ends "
                 + "off-screen. Watched-goal change alerts are "
                 + "not gated by this — a change is the watch's "
@@ -1546,6 +2603,59 @@ public class MainActivity extends Activity {
                 + "every Ghost Hands notification, these appear "
                 + "only if you have allowed notifications for "
                 + "the app in system settings.");
+        // v3.27 (R13): unattended checks — the two grants'
+        // status and the doors to them. The status is re-read
+        // whenever this screen shows (refreshUnattendedStatus
+        // rides refreshSettingsUi): the grants change in
+        // Android's settings, outside the app. The per-goal
+        // opt-in itself lives on each goal's row in Goals —
+        // there is deliberately no global switch here:
+        // unattended is set up per check, by hand.
+        smallLabel(alertBody, "Unattended checks — a "
+                + "scheduled check that runs itself (R13)");
+        unattendedText = new TextView(this);
+        unattendedText.setTextSize(11);
+        unattendedText.setTextColor(COL_MUTED);
+        LinearLayout.LayoutParams unLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        unLp.topMargin = dp(4);
+        alertBody.addView(unattendedText, unLp);
+        Button unExactBtn = chipButton(
+                "Open Alarms & reminders settings");
+        unExactBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                onOpenExactAlarmSettings();
+            }
+        });
+        LinearLayout.LayoutParams unExactLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        unExactLp.topMargin = dp(6);
+        alertBody.addView(unExactBtn, unExactLp);
+        Button unBattBtn = chipButton(
+                "Open battery settings (Unrestricted)");
+        unBattBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                onOpenBatterySettings();
+            }
+        });
+        LinearLayout.LayoutParams unBattLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        unBattLp.topMargin = dp(6);
+        alertBody.addView(unBattBtn, unBattLp);
+        sectionNote(alertBody, "An unattended check runs "
+                + "only while the phone is charging, under "
+                + "the read-only pack, inside a 10-minute "
+                + "budget, with its whole run in its trail; "
+                + "a missing grant, an unplugged phone, or a "
+                + "wait past 6 hours falls back to the usual "
+                + "reminder. Mark a check unattended on its "
+                + "row in Goals.");
 
         // DIAGNOSTICS (v3.6): the A/B instruments — new section
         // between ALERTS and DATA.
@@ -1672,6 +2782,42 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT);
         lsLp.topMargin = dp(4);
         diagBody.addView(lifetimeStatsText, lsLp);
+        // v3.25 (accessibility eyes): the product face of the
+        // service the spike below experiments with. When the
+        // user has enabled the Ghost Hands accessibility
+        // service, a run whose browser map comes back empty
+        // (or whose DOM perception fails) can read the page
+        // through the node tree instead — read-only: the eyes
+        // inform maps and reads, and every action still flows
+        // through the governed browser hands. The status line
+        // is re-read whenever this screen shows (refreshSpike
+        // Gate refreshes it too: the grant changes in Android's
+        // settings, outside the app). The button is the same
+        // door the spike uses — it opens Android's page; the
+        // grant itself is the user's to give there, never the
+        // app's.
+        smallLabel(diagBody, "Accessibility eyes — "
+                + "read-only page perception");
+        a11yEyesText = new TextView(this);
+        a11yEyesText.setTextSize(11);
+        a11yEyesText.setTextColor(COL_MUTED);
+        LinearLayout.LayoutParams eyesLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        eyesLp.topMargin = dp(4);
+        diagBody.addView(a11yEyesText, eyesLp);
+        Button a11yEyesBtn = chipButton(
+                "Open Android Accessibility settings");
+        a11yEyesBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                onOpenA11ySettings();
+            }
+        });
+        LinearLayout.LayoutParams eyesBtnLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        eyesBtnLp.topMargin = dp(6);
+        diagBody.addView(a11yEyesBtn, eyesBtnLp);
         // v3.14 (Everything Train R6): the accessibility
         // spike — Beyond the Browser, fenced as a spike: an
         // experimental toggle, a state line, and two probes
@@ -2065,6 +3211,31 @@ public class MainActivity extends Activity {
         webView.setVisibility(View.VISIBLE);
         refreshTabStrip();
 
+        // v3.18 (R9 — the morning briefing): the briefing
+        // banner rides directly above the goal card — hidden
+        // until maybeBriefing delivers one (the launch pass
+        // runs after the stores load, so it finds this view
+        // built). A tap dismisses it for the day; the entries
+        // were marked briefed at delivery either way.
+        briefingBanner = new TextView(this);
+        briefingBanner.setTextSize(15);
+        briefingBanner.setTextColor(COL_TEXT);
+        briefingBanner.setBackground(cardBg());
+        briefingBanner.setPadding(dp(12), dp(10), dp(12), dp(10));
+        briefingBanner.setVisibility(View.GONE);
+        LinearLayout.LayoutParams briefingLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        briefingLp.topMargin = dp(12);
+        root.addView(briefingBanner, briefingLp);
+        briefingBanner.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                briefingBanner.setVisibility(View.GONE);
+            }
+        });
+
         // goal card: PROMPT label, borderless input, sparkle at right
         LinearLayout goalCard = new LinearLayout(this);
         goalCard.setOrientation(LinearLayout.VERTICAL);
@@ -2258,6 +3429,9 @@ public class MainActivity extends Activity {
                     updatePill();
                     feed("— stop requested");
                     hapticTick();
+                    // v3.23 (R12): the widget board names the
+                    // stopping window too (beside `stopping`).
+                    widgetPhase(WidgetState.PHASE_STOPPING);
                 }
                 releaseApproval(false);
                 // v3.3: Stop also answers a co-pilot / route
@@ -2644,6 +3818,21 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1);
         wcLp.leftMargin = dp(8);
         cardBtnRow.addView(watchCardBtn, wcLp);
+        // v3.22 (R11): the run report — this card's trail,
+        // rendered as one self-contained HTML file and
+        // shared. The chip exists exactly where a card
+        // exists (the plan's seam): a trail with no stop
+        // makes no card, and therefore no report.
+        Button reportCardBtn = chipButton("Report");
+        reportCardBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                shareLiveReport();
+            }
+        });
+        LinearLayout.LayoutParams rcLp = new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        rcLp.leftMargin = dp(8);
+        cardBtnRow.addView(reportCardBtn, rcLp);
         // v3.12 (R4): the strategy-retry row — up to two
         // counter-move buttons under a stuck run's card, rebuilt
         // by refreshRetryButtons from RetryStrategy's pure
@@ -2658,6 +3847,27 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT);
         rbLp.topMargin = dp(8);
         cardBox.addView(retryBtnRow, rbLp);
+        // v3.18 (R9 — chaining): the continuation row, the
+        // retry row's sibling in the card box: built when a run
+        // finishes, emptied when another card shows (see
+        // refreshChainRow).
+        chainBtnRow = new LinearLayout(this);
+        chainBtnRow.setOrientation(LinearLayout.HORIZONTAL);
+        chainBtnRow.setVisibility(View.GONE);
+        LinearLayout.LayoutParams chainLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        chainLp.topMargin = dp(8);
+        cardBox.addView(chainBtnRow, chainLp);
+        // v3.20 (R10): the live card's ask-about-this-run
+        // panel — built hidden; refreshQaPanels shows it
+        // exactly when this card's trail is a finished record.
+        qaLiveBox = buildQaPanel(true);
+        LinearLayout.LayoutParams qaLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        qaLp.topMargin = dp(10);
+        cardBox.addView(qaLiveBox, qaLp);
         LinearLayout logContainer = new LinearLayout(this);
         logContainer.setOrientation(LinearLayout.VERTICAL);
         logContainer.addView(timelineList);
@@ -2674,6 +3884,8 @@ public class MainActivity extends Activity {
         buildGoalsScreen(host);
         buildRoutesScreen(host);
         buildHistoryScreen(host);
+        // v3.20 (R10): the mission board screen.
+        buildMissionScreen(host);
         buildDrawer(shell);
 
         setContentView(shell);
@@ -2706,7 +3918,34 @@ public class MainActivity extends Activity {
     private void buildGoalsScreen(FrameLayout host) {
         goalsScroll = new ScrollView(this);
         LinearLayout card = screenCard(host, goalsScroll);
-        card.addView(cardLabel("SAVED GOALS"));
+        // v3.22 (R11): the templates shelf rides the TOP of
+        // this screen — it is the "start something new"
+        // surface; the goals list, page watches, and chains
+        // keep their order below it. No new drawer entry
+        // (the drawer's entries are the v3.5 design's).
+        card.addView(cardLabel("TEMPLATES"));
+        TextView tNote = new TextView(this);
+        tNote.setText("Ready-made starting points. Use fills "
+                + "in the blanks — a goal opens in the save "
+                + "editor first, and nothing is stored until "
+                + "you save it.");
+        tNote.setTextSize(11);
+        tNote.setTextColor(COL_MUTED);
+        LinearLayout.LayoutParams tnp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        tnp.topMargin = dp(4);
+        card.addView(tNote, tnp);
+        templatesBox = new LinearLayout(this);
+        templatesBox.setOrientation(LinearLayout.VERTICAL);
+        card.addView(templatesBox, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams sglp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        sglp.topMargin = dp(16);
+        card.addView(cardLabel("SAVED GOALS"), sglp);
         TextView note = new TextView(this);
         note.setText("Tap a goal to load it on the Agent screen. "
                 + "⏰ sets its daily check; 👁 watches its answers "
@@ -2746,6 +3985,43 @@ public class MainActivity extends Activity {
         pageWatchListBox = new LinearLayout(this);
         pageWatchListBox.setOrientation(LinearLayout.VERTICAL);
         card.addView(pageWatchListBox, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+        // v3.18 (R9): chains live in the saved goals' family
+        // too — sequenced goals, run one attended step at a
+        // time (see the chains section below).
+        LinearLayout.LayoutParams chlp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        chlp.topMargin = dp(16);
+        card.addView(cardLabel("CHAINS"), chlp);
+        TextView chNote = new TextView(this);
+        chNote.setText("Goals that run one after another, each "
+                + "starting with the last one's findings. Every "
+                + "step still starts with your tap and runs under "
+                + "its own rules.");
+        chNote.setTextSize(11);
+        chNote.setTextColor(COL_MUTED);
+        LinearLayout.LayoutParams chnp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        chnp.topMargin = dp(4);
+        card.addView(chNote, chnp);
+        Button newChainBtn = chipButton("+ New chain");
+        newChainBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                showChainEditor(null);
+            }
+        });
+        LinearLayout.LayoutParams nchlp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.MATCH_PARENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        nchlp.topMargin = dp(8);
+        card.addView(newChainBtn, nchlp);
+        chainsListBox = new LinearLayout(this);
+        chainsListBox.setOrientation(LinearLayout.VERTICAL);
+        card.addView(chainsListBox, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
     }
@@ -2806,6 +4082,27 @@ public class MainActivity extends Activity {
         card.addView(historyListBox, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
+        // v3.20 (R10): the compare head + result — the head
+        // names the pair once two trails are chosen (each row
+        // carries a Compare chip); the box renders RunCompare's
+        // rows where the card below renders a single run.
+        compareHeadText = new TextView(this);
+        compareHeadText.setTextSize(12);
+        compareHeadText.setTextColor(COL_CYAN);
+        compareHeadText.setVisibility(View.GONE);
+        LinearLayout.LayoutParams chp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        chp.topMargin = dp(10);
+        card.addView(compareHeadText, chp);
+        compareBox = new LinearLayout(this);
+        compareBox.setOrientation(LinearLayout.VERTICAL);
+        compareBox.setVisibility(View.GONE);
+        LinearLayout.LayoutParams cbp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        cbp.topMargin = dp(6);
+        card.addView(compareBox, cbp);
         // The picked run's card, in this screen: the same card
         // content the Agent screen shows (AnswerCard.cardText),
         // its screenshot, and its own Share / Listen controls.
@@ -2866,6 +4163,27 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1);
         hlb.leftMargin = dp(8);
         btnRow.addView(historyListenBtn, hlb);
+        // v3.22 (R11): the History card's Report chip — the
+        // same one path as the live card's (buildAndShareReport).
+        Button historyReportBtn = chipButton("Report");
+        historyReportBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                shareHistoryReport();
+            }
+        });
+        LinearLayout.LayoutParams hrb = new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        hrb.leftMargin = dp(8);
+        btnRow.addView(historyReportBtn, hrb);
+        // v3.20 (R10): the History card's own ask panel — a
+        // separate session from the live card's, in this
+        // card's own screen, exactly as the plan pins.
+        qaHistBox = buildQaPanel(false);
+        LinearLayout.LayoutParams qhp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        qhp.topMargin = dp(10);
+        historyCardBox.addView(qaHistBox, qhp);
         // v3.16 (R8): the downloads store's list — governed
         // downloads and picked files in one place, in the
         // History screen's family. A run can read the text
@@ -2904,6 +4222,254 @@ public class MainActivity extends Activity {
         card.addView(downloadsListBox, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    // ---------------- v3.20 (R10): the mission board --------
+
+    /** The Mission screen: one card holding the live-status
+     *  row and the board's rows. The content is MissionBoard's
+     *  derivation, rebuilt at every entry (refreshMissionBoard)
+     *  — the screen stores nothing of its own. */
+    private void buildMissionScreen(FrameLayout host) {
+        missionScroll = new ScrollView(this);
+        LinearLayout card = screenCard(host, missionScroll);
+        card.addView(cardLabel("MISSION BOARD"));
+        TextView note = new TextView(this);
+        note.setText("Everything you are watching, in one "
+                + "place. Recomputed from your checks each time "
+                + "you open it \u2014 nothing here is stored.");
+        note.setTextSize(11);
+        note.setTextColor(COL_MUTED);
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        nlp.topMargin = dp(4);
+        card.addView(note, nlp);
+        missionLiveRow = new TextView(this);
+        missionLiveRow.setTextSize(12);
+        missionLiveRow.setTextColor(COL_CYAN);
+        missionLiveRow.setVisibility(View.GONE);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        llp.topMargin = dp(8);
+        card.addView(missionLiveRow, llp);
+        missionBoardBox = new LinearLayout(this);
+        missionBoardBox.setOrientation(LinearLayout.VERTICAL);
+        card.addView(missionBoardBox, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT));
+    }
+
+    /** Build the board: read every retained trail once, hand
+     *  the stores and the trails to MissionBoard.derive, and
+     *  render the rows. The board renders CLOSED records only —
+     *  a live run appears as the head's status row, never as a
+     *  verdict. */
+    private void refreshMissionBoard() {
+        if (missionBoardBox == null) return;
+        missionBoardBox.removeAllViews();
+        if (missionLiveRow != null) {
+            if (running) {
+                String g = (goalEdit == null) ? ""
+                        : goalEdit.getText().toString().trim();
+                missionLiveRow.setText((g.length() > 0 ? g : "A run")
+                        + " \u2014 running now");
+                missionLiveRow.setVisibility(View.VISIBLE);
+            } else {
+                missionLiveRow.setVisibility(View.GONE);
+            }
+        }
+        List<MissionBoard.TrailEvents> tes =
+                new ArrayList<MissionBoard.TrailEvents>();
+        File dir = new File(getFilesDir(), "trails");
+        File[] found = dir.listFiles();
+        List<File> files = new ArrayList<File>();
+        if (found != null) {
+            for (int i = 0; i < found.length; i++) {
+                if (found[i].isFile()
+                        && found[i].getName().endsWith(".jsonl")) {
+                    files.add(found[i]);
+                }
+            }
+        }
+        for (int i = 0; i < files.size(); i++) {
+            for (int j = i + 1; j < files.size(); j++) {
+                if (files.get(j).getName()
+                        .compareTo(files.get(i).getName()) > 0) {
+                    File tmp = files.get(i);
+                    files.set(i, files.get(j));
+                    files.set(j, tmp);
+                }
+            }
+        }
+        for (int i = 0; i < files.size(); i++) {
+            List<Map<String, Object>> events =
+                    parseTrailEvents(files.get(i));
+            if (events != null) {
+                tes.add(new MissionBoard.TrailEvents(
+                        files.get(i).getName(), events));
+            }
+        }
+        List<MissionBoard.Row> rows = MissionBoard.derive(
+                savedGoals, pageWatches, tes,
+                System.currentTimeMillis(),
+                java.util.TimeZone.getDefault());
+        if (rows.isEmpty()) {
+            TextView empty = new TextView(this);
+            empty.setText("Nothing is being watched yet. "
+                    + "\ud83d\udc41 on a saved goal watches its "
+                    + "answers for changes; the Watch button on "
+                    + "a page watches the page itself.");
+            empty.setTextSize(12);
+            empty.setTextColor(COL_MUTED);
+            empty.setPadding(dp(4), dp(10), dp(4), dp(6));
+            missionBoardBox.addView(empty);
+            return;
+        }
+        for (int i = 0; i < rows.size(); i++) {
+            missionBoardBox.addView(missionRowView(rows.get(i)));
+        }
+    }
+
+    /** One board row: kind chip + label, the verdict line in
+     *  the answer card's own words (a change carries the
+     *  accent, never red), the streak, the next check. */
+    private View missionRowView(final MissionBoard.Row row) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(roundedBg(COL_CARD_INNER, COL_CARD_EDGE, 10));
+        box.setPadding(dp(10), dp(9), dp(10), dp(9));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        blp.topMargin = dp(8);
+        box.setLayoutParams(blp);
+        TextView head = new TextView(this);
+        head.setText((MissionBoard.KIND_PAGE.equals(row.kind)
+                ? "PAGE \u00b7 " : "GOAL \u00b7 ") + row.label);
+        head.setTextSize(13);
+        head.setTextColor(COL_TEXT);
+        box.addView(head);
+        StringBuilder verdict = new StringBuilder();
+        if (row.hasCompletedVerdict) {
+            if (WatchCompare.CHANGED.equals(row.verdictState)) {
+                verdict.append("changed since ");
+                verdict.append(AnswerCard.watchTimeLabel(
+                        row.verdictSinceMs));
+                if (row.firstDiff.length() > 0) {
+                    verdict.append("\n").append(row.firstDiff);
+                }
+            } else if (WatchCompare.NO_CHANGE.equals(
+                    row.verdictState)) {
+                verdict.append("no change since ");
+                verdict.append(AnswerCard.watchTimeLabel(
+                        row.verdictSinceMs));
+            } else if (WatchCompare.BASELINE.equals(
+                    row.verdictState)) {
+                verdict.append("baseline set ");
+                verdict.append(AnswerCard.watchTimeLabel(
+                        row.verdictTsMs));
+            }
+            if (row.verdictQuiet
+                    && WatchCompare.CHANGED.equals(row.verdictState)) {
+                verdict.append("\nArrived during quiet hours "
+                        + "\u2014 kept quiet until you opened "
+                        + "the app.");
+            }
+        } else if (WatchCompare.NOT_DONE.equals(row.verdictState)) {
+            verdict.append("couldn't check this time \u2014 the "
+                    + "baseline is unchanged.");
+        } else if (row.baselineFromRecord) {
+            verdict.append("baseline set ");
+            verdict.append(AnswerCard.watchTimeLabel(
+                    row.baselineTsMs));
+            if (row.baselineSummary.length() > 0) {
+                verdict.append("\n").append(row.baselineSummary);
+            }
+        } else if (row.couldntRunTsMs > 0) {
+            verdict.append("couldn't check this time \u2014 the "
+                    + "baseline is unchanged.");
+        } else {
+            verdict.append("no checks yet");
+        }
+        if (row.couldntRunTsMs > 0
+                && (row.hasCompletedVerdict
+                        || row.baselineFromRecord)) {
+            verdict.append("\nlast check couldn't run ");
+            verdict.append(AnswerCard.watchTimeLabel(
+                    row.couldntRunTsMs));
+        }
+        TextView v = new TextView(this);
+        v.setText(verdict.toString());
+        v.setTextSize(12);
+        v.setTextColor(WatchCompare.CHANGED.equals(row.verdictState)
+                ? COL_CYAN : COL_TEXT);
+        box.addView(v);
+        if (row.streak > 0) {
+            TextView s = new TextView(this);
+            s.setText("quiet streak " + row.streak
+                    + (row.streakOpen ? "+" : ""));
+            s.setTextSize(11);
+            s.setTextColor(COL_MUTED);
+            box.addView(s);
+        }
+        TextView n = new TextView(this);
+        n.setText(row.nextCheck);
+        n.setTextSize(11);
+        n.setTextColor(COL_MUTED);
+        box.addView(n);
+        box.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                onMissionRowTapped(row);
+            }
+        });
+        return box;
+    }
+
+    /** A board row's tap: the newest trail carrying that
+     *  item's verdict, opened as its answer card in History —
+     *  or, for a row with no verdict trail behind it, the
+     *  item's home list. The tap never starts anything. */
+    private void onMissionRowTapped(MissionBoard.Row row) {
+        if (row.evidenceTrail.length() > 0) {
+            File f = new File(new File(getFilesDir(), "trails"),
+                    row.evidenceTrail);
+            if (f.isFile()) {
+                showScreen(NavState.HISTORY);
+                showHistoryCard(f);
+                return;
+            }
+        }
+        showScreen(NavState.GOALS);
+    }
+
+    /** Parse a trail file into its events (oldest first),
+     *  skipping junk lines exactly as the answer card does.
+     *  Null when the file cannot be read at all. */
+    private static List<Map<String, Object>> parseTrailEvents(
+            File file) {
+        String text = readTextFile(file);
+        if (text == null) return null;
+        List<Map<String, Object>> out =
+                new ArrayList<Map<String, Object>>();
+        String[] lines = text.split("\n");
+        for (int i = 0; i < lines.length; i++) {
+            String line = lines[i].trim();
+            if (line.length() == 0) continue;
+            Object o = null;
+            try {
+                o = Json.parse(line);
+            } catch (Exception ignored) {
+                o = null;
+            }
+            if (o instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> m = (Map<String, Object>) o;
+                out.add(m);
+            }
+        }
+        return out;
     }
 
     /** v3.16 (R8): the downloads list's rows — name, size,
@@ -3070,6 +4636,128 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    /** v3.30: "Import trained model" — the system document
+     *  picker (SAF; no permission is asked or needed), like
+     *  the file reader's. The picked stream is copied into
+     *  the model store by ModelStore.importModel, which
+     *  verifies size + sha256 against the trained pin as it
+     *  copies; only the exact trained file lands. Locked
+     *  while a run, a download or another import is in
+     *  flight — importing is an idle-time act, like
+     *  switching brains. */
+    private void pickTrainedModel() {
+        if (running) {
+            Toast.makeText(this, "Finish the run before "
+                    + "importing a model", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (downloading || importing) return;
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        try {
+            startActivityForResult(intent, REQ_IMPORT_MODEL);
+        } catch (Exception e) {
+            Toast.makeText(this, "No file picker is available",
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** v3.30: the import worker. The store judges the copy;
+     *  this flow only moves its progress and verdict onto
+     *  the model card and the feed, honestly either way. */
+    private void startTrainedImport(final android.net.Uri uri) {
+        importing = true;
+        refreshModelUi();
+        final ModelStore.Spec spec = ModelStore.TRAINED;
+        statusText.setText("Importing " + spec.displayName + "...");
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() {
+                final String[] lastStatus = { "" };
+                boolean ok = false;
+                java.io.InputStream in = null;
+                try {
+                    in = getContentResolver().openInputStream(uri);
+                    if (in == null) {
+                        lastStatus[0] = "That file could not be "
+                                + "opened. Nothing was imported.";
+                    } else {
+                        ok = store.importModel(spec, in,
+                                new ModelStore.Listener() {
+                            @Override public void onProgress(
+                                    final long done,
+                                    final long total) {
+                                runOnUiThread(new Runnable() {
+                                    @Override public void run() {
+                                        progressBar.setProgress(
+                                                total > 0
+                                                ? (int) Math.min(1000L,
+                                                        1000L * done / total)
+                                                : 0);
+                                        statusText.setText("Importing "
+                                                + spec.shortName + ": "
+                                                + done + " / " + total);
+                                    }
+                                });
+                            }
+                            @Override public void onStatus(
+                                    final String s) {
+                                lastStatus[0] = s;
+                                runOnUiThread(new Runnable() {
+                                    @Override public void run() {
+                                        statusText.setText(s);
+                                    }
+                                });
+                            }
+                        });
+                    }
+                } catch (Exception e) {
+                    lastStatus[0] = "Import failed (" + e.getMessage()
+                            + "). Nothing was imported.";
+                } finally {
+                    if (in != null) {
+                        try { in.close(); } catch (Exception ignored) { }
+                    }
+                }
+                importing = false;
+                final boolean doneOk = ok;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        refreshModelUi();
+                        feed(lastStatus[0]);
+                        if (doneOk
+                                && ModelStore.TRAINED_ID.equals(activeModelId)
+                                && !running) {
+                            statusText.setText("Loading "
+                                    + spec.displayName + "...");
+                            new Thread(new Runnable() {
+                                @Override public void run() {
+                                    final boolean loaded = engine.load(
+                                            store.fileFor(spec)
+                                                    .getAbsolutePath());
+                                    runOnUiThread(new Runnable() {
+                                        @Override public void run() {
+                                            statusText.setText(loaded
+                                                    ? spec.displayName
+                                                            + " loaded and active."
+                                                    : "Could not load "
+                                                            + spec.displayName
+                                                            + "; it will load "
+                                                            + "at the next run.");
+                                            refreshModelUi();
+                                        }
+                                    });
+                                }
+                            }, "model-import-load").start();
+                        }
+                    }
+                });
+            }
+        });
+        t.setName("model-import");
+        t.start();
+    }
+
     /** v3.16 (R8): "Read a file" — the system file picker
      *  (SAF; no permission is asked or needed). The picked
      *  file is COPIED into the store at pick time, so a run
@@ -3090,6 +4778,16 @@ public class MainActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode,
                                     Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        // v3.30: the trained-model import has its own code —
+        // its result starts the import worker, never the
+        // file-reader flow below.
+        if (requestCode == REQ_IMPORT_MODEL) {
+            if (resultCode == RESULT_OK && data != null
+                    && data.getData() != null) {
+                startTrainedImport(data.getData());
+            }
+            return;
+        }
         if (requestCode != REQ_PICK_FILE
                 || resultCode != RESULT_OK
                 || data == null || data.getData() == null) {
@@ -3271,10 +4969,13 @@ public class MainActivity extends Activity {
         drawerPanel.addView(rule, rlp);
 
         // Items — flat, drawer order is NavState's order.
-        final String[] labels = {"Agent", "Saved Goals", "Routes",
-                "History", "Settings"};
-        final int[] screens = {NavState.AGENT, NavState.GOALS,
-                NavState.ROUTES, NavState.HISTORY, NavState.SETTINGS};
+        // v3.20 (R10): Mission sits second, right under Agent —
+        // the ids are unchanged, only this display order is new.
+        final String[] labels = {"Agent", "Mission", "Saved Goals",
+                "Routes", "History", "Settings"};
+        final int[] screens = {NavState.AGENT, NavState.MISSION,
+                NavState.GOALS, NavState.ROUTES, NavState.HISTORY,
+                NavState.SETTINGS};
         drawerItemViews = new TextView[labels.length];
         for (int i = 0; i < labels.length; i++) {
             final int target = screens[i];
@@ -3327,10 +5028,15 @@ public class MainActivity extends Activity {
                 ? View.VISIBLE : View.GONE);
         settingsScroll.setVisibility(s == NavState.SETTINGS
                 ? View.VISIBLE : View.GONE);
+        // v3.20 (R10): the mission board joins the swap.
+        if (missionScroll != null) {
+            missionScroll.setVisibility(s == NavState.MISSION
+                    ? View.VISIBLE : View.GONE);
+        }
         if (drawerItemViews != null) {
-            final int[] screens = {NavState.AGENT, NavState.GOALS,
-                    NavState.ROUTES, NavState.HISTORY,
-                    NavState.SETTINGS};
+            final int[] screens = {NavState.AGENT, NavState.MISSION,
+                    NavState.GOALS, NavState.ROUTES,
+                    NavState.HISTORY, NavState.SETTINGS};
             for (int i = 0; i < drawerItemViews.length; i++) {
                 boolean current = screens[i] == s;
                 drawerItemViews[i].setTextColor(current
@@ -3340,6 +5046,9 @@ public class MainActivity extends Activity {
                         : null);
             }
         }
+        // v3.17: the mascot lives on the Agent screen only —
+        // its gate rides this same visibility choke point.
+        updateMascot();
     }
 
     /** Navigate: the state decides (NavState.goTo — the drawer
@@ -3349,12 +5058,28 @@ public class MainActivity extends Activity {
     private void showScreen(int s) {
         boolean wasDrawerOpen = nav.drawerOpen();
         nav.goTo(s);
+        // v3.20 (R10): navigation discards both ask-about-a-run
+        // conversations — the thread belongs to the screen
+        // visit, never to the record.
+        resetQaSessions();
+        // v3.20 (R10): the board is derived at entry, like every
+        // list here — what it shows is the record as it stands.
+        if (s == NavState.MISSION) refreshMissionBoard();
+        // v3.22 (R11): the shelf re-renders on entry like
+        // every list here (it is a render of the catalogue —
+        // nothing about it persists).
+        if (s == NavState.GOALS) refreshTemplatesShelf();
         if (s == NavState.GOALS) refreshGoalsList();
         // v3.16 (R8): the page watches ride the Goals screen,
         // the downloads list rides History — same refresh on
         // entry discipline.
         if (s == NavState.GOALS) refreshPageWatchList();
+        // v3.18 (R9): the chains ride the Goals screen too.
+        if (s == NavState.GOALS) refreshChainsList();
         if (s == NavState.ROUTES) refreshRoutesList();
+        // v3.20 (R10): compare selection is session-only —
+        // entering History starts unselected, every time.
+        if (s == NavState.HISTORY) clearCompareSelection();
         if (s == NavState.HISTORY) refreshHistoryList();
         if (s == NavState.HISTORY) refreshDownloadsList();
         // v3.8: the lifetime stats are computed when the
@@ -3528,6 +5253,25 @@ public class MainActivity extends Activity {
 
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                // v3.32: SCHEME policy on page-initiated
+                // navigations (NavScheme's doc carries the
+                // scope: schemes only — host policy stays the
+                // Governor's, per agent action). Through
+                // v3.31 this returned false for everything, so
+                // a page could navigate the view to file:,
+                // javascript:, data:, content:, intent: and
+                // be waved through. A refused navigation is
+                // cancelled and fed — never silent.
+                if (!NavScheme.allowed(url)) {
+                    String scheme = NavScheme.schemeOf(url);
+                    feed("Blocked a page navigation to a "
+                            + (scheme.length() > 0
+                                    ? "\"" + scheme + ":\""
+                                    : "scheme-less")
+                            + " address - only http/https pages "
+                            + "can open here");
+                    return true; // cancelled: do not load
+                }
                 return false; // stay in our WebView
             }
         });
@@ -3685,8 +5429,11 @@ public class MainActivity extends Activity {
     // (refused up front when the size is known, cut off
     // mid-stream when it is not); the store keeps at most
     // 30 files / 100 MB (Downloads' retention, oldest first);
-    // an http re-fetch follows the platform's redirects and
-    // sends the WebView's cookies for that URL — a download
+    // an http re-fetch follows redirects BY HAND (v3.32:
+    // DownloadRedirects — at most 5 hops, every destination
+    // re-judged through Downloads.decide, https -> http
+    // refused, cookies never carried across a host change)
+    // and sends the WebView's cookies for that URL — a download
     // the server personalizes per POST cannot be replayed
     // this way and will fail honestly rather than save the
     // error page (the content type is checked against the
@@ -3901,35 +5648,112 @@ public class MainActivity extends Activity {
 
     /** The http(s) transport: a plain GET on a worker thread,
      *  the WebView's cookies riding along, the size cap
-     *  enforced as the bytes arrive. */
+     *  enforced as the bytes arrive. v3.32: redirects are
+     *  followed BY HAND (DownloadRedirects) — automatic
+     *  following is off, so every hop's destination is
+     *  re-judged through Downloads.decide under the pack
+     *  in force (the very evaluation the offered address
+     *  got) before it is fetched; an https -> http hop is
+     *  refused outright, and cookies are never carried
+     *  across a host change. Through v3.31 the platform
+     *  rode the chain unjudged, so a permitted host could
+     *  302 the fetch to a blocked domain and the bytes
+     *  arrived anyway. */
     private void fetchHttpDownload(String url, String userAgent,
                                    String name, String mime,
                                    Governor.Decision decision,
                                    Boolean approved) {
         java.io.InputStream in = null;
         try {
-            java.net.HttpURLConnection conn =
-                    (java.net.HttpURLConnection)
-                            new java.net.URL(url).openConnection();
-            conn.setConnectTimeout(30000);
-            conn.setReadTimeout(60000);
-            conn.setInstanceFollowRedirects(true);
-            if (userAgent != null && userAgent.length() > 0) {
-                conn.setRequestProperty("User-Agent", userAgent);
-            }
-            String cookies = android.webkit.CookieManager
-                    .getInstance().getCookie(url);
-            if (cookies != null && cookies.length() > 0) {
-                conn.setRequestProperty("Cookie", cookies);
-            }
-            int code = conn.getResponseCode();
-            if (code < 200 || code >= 300) {
-                recordDownload(name, mime, -1, url, decision,
-                        "failed", approved,
-                        "the server answered " + code);
-                feed("Download failed (server " + code + "): " + name);
-                return;
-            }
+            final Governor.Policy hopPackPolicy =
+                    downloadPack().policy;
+            final String hopName = name;
+            final String hopMime = mime;
+            DownloadRedirects.Policy hopPolicy =
+                    new DownloadRedirects.Policy() {
+                        @Override public String denialFor(
+                                String hopUrl) {
+                            Governor.Decision d =
+                                    Downloads.decide(
+                                            hopPackPolicy,
+                                            hopName, hopMime,
+                                            hopUrl);
+                            return Governor.DENY.equals(
+                                    d.outcome) ? d.reason : null;
+                        }
+                    };
+            String current = url;
+            String previous = null;
+            int hops = 0;
+            java.net.HttpURLConnection conn = null;
+            while (true) {
+                conn = (java.net.HttpURLConnection)
+                        new java.net.URL(current).openConnection();
+                conn.setConnectTimeout(30000);
+                conn.setReadTimeout(60000);
+                conn.setInstanceFollowRedirects(false);
+                if (userAgent != null && userAgent.length() > 0) {
+                    conn.setRequestProperty("User-Agent", userAgent);
+                }
+                if (DownloadRedirects.sendCookies(previous,
+                        current)) {
+                    String cookies = android.webkit.CookieManager
+                            .getInstance().getCookie(current);
+                    if (cookies != null && cookies.length() > 0) {
+                        conn.setRequestProperty("Cookie", cookies);
+                    }
+                }
+                int code = conn.getResponseCode();
+                if (DownloadRedirects.isRedirect(code)) {
+                    String location =
+                            conn.getHeaderField("Location");
+                    conn.disconnect();
+                    if (location == null
+                            || location.trim().length() == 0) {
+                        // A redirect with nowhere to go is
+                        // just the server's answer, in the
+                        // standing failure shape.
+                        recordDownload(name, mime, -1, url,
+                                decision, "failed", approved,
+                                "the server answered " + code);
+                        feed("Download failed (server " + code
+                                + "): " + name);
+                        return;
+                    }
+                    String next = DownloadRedirects.resolve(
+                            current, location);
+                    if (next == null) {
+                        recordDownload(name, mime, -1, url,
+                                decision, "failed", approved,
+                                "the server sent an unreadable "
+                                        + "redirect");
+                        feed("Download failed (unreadable "
+                                + "redirect): " + name);
+                        return;
+                    }
+                    String denial = DownloadRedirects.hopDenial(
+                            hopPolicy, current, next, hops);
+                    if (denial != null) {
+                        recordDownload(name, mime, -1, url,
+                                decision, "failed", approved,
+                                "redirect refused: " + denial);
+                        feed("Download failed (redirect "
+                                + "refused: " + denial + "): "
+                                + name);
+                        return;
+                    }
+                    previous = current;
+                    current = next;
+                    hops++;
+                    continue;
+                }
+                if (code < 200 || code >= 300) {
+                    recordDownload(name, mime, -1, url, decision,
+                            "failed", approved,
+                            "the server answered " + code);
+                    feed("Download failed (server " + code + "): " + name);
+                    return;
+                }
             // A non-html offer answered with an html page is a
             // login wall or an error page wearing the file's
             // name — fail honestly rather than save it.
@@ -3964,6 +5788,8 @@ public class MainActivity extends Activity {
             saveDownloadBytes(buf.toByteArray(), name,
                     servedType.length() > 0 ? servedType : mime,
                     url, decision, approved);
+            return;
+            }
         } catch (Exception e) {
             recordDownload(name, mime, -1, url, decision, "failed",
                     approved, "fetch failed: " + e.getMessage());
@@ -4483,6 +6309,17 @@ public class MainActivity extends Activity {
                     + " bytes, sha256 verified).");
             progressBar.setProgress(1000);
             downloadBtn.setVisibility(View.GONE);
+        } else if (spec.isImport()) {
+            // v3.30: the trained planner has no download —
+            // the model card's action imports it from a file.
+            statusText.setText(spec.displayName + " not imported yet ("
+                    + ModelStore.gbLabel(spec) + ", one time — "
+                    + "pick the file from your Drive).");
+            progressBar.setProgress(0);
+            downloadBtn.setVisibility(View.VISIBLE);
+            downloadBtn.setEnabled(!downloading && !importing);
+            downloadBtn.setText("Import trained model ("
+                    + ModelStore.gbLabel(spec) + ")");
         } else {
             long have = store.partialBytes(spec);
             if (have > 0) {
@@ -4499,6 +6336,10 @@ public class MainActivity extends Activity {
             downloadBtn.setText("Download " + spec.shortName + " ("
                     + ModelStore.gbLabel(spec) + ")");
         }
+        if (importModelBtn != null) {
+            importModelBtn.setEnabled(!running && !downloading
+                    && !importing);
+        }
         refreshBrainChips();
         refreshGrammarUi();
         refreshAbout();
@@ -4511,16 +6352,18 @@ public class MainActivity extends Activity {
      *  and both chips lock while a run or a download is in flight
      *  (switching is an idle-time act). */
     private void refreshBrainChips() {
-        if (modelQ4Btn == null || modelQ5Btn == null) return;
-        ModelStore.Spec[] specs = { ModelStore.Q4, ModelStore.Q5 };
-        Button[] chips = { modelQ4Btn, modelQ5Btn };
+        if (modelQ4Btn == null || modelQ5Btn == null
+                || modelTrainedBtn == null) return;
+        ModelStore.Spec[] specs = { ModelStore.Q4, ModelStore.Q5,
+                ModelStore.TRAINED };
+        Button[] chips = { modelQ4Btn, modelQ5Btn, modelTrainedBtn };
         for (int i = 0; i < specs.length; i++) {
             boolean active = specs[i].id.equals(activeModelId);
             boolean downloaded = store.ready(specs[i]);
             chips[i].setText(ModelStore.pickerLabel(specs[i], active, downloaded));
             chips[i].setTextColor(active ? COL_CYAN
                     : (downloaded ? COL_TEXT : COL_MUTED));
-            chips[i].setEnabled(!running && !downloading);
+            chips[i].setEnabled(!running && !downloading && !importing);
         }
     }
 
@@ -4535,7 +6378,7 @@ public class MainActivity extends Activity {
                     Toast.LENGTH_SHORT).show();
             return;
         }
-        if (downloading) return;
+        if (downloading || importing) return;
         ModelStore.Spec spec = ModelStore.specFor(id);
         if (spec == null || spec.id.equals(activeModelId)) {
             refreshModelUi();
@@ -4570,6 +6413,13 @@ public class MainActivity extends Activity {
             });
             t.setName("model-switch-load");
             t.start();
+        } else if (spec.isImport()) {
+            // v3.30: an unimported trained planner has
+            // nothing to download — the tap's intent is to
+            // use it, so offer its arrival: the picker.
+            feed("The trained planner is not imported yet — "
+                    + "pick its file to bring it in.");
+            pickTrainedModel();
         } else {
             startDownload();
         }
@@ -4612,6 +6462,76 @@ public class MainActivity extends Activity {
         feed(grammarOn
                 ? "Output grammar lock: ON (experimental, v2.4 behaviour)."
                 : "Output grammar lock: OFF (stable, pre-v2.4 behaviour).");
+    }
+
+    // ---------------- v3.29: the planner brain --------------
+
+    /** The stored Fireworks API key ("" when none) — read
+     *  straight from the private preferences. The key is a
+     *  credential, not a Settings value: persistSettings
+     *  never carries it, the run marker never captures it,
+     *  and nothing logs it. */
+    private String fireworksApiKey() {
+        return getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+                .getString(CloudBrain.PREF_API_KEY, "");
+    }
+
+    /** v3.29: a planner-brain chip tap. The choice persists
+     *  through the settings model and applies from the next
+     *  run (a run captures its brain at Start, like every
+     *  run rule). The feed line names the consequence in the
+     *  open — choosing the cloud says the sending out loud. */
+    private void onBrainPicked(String id) {
+        if (id.equals(settings.brain)) {
+            refreshSettingsUi();
+            return;
+        }
+        settings.brain = id;
+        persistSettings();
+        refreshSettingsUi();
+        if (Settings.BRAIN_FIREWORKS.equals(id)) {
+            feed("Planner brain: Fireworks cloud (from the "
+                    + "next run). Each step's prompt — the "
+                    + "goal, the page's text and its element "
+                    + "map — will be sent to Fireworks to plan "
+                    + "the step: page content leaves the phone."
+                    + (CloudBrain.keyPresent(fireworksApiKey())
+                            ? "" : " No API key is set yet — "
+                            + "runs will not start until one is "
+                            + "added above."));
+        } else {
+            feed("Planner brain: on-device (from the next "
+                    + "run). Nothing leaves the phone.");
+        }
+    }
+
+    /** v3.29: the key field's commit (the home page field's
+     *  road: Done or focus loss). The value is trimmed;
+     *  an empty field clears the key. Nothing about the
+     *  value itself is ever fed or logged — the feed line
+     *  says only that a key was saved or cleared. */
+    private void commitCloudKey() {
+        if (cloudKeyEdit == null) return;
+        String v = cloudKeyEdit.getText().toString().trim();
+        if (v.equals(fireworksApiKey())) {
+            refreshCloudBrainUi();
+            return;
+        }
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString(CloudBrain.PREF_API_KEY, v).apply();
+        refreshCloudBrainUi();
+        feed(v.length() == 0
+                ? "Fireworks API key cleared."
+                : "Fireworks API key saved on this phone.");
+    }
+
+    /** v3.29: the BRAIN status line — CloudBrain's one
+     *  wording for the brain in force and the key's state. */
+    private void refreshCloudBrainUi() {
+        if (cloudBrainStatus == null || settings == null) return;
+        cloudBrainStatus.setText(CloudBrain.statusLine(
+                settings.brain,
+                CloudBrain.keyPresent(fireworksApiKey())));
     }
 
     // ---------------- v3.4: settings (the accordion) ------------
@@ -4838,6 +6758,8 @@ public class MainActivity extends Activity {
         refreshToggle(voiceBtn, "Voice goals", settings.voiceOn);
         refreshToggle(speakFinishBtn, "Speak the answer on finish",
                 settings.speakOnFinish);
+        refreshToggle(voiceLoopBtn, "Voice loop",
+                settings.voiceLoopOn);
         refreshToggle(buzzBtn, "Finish buzz", settings.buzzOn);
         refreshChoices(shotChips, indexOfInt(
                 Settings.SHOTS_CHOICES, settings.shotsKept));
@@ -4876,6 +6798,19 @@ public class MainActivity extends Activity {
                 settings.finishBeepOn);
         refreshToggle(quietBtn, "Watch quiet hours",
                 settings.quietHoursOn);
+        // v3.18 (R9): the smart-checks and briefing toggles.
+        refreshToggle(condBtn, "Smart check conditions",
+                settings.checkConditionsOn);
+        refreshToggle(briefingBtn, "Morning briefing",
+                settings.briefingOn);
+        // v3.27 (R13): the unattended grants status re-reads
+        // live (the grants live in Android's settings).
+        refreshUnattendedStatus();
+        // v3.29: the planner-brain choice mirrors the same
+        // way, and its status line re-judges the key's state.
+        refreshChoices(brainChips, indexOfStr(
+                Settings.BRAIN_IDS, settings.brain));
+        refreshCloudBrainUi();
         refreshChoices(quietStartChips, settings.quietStartHour);
         refreshChoices(quietEndChips, settings.quietEndHour);
         if (quietBox != null) {
@@ -5201,7 +7136,8 @@ public class MainActivity extends Activity {
             label.setText(spec.shortName + (present
                     ? " — " + ModelStore.humanSize(f.length())
                             + " on phone"
-                    : " — not downloaded"));
+                    : spec.isImport() ? " — not imported"
+                            : " — not downloaded"));
             label.setTextSize(12);
             label.setTextColor(COL_TEXT);
             row.addView(label, new LinearLayout.LayoutParams(0,
@@ -5251,6 +7187,17 @@ public class MainActivity extends Activity {
      *  started since the row was drawn): a model that has
      *  become protected since is refused, never deleted. */
     private void onDeleteModel(final ModelStore.Spec spec) {
+        // v3.30: an import in flight owns the staging file
+        // and will rename over this model's file — deleting
+        // mid-import would race it. Refuse, like a download.
+        if (importing && ModelStore.TRAINED_ID.equals(spec.id)) {
+            Toast.makeText(this, spec.shortName
+                    + " is importing right now — delete is "
+                    + "refused until it finishes",
+                    Toast.LENGTH_SHORT).show();
+            refreshModelManager();
+            return;
+        }
         File f = store.fileFor(spec);
         boolean inFlight = downloading
                 && spec.id.equals(downloadingId);
@@ -5274,8 +7221,13 @@ public class MainActivity extends Activity {
                 .setMessage("Delete " + spec.shortName + " ("
                         + ModelStore.humanSize(size)
                         + ")? The file leaves the phone; it can "
-                        + "be downloaded again whenever you want "
-                        + "it. The BRAIN model, the other model, "
+                        + (spec.isImport()
+                                ? "be imported again from your "
+                                        + "file whenever you want "
+                                        + "it"
+                                : "be downloaded again whenever "
+                                        + "you want it")
+                        + ". The BRAIN model, the other model, "
                         + "settings and everything else are "
                         + "untouched.")
                 .setNegativeButton("Cancel", null)
@@ -5410,6 +7362,12 @@ public class MainActivity extends Activity {
         refreshSettingsUi();
     }
 
+    private void onVoiceLoopToggled() {
+        settings.voiceLoopOn = !settings.voiceLoopOn;
+        persistSettings();
+        refreshSettingsUi();
+    }
+
     private void onBuzzToggled() {
         settings.buzzOn = !settings.buzzOn;
         persistSettings();
@@ -5448,6 +7406,11 @@ public class MainActivity extends Activity {
         persistSettings();
         refreshSettingsUi();
         updatePill();
+        // v3.17: the mascot reads the flag at animation time
+        // too — toggling mid-run settles or resumes it at
+        // once (updatePill already re-judged it; this call
+        // names the mascot's half of the contract).
+        updateMascot();
         feed("Reduce motion: " + (settings.reduceMotion
                 ? "ON — the pill holds steady and the drawer snaps."
                 : "OFF — the pill breathes and the drawer slides."));
@@ -5529,6 +7492,43 @@ public class MainActivity extends Activity {
                         + "; changes inside the window wait quietly "
                         + "on their cards."
                 : "OFF — changes alert as they land."));
+    }
+
+    // v3.18 (R9): the smart-checks master switch. Flipping it
+    // re-judges nothing retroactively: conditions are judged
+    // at fire time, so the next firing of every conditioned
+    // check simply follows the new posture; outstanding
+    // deferrals are pruned at the next launch (and a posted
+    // check clears its own).
+    private void onCheckConditionsToggled() {
+        settings.checkConditionsOn = !settings.checkConditionsOn;
+        persistSettings();
+        refreshSettingsUi();
+        refreshGoalsList();
+        refreshPageWatchList();
+        feed("Smart check conditions: " + (settings.checkConditionsOn
+                ? "ON — a check whose record asks for charging "
+                        + "or Wi-Fi waits for it before its "
+                        + "reminder posts (re-checks every 30 "
+                        + "minutes, posts anyway after 6 hours)."
+                : "OFF — every check posts at its time, as "
+                        + "before."));
+    }
+
+    // v3.18 (R9): the morning briefing switch. Turning it on
+    // does not back-date the day stamp — the next launch is
+    // the day's first open WITH the briefing on, and it
+    // briefs whatever backlog the log holds.
+    private void onBriefingToggled() {
+        settings.briefingOn = !settings.briefingOn;
+        persistSettings();
+        refreshSettingsUi();
+        feed("Morning briefing: " + (settings.briefingOn
+                ? "ON — on the day's first open, what your "
+                        + "watched checks found shows above the "
+                        + "goal field, and is read aloud when "
+                        + "speech is available."
+                : "OFF."));
     }
 
     private void onQuietStartPicked(int hour) {
@@ -5769,6 +7769,79 @@ public class MainActivity extends Activity {
         a11yGateText.setText(SpikeGate.gateLine(
                 GhostA11yService.instance() != null,
                 settings.a11ySpikeOn));
+        // v3.25: the eyes' status row rides the same refresh
+        // (same screen, same question — is the service on?).
+        if (a11yEyesText != null) {
+            a11yEyesText.setText(A11yEyes.statusLine(
+                    GhostA11yService.instance() != null));
+        }
+    }
+
+    /** v3.27 (R13): the unattended grants status, re-read
+     *  live — the grants live in Android's settings and can
+     *  change while this screen sits open behind them. */
+    private void refreshUnattendedStatus() {
+        if (unattendedText == null) return;
+        unattendedText.setText(Unattended.grantStatusLine(
+                Alerts.canScheduleExact(this),
+                Alerts.batteryExempt(this)));
+    }
+
+    /** Navigation only: Android's Alarms & reminders page
+     *  for this app (the exact-alarm grant's door, spike
+     *  §2). The app cannot grant itself exact alarms — this
+     *  button goes to the door, it does not open it. Before
+     *  Android 12 the grant does not exist (exact alarms
+     *  need none), so the door is the app's own details
+     *  page. */
+    private void onOpenExactAlarmSettings() {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                startActivity(new Intent(
+                        android.provider.Settings
+                                .ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                        android.net.Uri.parse(
+                                "package:" + getPackageName())));
+            } else {
+                startActivity(new Intent(
+                        android.provider.Settings
+                                .ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.parse(
+                                "package:" + getPackageName())));
+            }
+        } catch (Exception e) {
+            feed("Could not open the Alarms & reminders page "
+                    + "from here — find it under Android "
+                    + "Settings > Apps > Ghost Hands > Alarms "
+                    + "& reminders.");
+        }
+    }
+
+    /** Navigation only: the system's battery-exemption
+     *  prompt for this app (spike §5's door — "App battery
+     *  usage > Unrestricted"). The grant is the user's to
+     *  give there; the app asks for the page, never the
+     *  exemption itself. */
+    private void onOpenBatterySettings() {
+        try {
+            startActivity(new Intent(
+                    android.provider.Settings
+                            .ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    android.net.Uri.parse(
+                            "package:" + getPackageName())));
+        } catch (Exception e) {
+            try {
+                startActivity(new Intent(
+                        android.provider.Settings
+                                .ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));
+            } catch (Exception e2) {
+                feed("Could not open the battery settings "
+                        + "page from here — find Ghost Hands "
+                        + "under Android Settings > Apps > "
+                        + "Ghost Hands > Battery and choose "
+                        + "Unrestricted.");
+            }
+        }
     }
 
     /** Navigation only: opens the system's Accessibility
@@ -6195,6 +8268,8 @@ public class MainActivity extends Activity {
     }
 
     private void startDownload() {
+        // v3.30: an import-sourced choice never downloads.
+        if (activeSpec() != null && activeSpec().isImport()) return;
         if (downloading || store.ready(activeSpec())) return;
         downloading = true;
         // v3.7: the model manager's rows read this beside
@@ -6283,10 +8358,16 @@ public class MainActivity extends Activity {
             feedText.setVisibility(View.GONE);
             cardBox.setVisibility(View.VISIBLE);
             if (lastCard != null) {
-                cardText.setText(lastCard.cardText());
+                // v3.18 (R9): a finished chain's card is the
+                // COMBINED card while the live card is the
+                // chain's last step; any other card renders
+                // itself, as always.
+                cardText.setText(chainCardLive()
+                        ? chainCardText : lastCard.cardText());
             }
             refreshCardMedia();
             refreshRetryButtons();
+            refreshChainRow();
         } else {
             feedText.setVisibility(View.GONE);
             cardBox.setVisibility(View.GONE);
@@ -6439,6 +8520,23 @@ public class MainActivity extends Activity {
 
     // ---------------- approval handshake ----------------
 
+    /** v3.23 (R12): a CountDownLatch as a RunControl slice
+     *  latch — the waits below sit in slices so a widget Stop
+     *  (RunControl.requestStop) lands within one slice instead
+     *  of waiting out the pack clock, resolving with exactly
+     *  the in-app Stop's outcomes (their return expressions
+     *  consult the latch beside stopFlag). The in-app Stop is
+     *  unchanged: it still releases the latches instantly. */
+    private static RunControl.SliceLatch sliceLatchOf(
+            final CountDownLatch latch) {
+        return new RunControl.SliceLatch() {
+            @Override public boolean awaitSlice(long sliceMs)
+                    throws InterruptedException {
+                return latch.await(sliceMs, TimeUnit.MILLISECONDS);
+            }
+        };
+    }
+
     private boolean awaitApproval(final GhAction action,
                                   final Governor.Decision decision,
                                   final String describe) {
@@ -6494,6 +8592,11 @@ public class MainActivity extends Activity {
                                     ? View.VISIBLE : View.GONE);
                 }
                 approvalPanel.setVisibility(View.VISIBLE);
+                // v3.17: the mascot's wait begins with the
+                // panel's — the amber bounce is the wait's
+                // signal (MascotState resolves it from the
+                // panel's visibility).
+                mascotEvent(MascotState.APPROVAL_WAITING);
             }
         });
         // v3.6 (needs-me): the wait begins here — if the setting
@@ -6505,23 +8608,33 @@ public class MainActivity extends Activity {
                 true, inForeground)) {
             Alerts.postNeedsYou(MainActivity.this, Alerts.NEEDS_APPROVAL);
         }
+        // v3.23 (R12): the widget board names the wait while
+        // a run is the one waiting (an idle download approval
+        // is no run's wait and writes nothing).
+        if (running) widgetPhase(WidgetState.PHASE_WAITING_APPROVAL);
         boolean answered = false;
         try {
             long timeoutMs = (long) (timeoutSeconds * 1000.0);
             if (timeoutMs <= 0) timeoutMs = 600000L;
-            answered = approvalLatch.await(timeoutMs, TimeUnit.MILLISECONDS);
+            answered = RunControl.awaitSliced(
+                    sliceLatchOf(approvalLatch), timeoutMs);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        if (running) widgetPhase(WidgetState.PHASE_RUNNING);
         runOnUiThread(new Runnable() {
             @Override public void run() {
                 approvalPanel.setVisibility(View.GONE);
+                // v3.17: the wait is over — the mascot
+                // re-resolves to the base state.
+                updateMascot();
             }
         });
         approvalBusy = false;
         // No answer in time (or Stop) counts as a decline: silence is
         // never consent.
-        return answered && approvalResult && !stopFlag;
+        return answered && approvalResult && !stopFlag
+                && !RunControl.stopRequested();
     }
 
     private void releaseApproval(boolean approved) {
@@ -6562,6 +8675,10 @@ public class MainActivity extends Activity {
                 askText.setText("The agent is asking:\n\n" + question);
                 askEdit.setText("");
                 askPanel.setVisibility(View.VISIBLE);
+                // v3.17: the ask wait is the approval
+                // family's other wait — same bounce, same
+                // amber (MascotState.ASK_WAITING).
+                mascotEvent(MascotState.ASK_WAITING);
             }
         });
         // v3.6 (needs-me): an ask that opens while the app is in
@@ -6572,20 +8689,28 @@ public class MainActivity extends Activity {
                 true, inForeground)) {
             Alerts.postNeedsYou(MainActivity.this, Alerts.NEEDS_ASK);
         }
+        // v3.23 (R12): the widget board names the ask wait,
+        // and the wait sits in slices like the approval's.
+        if (running) widgetPhase(WidgetState.PHASE_WAITING_ASK);
         boolean answered = false;
         try {
             long t = timeoutMs;
             if (t <= 0) t = 600000L;
-            answered = askLatch.await(t, TimeUnit.MILLISECONDS);
+            answered = RunControl.awaitSliced(
+                    sliceLatchOf(askLatch), t);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+        if (running) widgetPhase(WidgetState.PHASE_RUNNING);
         runOnUiThread(new Runnable() {
             @Override public void run() {
                 askPanel.setVisibility(View.GONE);
+                // v3.17: the wait is over — re-resolve.
+                updateMascot();
             }
         });
-        if (!answered || !askAnswered || stopFlag) return null;
+        if (!answered || !askAnswered || stopFlag
+                || RunControl.stopRequested()) return null;
         // askAnswerText was captured on the UI thread at the
         // Answer tap, before the countDown (the approvalResult
         // pattern): what the user left in the field, typed or
@@ -6621,13 +8746,23 @@ public class MainActivity extends Activity {
                     @Override public void run() {
                         statusText.setText(s);
                         updatePill();
+                        // v3.23 (R12): the widget's step line
+                        // rides the loop's own status callback
+                        // (the agent field's current step),
+                        // written only when the step moved.
+                        if (running) {
+                            widgetStep(agent != null
+                                    ? agent.currentStep : 0);
+                        }
                     }
                 });
             }
 
             @Override public boolean approve(GhAction action, Governor.Decision decision,
                                              String describe) {
-                if (stopFlag) return false;
+                if (stopFlag || RunControl.stopRequested()) {
+                    return false;
+                }
                 boolean ok = awaitApproval(action, decision, describe);
                 // v3.13 (R5 — site grants): an approved
                 // consequential with the remember tick mints a
@@ -6674,12 +8809,18 @@ public class MainActivity extends Activity {
                 // the ask handshake above. A stopped run never
                 // opens the panel; an unanswered wait returns
                 // null and the loop stops honestly.
-                if (stopFlag) return null;
+                if (stopFlag || RunControl.stopRequested()) {
+                    return null;
+                }
                 return awaitAnswer(question, timeoutMs);
             }
 
             @Override public boolean stopRequested() {
-                return stopFlag;
+                // v3.23 (R12): the widget's stop reaches every
+                // poll the loop makes through this one OR —
+                // Agent.java is untouched, the interface is the
+                // seam (RunControl carries the outside road).
+                return stopFlag || RunControl.stopRequested();
             }
 
             @Override public boolean foreground() {
@@ -6688,7 +8829,9 @@ public class MainActivity extends Activity {
 
             @Override public ElementInfo awaitUserTap(int step,
                                                       long timeoutMs) {
-                if (stopFlag) return null;
+                if (stopFlag || RunControl.stopRequested()) {
+                    return null;
+                }
                 int outcome = runPause(step, null, true, timeoutMs);
                 return (outcome == PAUSE_RESUMED) ? assistTapInfo : null;
             }
@@ -6696,7 +8839,9 @@ public class MainActivity extends Activity {
             @Override public boolean awaitUserResume(int step,
                                                      String message,
                                                      long timeoutMs) {
-                if (stopFlag) return false;
+                if (stopFlag || RunControl.stopRequested()) {
+                    return false;
+                }
                 return runPause(step, message, false, timeoutMs)
                         == PAUSE_RESUMED;
             }
@@ -6762,7 +8907,8 @@ public class MainActivity extends Activity {
         try {
             long t = timeoutMs;
             if (t <= 0) t = 600000L;
-            answered = assistLatch.await(t, TimeUnit.MILLISECONDS);
+            answered = RunControl.awaitSliced(
+                    sliceLatchOf(assistLatch), t);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
@@ -6773,7 +8919,8 @@ public class MainActivity extends Activity {
                 assistPanel.setVisibility(View.GONE);
             }
         });
-        if (!answered || assistStop || stopFlag) return PAUSE_DECLINED;
+        if (!answered || assistStop || stopFlag
+                || RunControl.stopRequested()) return PAUSE_DECLINED;
         if (identifyTap) {
             return pause.resumed() ? PAUSE_RESUMED : PAUSE_DECLINED;
         }
@@ -7027,6 +9174,12 @@ public class MainActivity extends Activity {
     private void finishRunUi(final File trailFile, String goal) {
         running = false;
         stopping = false;
+        // v3.23 (R12): snapshot the finishing run's voice-loop
+        // pins before anything can queue a next start — the
+        // arm judgement at this finish's auto-speak reads the
+        // snapshots, never the live pins.
+        finishWasAgentRun = runIsAgentRun;
+        finishWasLoopStarted = runLoopStarted;
         // v3.12 (R4): the card this finish is about to show
         // belongs to THIS trail — a retry offered on it names
         // this file as its retry_of.
@@ -7057,6 +9210,13 @@ public class MainActivity extends Activity {
             if (watchVerdict != null) {
                 endCard = AnswerCard.fromEvents(
                         currentTrail.events(), goal);
+                // v3.18 (R9): the briefing logs the verdict at
+                // the moment it is recorded — from the values
+                // already in hand here (label, state, first
+                // diff line, whether quiet hours held it).
+                appendBriefingEntry(runSavedName,
+                        BriefingLog.KIND_GOAL, watchVerdict,
+                        watchQuietDeferred);
             }
         }
         // v3.16 (R8): a page-watch check run earns its verdict
@@ -7151,10 +9311,50 @@ public class MainActivity extends Activity {
                 beepFinish();
             }
         }
+        // v3.17 (Mascot Interlude): the finish reaches the
+        // mascot as one-shots — a changed watch bounces
+        // first, then the ending itself: a hop for done, the
+        // held droop for every other ending (the card's
+        // outcome is the trail's terminal event in plain
+        // words — the honest source). A run that never
+        // started has no card and fires nothing. A
+        // page-watch run's verdict has not landed yet at
+        // this line; its change bounce fires in
+        // finishPageWatchCheck instead.
+        if (endCard != null) {
+            if (watchVerdict != null && watchVerdict.changed()) {
+                mascotEvent(MascotState.WATCH_CHANGED);
+            }
+            mascotEvent("done".equals(endCard.outcome)
+                    ? MascotState.FINISHED
+                    : MascotState.STOPPED_DENIED);
+        }
+        // v3.18 (R9 — chaining): the chain bookkeeping for this
+        // finish — advance or pause a pinned chain, offer the
+        // ad-hoc continuation on an ordinary done run, and
+        // clear the step pins either way (they named THIS run;
+        // the next Start mints its own).
+        if (endCard != null) {
+            updateChainAfterRun(endCard, trailFile, goal);
+        } else {
+            cardChainMode = CHAIN_NONE;
+            cardChainTrailFile = null;
+        }
+        runChainName = null;
+        runChainStep = 0;
+        runChainTotal = 0;
         // v2.6: every path that reaches here ended normally
         // (including a failed model load), so the abrupt-end
         // marker has done its job.
         deleteRunMarker();
+        // v3.23 (R12): the widget board settles to finished —
+        // for EVERY ending (done/stuck/error/stopped/budget/
+        // denied), replays included (this is their finish path
+        // too). The card's outcome line when a card exists;
+        // a run that never started leaves its goal named with
+        // an empty line, which the board renders as its Last.
+        widgetRunFinished(endCard != null ? endCard.outcomeLine
+                : "");
         runOnUiThread(new Runnable() {
             @Override public void run() {
                 // v3.12 (R4): a retry's desktop override was
@@ -7626,6 +9826,15 @@ public class MainActivity extends Activity {
         // made, and stays there (the strip locks with the run).
         activateTab(0);
         stopFlag = false;
+        // v3.23 (R12): a stale widget stop from a previous run
+        // must never kill a fresh one — the start path clears
+        // the latch. A replay is never a loop start and never
+        // arms the loop at its finish (the arm's agent-run
+        // leg reads runIsAgentRun).
+        RunControl.clear();
+        runIsAgentRun = false;
+        runLoopStarted = false;
+        runLoopFollowsTrail = null;
         stopping = false;
         running = true;
         refreshTabStrip();
@@ -7650,6 +9859,11 @@ public class MainActivity extends Activity {
         feed("Route: " + route.name);
         feed("Trail: " + trailFile.getAbsolutePath());
         writeRunMarker("route: " + route.name);
+        // v3.23 (R12): the widget board goes live for a replay
+        // exactly as for a run (its finish lands in the same
+        // finishRunUi).
+        widgetRunStarted("Route: " + route.name,
+                trailFile.getName());
 
         pack = PolicyPacks.loadPack(currentPackId);
         hands = new WebHands();
@@ -7840,18 +10054,37 @@ public class MainActivity extends Activity {
                     @Override public void onDone(
                             String utteranceId) {
                         ttsSpeaking = false;
+                        final String id = utteranceId;
                         runOnUiThread(new Runnable() {
                             @Override public void run() {
                                 refreshListenUi();
+                                // v3.23 (R12): the voice loop's
+                                // speech legs ride this listener
+                                // (card done while ARMED speaks
+                                // the prompt; prompt done opens
+                                // the recognizer).
+                                onUtteranceDone(id);
                             }
                         });
                     }
                     @Override public void onError(
                             String utteranceId) {
                         ttsSpeaking = false;
+                        final String id = utteranceId;
                         runOnUiThread(new Runnable() {
                             @Override public void run() {
                                 refreshListenUi();
+                                // v3.23 (R12): a speech error
+                                // closes the loop quietly — no
+                                // conversation, never a stuck
+                                // mic.
+                                if (VoiceLoop.UTTERANCE_CARD
+                                        .equals(id)) {
+                                    voiceLoop.onSpeechError();
+                                } else if (VoiceLoop.UTTERANCE_PROMPT
+                                        .equals(id)) {
+                                    voiceLoop.onPromptError();
+                                }
                             }
                         });
                     }
@@ -7867,7 +10100,11 @@ public class MainActivity extends Activity {
      *  parameter keeps the two paths honest about WHICH card). */
     private void speakCard(AnswerCard card) {
         if (tts == null || !ttsReady || card == null) return;
-        String text = SpeakText.of(card);
+        // v3.18 (R9): the live combined chain card speaks as a
+        // chain (each step through the one spoken form).
+        String text = (card == lastCard && chainCardLive())
+                ? SpeakText.ofChain(lastChainCard)
+                : SpeakText.of(card);
         if (text.length() == 0) return;
         // v3.7 (speech rate): every spoken path lands here —
         // Listen, History's Listen, speak-on-finish — so the
@@ -7889,6 +10126,11 @@ public class MainActivity extends Activity {
     private void autoSpeakCard(final AnswerCard card) {
         if (card == null || ttsFailed) return;
         if (tts != null && ttsReady) {
+            // v3.23 (R12): the arm is recorded BEFORE the speak
+            // call, inside the branch where the speak is issued
+            // (the lazy-init branch below carries it too) — if
+            // the card is not spoken, the loop does not arm.
+            armVoiceLoop(card);
             speakCard(card);
             return;
         }
@@ -7899,6 +10141,7 @@ public class MainActivity extends Activity {
                     ttsReady = true;
                     installTtsListener();
                     refreshListenUi();
+                    armVoiceLoop(card);
                     speakCard(card);
                 } else {
                     ttsFailed = true;
@@ -7907,6 +10150,136 @@ public class MainActivity extends Activity {
                 }
             }
         });
+    }
+
+    // ---------------- v3.23: the voice loop (R12) ------------
+
+    /** The arm: VoiceLoop.armJudgement's legs, read from the
+     *  finish's snapshots (an agent run, not loop-started) and
+     *  the live settings. A refused arm changes nothing — the
+     *  finish speaks exactly as it always has. */
+    private void armVoiceLoop(AnswerCard card) {
+        if (settings == null || card == null) return;
+        voiceLoop.arm(settings.voiceLoopOn, settings.voiceOn,
+                settings.speakOnFinish, "done".equals(card.outcome),
+                inForeground, finishWasLoopStarted, finishWasAgentRun,
+                SpeechRecognizer.isRecognitionAvailable(this));
+    }
+
+    /** The TTS listener's loop legs (UI thread): the card's
+     *  utterance completing while ARMED speaks the prompt; the
+     *  prompt's completing opens the recognizer. */
+    private void onUtteranceDone(String utteranceId) {
+        if (VoiceLoop.UTTERANCE_CARD.equals(utteranceId)) {
+            if (voiceLoop.onSpeechDone()) speakLoopPrompt();
+        } else if (VoiceLoop.UTTERANCE_PROMPT.equals(utteranceId)) {
+            if (voiceLoop.onPromptDone()) openFollowUpListening();
+        }
+    }
+
+    /** Speak the loop's one pinned prompt, at the user's
+     *  speech rate like every utterance. A failed speak is a
+     *  prompt error: the loop closes quietly. */
+    private void speakLoopPrompt() {
+        if (tts == null || !ttsReady) {
+            voiceLoop.onPromptError();
+            return;
+        }
+        tts.setSpeechRate(Settings.speechRateValue(settings != null
+                ? settings.speechRate : Settings.RATE_NORMAL));
+        int r = tts.speak(VoiceLoop.PROMPT_TEXT,
+                TextToSpeech.QUEUE_FLUSH, null,
+                VoiceLoop.UTTERANCE_PROMPT);
+        if (r != TextToSpeech.SUCCESS) {
+            voiceLoop.onPromptError();
+        }
+    }
+
+    /** Open the recognizer for the follow-up — the gates re-
+     *  judged BEFORE it is created (the setting could have
+     *  changed mid-conversation; cheap to re-ask). The loop
+     *  NEVER requests RECORD_AUDIO itself: a permission dialog
+     *  sprung by automation at the end of a spoken answer is
+     *  an ambush, and a phone that never granted it has a
+     *  user who never opted into dictation. Not granted (or
+     *  any leg gone) → the quiet close with its one feed
+     *  line. */
+    private void openFollowUpListening() {
+        boolean ok = settings != null && settings.voiceOn
+                && SpeechRecognizer.isRecognitionAvailable(this)
+                && !(Build.VERSION.SDK_INT >= 23
+                        && checkSelfPermission(
+                                Manifest.permission.RECORD_AUDIO)
+                                != PackageManager.PERMISSION_GRANTED);
+        if (!ok) {
+            closeLoopQuietly(true);
+            return;
+        }
+        feed(VoiceLoop.LISTENING_LINE);
+        if (goalEdit != null) {
+            goalEdit.setHint("Listening for a follow-up goal…");
+        }
+        voiceForAsk = false;
+        voiceForFollowUp = true;
+        startListening();
+    }
+
+    /** The loop's one quiet close: the machine transitions
+     *  exactly once per conversation, so the feed line lands
+     *  exactly once (withLine), and any live recognizer
+     *  session of the loop's is torn down with it. */
+    private void closeLoopQuietly(boolean withLine) {
+        boolean closed = voiceLoop.onSilence();
+        if (voiceForFollowUp) {
+            voiceForFollowUp = false;
+            if (speechRec != null) {
+                speechRec.destroy();
+                speechRec = null;
+            }
+            speechListening = false;
+            refreshMicUi();
+        }
+        restoreGoalHint();
+        if (closed && withLine) feed(VoiceLoop.NO_HEARD_LINE);
+    }
+
+    private void restoreGoalHint() {
+        if (goalEdit != null) {
+            goalEdit.setHint("Goal in plain words, e.g. find "
+                    + "the store's opening hours");
+        }
+    }
+
+    /** The heard follow-up becomes a NORMAL run (§4.4 of the
+     *  plan): the text lands in the goal field where the user
+     *  SEES what will run, the feed names it, the saved-goal
+     *  pin is cleared (the R4 retry rule — a fresh manual run
+     *  of this text must not earn a watch verdict against
+     *  another goal's baseline), the loop provenance is
+     *  pinned for the start to consume, and the start goes
+     *  through the SAME startAgent() the Start button calls —
+     *  battery gate, pack resolution, tab pinning, model
+     *  checks, all of it, because there is no other road in.
+     *  If the battery warning interposes, the goal sits in the
+     *  field behind it and the run begins only on the user's
+     *  confirm; the loop has closed by then either way. */
+    private void startFollowUpRun(String heard) {
+        restoreGoalHint();
+        if (goalEdit != null) {
+            goalEdit.setText(heard);
+            goalEdit.setSelection(heard.length());
+        }
+        feed("Voice follow-up: " + heard);
+        loadedSavedName = null;
+        pendingPageWatchUrl = null;
+        scheduleLaunched = false;
+        pendingRetryOption = null;
+        pendingRetryOf = null;
+        pendingLoopStart = true;
+        pendingLoopFollowsTrail = (lastCardTrailFile != null)
+                ? lastCardTrailFile.getName() : "";
+        startAgent();
+        voiceLoop.onStarted();
     }
 
     // ---------------- v3.3: the co-pilot's tap ------------------
@@ -7941,6 +10314,14 @@ public class MainActivity extends Activity {
      *  or takes it into its dialog, whose "Start anyway" runs
      *  the very same start. */
     private void startAgent() {
+        // v3.23 (R12): a run starting by any other road while
+        // the loop is prompting/listening closes the loop (the
+        // machine's any-other-road leg). A loop-started start
+        // arrives in STARTING, not LISTENING, and is untouched.
+        if (voiceLoop.state() == VoiceLoop.State.PROMPTING
+                || voiceLoop.state() == VoiceLoop.State.LISTENING) {
+            closeLoopQuietly(true);
+        }
         if (batteryGate(new Runnable() {
             @Override public void run() { doStartAgent(); }
         })) {
@@ -7966,8 +10347,32 @@ public class MainActivity extends Activity {
                 ? ModelStore.specFor(ModelStore.resolveId(
                         pendingResume.modelId))
                 : activeSpec();
-        if (!store.ready(startSpec)) {
-            Toast.makeText(this, "Model not downloaded yet", Toast.LENGTH_SHORT).show();
+        // v3.29: a Fireworks-chosen start is judged on its
+        // key, not on a model file — a cloud run needs no
+        // GGUF on the phone, and without a key the choice is
+        // inert: the start refuses and says what unblocks
+        // it. (The run's own brain resolution rides the
+        // eff* block below; a resume's comes from its
+        // marker, as every other resumed rule does.)
+        final boolean startCloud = Settings.BRAIN_FIREWORKS
+                .equals((pendingResume != null)
+                        ? Settings.fromMap(pendingResume.rules)
+                                .brain
+                        : settings.brain);
+        if (startCloud) {
+            if (!CloudBrain.keyPresent(fireworksApiKey())) {
+                Toast.makeText(this, "Fireworks brain: add "
+                        + "your API key in Settings > BRAIN "
+                        + "first", Toast.LENGTH_LONG).show();
+                return;
+            }
+        } else if (!store.ready(startSpec)) {
+            // v3.30: name the trained planner's own unblock.
+            Toast.makeText(this, startSpec.isImport()
+                    ? "Trained model not imported yet — "
+                            + "Settings > BRAIN > Import trained model"
+                    : "Model not downloaded yet",
+                    Toast.LENGTH_LONG).show();
             return;
         }
         final String goal = goalEdit.getText().toString().trim();
@@ -7976,12 +10381,27 @@ public class MainActivity extends Activity {
             return;
         }
         stopFlag = false;
+        // v3.23 (R12): the start path clears the widget-stop
+        // latch (a stale request never kills a fresh run).
+        RunControl.clear();
         stopping = false;
         running = true;
         // v3.15 (R7): the tab strip locks (dimmed, taps off)
         // for the run's duration — refreshTabStrip reads the
         // running flag it was just given.
         refreshTabStrip();
+        // v3.23 (R12): consume a pending voice-loop start the
+        // retry pair's way — the pins name THIS run as the
+        // loop's follow-up (its trail stamps ride the Agent
+        // construction below), and the finish's arm judgement
+        // reads them to refuse a second reopen (the cap).
+        final boolean loopStarted = pendingLoopStart;
+        final String loopFollows = pendingLoopFollowsTrail;
+        pendingLoopStart = false;
+        pendingLoopFollowsTrail = null;
+        runLoopStarted = loopStarted;
+        runLoopFollowsTrail = loopFollows;
+        runIsAgentRun = true;
         // v3.12 (R4): consume a pending strategy retry. The
         // override folds into the run-rule values captured
         // below — fallback engine, desktop mode, style — for
@@ -8031,6 +10451,22 @@ public class MainActivity extends Activity {
         final String effPackId = (resume != null)
                 ? Settings.resolvePack(resume.rule(RunMarker.RULE_PACK))
                 : (scheduleLaunched ? "readonly" : currentPackId);
+        // v3.29: this run's planner brain — the settings'
+        // choice for an ordinary start, the dead run's own
+        // (from its marker) for a resume. A Fireworks run is
+        // built with its CloudBrain here, at Start, from the
+        // key stored on the device; its Agent records carry
+        // the cloud brain's trail id, never a ModelStore id.
+        // An on-device run's runCloud is null and every value
+        // below is exactly what it was through v3.28.
+        final String effBrain = (resume != null)
+                ? resumeRules.brain : settings.brain;
+        final CloudBrain runCloud = Settings.BRAIN_FIREWORKS
+                .equals(effBrain)
+                        ? CloudBrain.fireworks(fireworksApiKey())
+                        : null;
+        final String effAgentModelId = (runCloud != null)
+                ? runCloud.trailModelId() : effModelId;
         // v3.2 (watch mode): pin the run's owner. A run started
         // from a watched saved goal — loaded from the list or
         // from its check notification — earns a verdict when it
@@ -8047,6 +10483,46 @@ public class MainActivity extends Activity {
         // is consumed here whatever the run turns out to be.
         runPageWatchUrl = pendingPageWatchUrl;
         pendingPageWatchUrl = null;
+        // v3.18 (R9): consume a pending chain step the same
+        // way — pin the run's chain identity (the name, this
+        // step's 1-based number, the total) for the run
+        // record's stamps and the finish's bookkeeping, and
+        // take the seed snapshot from the chain-run state the
+        // step continues. A Start with no pending step is an
+        // ordinary run, whatever chain state exists — and the
+        // pins are cleared at the finish, so no later run can
+        // inherit them.
+        final PendingChainStep chainStepPending = pendingChainStep;
+        pendingChainStep = null;
+        runChainName = null;
+        runChainStep = 0;
+        runChainTotal = 0;
+        List<String[]> chainSeeds = null;
+        if (chainStepPending != null) {
+            runChainName = chainStepPending.chainName;
+            runChainStep = chainStepPending.stepIndex + 1;
+            GoalChains.Chain pendingChain = (goalChains != null
+                    && runChainName != null
+                    && runChainName.length() > 0)
+                    ? goalChains.find(runChainName) : null;
+            runChainTotal = (pendingChain != null)
+                    ? pendingChain.steps.size() : 2;
+            if (chainRun != null
+                    && chainStepPending.stepIndex > 0) {
+                chainSeeds = GoalChains.seedPairs(chainRun);
+                if (chainSeeds.isEmpty()) chainSeeds = null;
+            }
+        }
+        final List<String[]> runSeeds = chainSeeds;
+        final String runChainNamePin = runChainName;
+        final int runChainStepPin = runChainStep;
+        final int runChainTotalPin = runChainTotal;
+        final String runChainFromTrail = (chainRun != null)
+                ? chainRun.seedFromTrail : null;
+        if (chainStepPending != null
+                && chainStepPending.noteLine != null) {
+            feed(chainStepPending.noteLine);
+        }
         // v3.8: a watched run's quiet-hours verdict starts
         // undecided; processWatch settles it at the finish.
         watchQuietDeferred = false;
@@ -8085,6 +10561,12 @@ public class MainActivity extends Activity {
                     + "rules (your settings are unchanged)");
         }
         feed("— run started");
+        if (runCloud != null) {
+            // v3.29: the run's own record of its brain — the
+            // trail's model id says the same; the feed says
+            // it in words, with the sending named.
+            feed(CloudBrain.runFeedLine(runCloud.trailModelId()));
+        }
         // v2.6: from here until the run's stop, an abrupt death
         // leaves evidence behind (see RunMarker).
         // v3.13 (R5): a plain manual run's marker is RESUMABLE —
@@ -8097,10 +10579,15 @@ public class MainActivity extends Activity {
             writeRunMarker(goal, trailFile.getName(),
                     captureRunRules(effPackId, resume, resumeRules,
                             effModelId, effGrammar, effFallback,
-                            effDesktop, effStyle));
+                            effDesktop, effStyle, effBrain));
         } else {
             writeRunMarker(goal);
         }
+        // v3.23 (R12): the widget board goes live beside the
+        // marker write — the single point this start path
+        // converges on (the replay's start writes its own,
+        // beside its own marker).
+        widgetRunStarted(goal, trailFile.getName());
 
         final Agent.Ui ui = agentUi();
 
@@ -8137,7 +10624,7 @@ public class MainActivity extends Activity {
                             defaultUserAgent));
         }
         agent = new Agent(hands, engine, pack, currentTrail, ui,
-                effModelId, effGrammar,
+                effAgentModelId, effGrammar,
                 runRules.maxSteps, runRules.copilotOn,
                 runRules.autoReadOn, runRules.chunkPref,
                 runRules.threads, effFallback,
@@ -8154,29 +10641,50 @@ public class MainActivity extends Activity {
                 // A watched or scheduled run pins tab 1 — the
                 // loop forces the browser onto its first tab
                 // at the start and refuses tab actions all run.
-                !(scheduleLaunched || runWatched));
+                !(scheduleLaunched || runWatched),
+                // v3.18 (R9): a chain step's inheritance — the
+                // previous step's facts to seed and the chain
+                // stamps for the run record (null/0 for every
+                // ordinary run, byte-identical to v3.17).
+                runSeeds, runChainNamePin, runChainStepPin,
+                runChainTotalPin, runChainFromTrail,
+                // v3.23 (R12): a loop-started run's provenance
+                // stamps (null for every other run — its record
+                // stays byte-identical to v3.22's).
+                loopStarted ? (loopFollows == null ? "" : loopFollows)
+                        : null,
+                // v3.29: never an unattended run (that stamp is
+                // the service's own), and this run's cloud brain
+                // — null unless Fireworks is chosen and keyed,
+                // the on-device road exactly as it was.
+                false, runCloud);
         final Agent runAgent = agent;
         Thread t = new Thread(new Runnable() {
             @Override public void run() {
                 try {
-                    // v2.6: the engine must hold the ACTIVE model's
-                    // file — after a switch it may hold the other
-                    // quant's, or none.
-                    // v3.13 (R5): startSpec is the active spec for
-                    // an ordinary start and the resumed run's own
-                    // model for a resume.
-                    String activePath = store.fileFor(startSpec)
-                            .getAbsolutePath();
-                    if (!engine.isLoaded()
-                            || !activePath.equals(engine.loadedPath())) {
-                        ui.status("Loading model...");
-                        boolean ok = engine.load(activePath);
-                        if (!ok) {
-                            ui.feed("Model failed to load.");
-                            ui.status("Model load failed");
-                            return;
+                    // v3.29: a cloud run loads nothing — no
+                    // GGUF need be present, and the engine is
+                    // never touched; the cloud brain plans.
+                    if (runCloud == null) {
+                        // v2.6: the engine must hold the ACTIVE model's
+                        // file — after a switch it may hold the other
+                        // quant's, or none.
+                        // v3.13 (R5): startSpec is the active spec for
+                        // an ordinary start and the resumed run's own
+                        // model for a resume.
+                        String activePath = store.fileFor(startSpec)
+                                .getAbsolutePath();
+                        if (!engine.isLoaded()
+                                || !activePath.equals(engine.loadedPath())) {
+                            ui.status("Loading model...");
+                            boolean ok = engine.load(activePath);
+                            if (!ok) {
+                                ui.feed("Model failed to load.");
+                                ui.status("Model load failed");
+                                return;
+                            }
+                            ui.status("Model loaded");
                         }
-                        ui.status("Model loaded");
                     }
                     runAgent.run(goal);
                 } finally {
@@ -8479,6 +10987,1153 @@ public class MainActivity extends Activity {
                 .apply();
     }
 
+    // ---------------- v3.18 (R9): chains, deferrals, briefing ---
+
+    private void persistChains() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString(GoalChains.PREF_CHAINS,
+                        goalChains == null ? "[]"
+                                : goalChains.serialize())
+                .apply();
+    }
+
+    private void persistChainRun() {
+        SharedPreferences.Editor ed =
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
+        if (chainRun == null) {
+            ed.remove(GoalChains.PREF_CHAIN_RUN);
+        } else {
+            ed.putString(GoalChains.PREF_CHAIN_RUN,
+                    chainRun.serialize());
+        }
+        ed.apply();
+    }
+
+    private void persistBriefingLog() {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                .putString(BriefingLog.PREF_BRIEFING_LOG,
+                        briefingLog == null ? "[]"
+                                : briefingLog.serialize())
+                .apply();
+    }
+
+    /** Append one watched verdict to the briefing log, from
+     *  the values the verdict's own computation already holds
+     *  (the caller passes the verdict it just recorded into
+     *  the trail). NOT_DONE is a state like any other; a watch
+     *  whose completion produced no verdict object (the null
+     *  baseline path) never reaches here. */
+    private void appendBriefingEntry(String label, String kind,
+                                     WatchCompare.Verdict verdict,
+                                     boolean quietDeferred) {
+        if (briefingLog == null || verdict == null) return;
+        String firstDiff = "";
+        if (verdict.diffLines != null
+                && !verdict.diffLines.isEmpty()) {
+            firstDiff = verdict.diffLines.get(0);
+        }
+        briefingLog.append(new BriefingLog.Entry(label, kind,
+                verdict.state, firstDiff,
+                System.currentTimeMillis(), quietDeferred));
+        persistBriefingLog();
+        // v3.23 (R12): both verdict seams (goal watch in
+        // finishRunUi, page watch in finishPageWatchCheck)
+        // append through here — the widget refresh rides the
+        // append, so a verdict that lands while the app sits
+        // backgrounded reaches the board at its moment, not
+        // at the next run event.
+        GhostWidget.refresh(this);
+    }
+
+    /** Launch hygiene for the deferral book: records whose
+     *  check no longer exists (or no longer has a schedule)
+     *  are dropped; with the master switch off, EVERY
+     *  outstanding deferral is cleared and its retry disarmed
+     *  — a retry left armed would re-judge under the new
+     *  posture and post immediately, surprising nobody here
+     *  but untidy in the alarm list. */
+    private void pruneDeferrals(SharedPreferences prefs) {
+        CheckDeferrals book = CheckDeferrals.parse(prefs
+                .getString(CheckDeferrals.PREF_CHECK_DEFERRALS, ""));
+        if (book.size() == 0) return;
+        if (!settings.checkConditionsOn) {
+            // v3.27 (R13): an unattended goal's deferral is
+            // not the master switch's to clear — unattended
+            // runs judge their conditions independently of
+            // it (Unattended's class doc), so their records
+            // (and retries) stand; every other record clears
+            // exactly as it always has.
+            java.util.Set<String> keep =
+                    new java.util.HashSet<String>();
+            if (savedGoals != null) {
+                for (SavedGoals.SavedGoal g : savedGoals.all()) {
+                    if (g.unattended && g.hasSchedule()) {
+                        keep.add(g.name);
+                    }
+                }
+            }
+            List<String> keys = book.keys();
+            for (int i = 0; i < keys.size(); i++) {
+                if (keep.contains(keys.get(i))) continue;
+                Alerts.cancelCheckRetry(this, keys.get(i));
+                book.clear(keys.get(i));
+            }
+        } else {
+            java.util.Set<String> live =
+                    new java.util.HashSet<String>();
+            if (savedGoals != null) {
+                for (SavedGoals.SavedGoal g : savedGoals.all()) {
+                    if (g.hasSchedule()) live.add(g.name);
+                }
+            }
+            if (pageWatches != null) {
+                for (PageWatches.PageWatch w : pageWatches.all()) {
+                    if (w.hasSchedule()) {
+                        live.add(PageWatches.alarmName(w));
+                    }
+                }
+            }
+            List<String> before = book.keys();
+            book.prune(live);
+            for (int i = 0; i < before.size(); i++) {
+                if (book.get(before.get(i)) == null) {
+                    Alerts.cancelCheckRetry(this, before.get(i));
+                }
+            }
+        }
+        prefs.edit().putString(
+                CheckDeferrals.PREF_CHECK_DEFERRALS,
+                book.serialize()).apply();
+    }
+
+    /** v3.27 (R13): the broken-chain report (spike §7).
+     *  For every unattended goal, judge the firing book:
+     *  an occurrence that came due after the opt-in with
+     *  no firing recorded for it means the alarm chain was
+     *  broken when it mattered — the app force-stopped
+     *  (its alarms cancelled outright), or the phone off
+     *  through the firing. armAllChecks above has already
+     *  re-armed; this pass puts the miss in the morning
+     *  briefing, once per missed occurrence, instead of
+     *  letting silence impersonate a NO_CHANGE. The
+     *  ledger's dead records (goals deleted or opted out)
+     *  are pruned on the same pass. A goal whose record is
+     *  missing entirely judges nothing: the opt-in epoch
+     *  is the toggle's stamp, and without it there is no
+     *  honest "since when" to judge against. */
+    private void checkUnattendedMissed(SharedPreferences prefs) {
+        if (savedGoals == null) return;
+        UnattendedLog log = UnattendedLog.parse(prefs.getString(
+                UnattendedLog.PREF_UNATTENDED_LOG, ""));
+        long now = System.currentTimeMillis();
+        java.util.Set<String> live =
+                new java.util.HashSet<String>();
+        boolean dirty = false;
+        for (SavedGoals.SavedGoal g : savedGoals.all()) {
+            if (!g.unattended) continue;
+            live.add(g.name);
+            if (!g.hasSchedule()) continue;
+            UnattendedLog.Record rec = log.get(g.name);
+            if (rec == null) continue;
+            long occ = Unattended.lastOccurrenceMs(now,
+                    g.schedMinutes,
+                    java.util.TimeZone.getDefault());
+            if (occ <= 0) continue;
+            if (rec.lastMissedOccurrenceMs == occ) continue;
+            if (!Unattended.missedFiring(rec.enabledMs,
+                    rec.lastFiringMs, occ)) {
+                continue;
+            }
+            log.recordMissed(g.name, occ);
+            dirty = true;
+            if (briefingLog != null) {
+                briefingLog.append(new BriefingLog.Entry(
+                        g.name, BriefingLog.KIND_GOAL,
+                        WatchCompare.NOT_DONE,
+                        "the unattended check did not run — "
+                                + "its alarm chain was broken "
+                                + "(the phone restarted or the "
+                                + "app was force-stopped); its "
+                                + "alarms are re-armed now",
+                        now, false));
+                persistBriefingLog();
+                GhostWidget.refresh(this);
+            }
+        }
+        int before = log.size();
+        log.prune(live);
+        if (log.size() != before) dirty = true;
+        if (dirty) {
+            prefs.edit().putString(
+                    UnattendedLog.PREF_UNATTENDED_LOG,
+                    log.serialize()).apply();
+        }
+    }
+
+    /** The day stamp BriefingDigest judges due-ness against:
+     *  year * 1000 + day-of-year in the phone's zone —
+     *  monotonic across DST, no epoch windows. */
+    private static long dayStampNow() {
+        java.util.Calendar c = java.util.Calendar.getInstance(
+                java.util.TimeZone.getDefault());
+        return c.get(java.util.Calendar.YEAR) * 1000L
+                + c.get(java.util.Calendar.DAY_OF_YEAR);
+    }
+
+    /** The launch pass (v3.18, R9): on the day's first open
+     *  with the setting on, deliver the briefing — the banner
+     *  on the Agent screen and, when a speech engine is or
+     *  becomes available, the spoken digest. Delivery marks
+     *  the entries briefed (the banner IS a delivery: a phone
+     *  without speech still got its briefing), and the day
+     *  stamp advances whether or not there was anything to
+     *  say. With the setting off the pass does nothing — no
+     *  stamp — so switching it on later briefs the backlog. */
+    private void maybeBriefing() {
+        if (settings == null || briefingLog == null) return;
+        SharedPreferences prefs =
+                getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        long lastDay = prefs.getLong(PREF_BRIEFING_DAY, 0);
+        long today = dayStampNow();
+        if (!BriefingDigest.due(settings.briefingOn,
+                lastDay, today)) {
+            return;
+        }
+        String digest = BriefingDigest.compose(briefingLog);
+        if (digest != null) {
+            if (briefingBanner != null) {
+                briefingBanner.setText("☀ Briefing\n" + digest);
+                briefingBanner.setVisibility(View.VISIBLE);
+            }
+            feed("☀ Morning briefing:\n" + digest);
+            speakBriefing(digest);
+            briefingLog.markBriefed();
+            persistBriefingLog();
+        }
+        prefs.edit().putLong(PREF_BRIEFING_DAY, today).apply();
+    }
+
+    /** One utterance through the shared engine, on the
+     *  speakCard pattern (rate applied per utterance). */
+    private void speakTextAloud(String text) {
+        if (tts == null || !ttsReady || text == null
+                || text.length() == 0) return;
+        tts.setSpeechRate(Settings.speechRateValue(settings != null
+                ? settings.speechRate : Settings.RATE_NORMAL));
+        int r = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null,
+                "ghosthands-briefing");
+        if (r == TextToSpeech.SUCCESS) ttsSpeaking = true;
+        refreshListenUi();
+    }
+
+    /** Briefing speech, on the speakCard lazy-engine pattern:
+     *  an existing ready engine speaks now; one still starting
+     *  stays quiet (the banner carries it); none starts one
+     *  and speaks on init. Speech never blocks the launch. */
+    private void speakBriefing(final String digest) {
+        if (tts != null && ttsReady) {
+            speakTextAloud(digest);
+            return;
+        }
+        if (tts != null || ttsFailed) return;
+        tts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
+            @Override
+            public void onInit(int status) {
+                if (status == TextToSpeech.SUCCESS) {
+                    ttsReady = true;
+                    tts.setSpeechRate(settings.speechRate);
+                    speakTextAloud(digest);
+                } else {
+                    ttsFailed = true;
+                }
+            }
+        });
+    }
+
+    // ---------------- v3.18 (R9): the chain flow ----------------
+
+    /** The finish bookkeeping for chains (called from
+     *  finishRunUi with the run's final card): a pinned chain
+     *  step that ended DONE advances the run state — its
+     *  trail joins the completed steps and its noted facts
+     *  become the seed snapshot — and the last step's finish
+     *  builds the combined card; a step ending any other way
+     *  pauses the chain where it stands (nothing is captured,
+     *  nothing advances). An ordinary DONE run earns the
+     *  ad-hoc continuation when its card's own facts entry
+     *  rule finds facts on it. The continuation row is
+     *  refreshed on the UI thread. */
+    private void updateChainAfterRun(AnswerCard endCard,
+                                     File trailFile, String goal) {
+        cardChainTrailFile = trailFile;
+        lastChainCard = null;
+        chainCardText = null;
+        if (runChainName != null) {
+            if ("done".equals(endCard.outcome)) {
+                if (chainRun == null) {
+                    chainRun = new GoalChains.ChainRun();
+                    chainRun.chainName = runChainName;
+                }
+                chainRun.stepTrailNames.add(trailFile.getName());
+                List<String> seeds = GoalChains.captureSeedFacts(
+                        endCard.sourceEvents);
+                chainRun.seedFacts.clear();
+                chainRun.seedFacts.addAll(seeds);
+                chainRun.seedAnswer = endCard.outcomeLine;
+                chainRun.seedFromGoal = goal;
+                chainRun.seedFromTrail = trailFile.getName();
+                chainRun.seedSourceTitle = endCard.sourceTitle;
+                chainRun.seedSourceUrl = endCard.sourceUrl;
+                // runChainStep is the finished step's 1-based
+                // number — which IS the next step's 0-based
+                // index in the run state.
+                chainRun.stepIndex = runChainStep;
+                if (runChainStep >= runChainTotal) {
+                    // The last step: compose the combined card
+                    // from the completed steps' trails (the
+                    // one card builder, per step) and close
+                    // the chain run out.
+                    List<AnswerCard> cards =
+                            new ArrayList<AnswerCard>();
+                    for (int i = 0;
+                         i < chainRun.stepTrailNames.size(); i++) {
+                        String text = readTextFile(new File(
+                                trailsDir(),
+                                chainRun.stepTrailNames.get(i)));
+                        AnswerCard c = (text == null) ? null
+                                : AnswerCard.fromTrailText(text, "");
+                        if (c != null) cards.add(c);
+                    }
+                    lastChainCard = ChainCard.fromCards(
+                            chainRun.chainName, cards);
+                    chainCardText = (lastChainCard == null)
+                            ? null : lastChainCard.cardText();
+                    cardChainMode = (lastChainCard == null)
+                            ? CHAIN_NONE : CHAIN_COMBINED;
+                    chainRun = null;
+                } else {
+                    cardChainMode = CHAIN_NEXT;
+                }
+                persistChainRun();
+            } else {
+                // Paused: the state stands exactly as the step
+                // found it — the same step, the same seed.
+                cardChainMode = CHAIN_PAUSED;
+            }
+        } else if ("done".equals(endCard.outcome)) {
+            List<String> seeds = GoalChains.captureSeedFacts(
+                    endCard.sourceEvents);
+            cardChainMode = seeds.isEmpty()
+                    ? CHAIN_NONE : CHAIN_ADHOC;
+        } else {
+            cardChainMode = CHAIN_NONE;
+        }
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                refreshChainRow();
+            }
+        });
+    }
+
+    /** The card's continuation row, rebuilt from the card's
+     *  chain mode — and only while the live card is the trail
+     *  the mode was computed over (cardChainTrailFile): a card
+     *  opened from History or a notification never offers a
+     *  continuation computed for another run. */
+    private void refreshChainRow() {
+        if (chainBtnRow == null) return;
+        chainBtnRow.removeAllViews();
+        boolean live = lastCard != null
+                && lastCardTrailFile != null
+                && lastCardTrailFile.equals(cardChainTrailFile)
+                && cardChainMode != CHAIN_NONE;
+        if (!live) {
+            chainBtnRow.setVisibility(View.GONE);
+            return;
+        }
+        chainBtnRow.setVisibility(View.VISIBLE);
+        if (cardChainMode == CHAIN_NEXT && chainRun != null) {
+            final GoalChains.Chain chain = (goalChains == null)
+                    ? null : goalChains.find(chainRun.chainName);
+            Button next = chipButton("Next: step "
+                    + (chainRun.stepIndex + 1) + " — "
+                    + nextStepGoalPreview(chain));
+            next.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    onChainNextTapped(chain);
+                }
+            });
+            chainBtnRow.addView(next, chipLp());
+            Button end = chipButton("End chain");
+            end.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    onChainEndTapped();
+                }
+            });
+            chainBtnRow.addView(end, chipLp());
+        } else if (cardChainMode == CHAIN_PAUSED
+                && chainRun != null) {
+            TextView note = new TextView(this);
+            note.setText("Chain paused — this step did not "
+                    + "finish, so nothing was passed on.");
+            note.setTextSize(12);
+            note.setTextColor(COL_MUTED);
+            chainBtnRow.addView(note, chipLp());
+            Button retry = chipButton("Retry this step");
+            retry.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    onChainRetryStepTapped();
+                }
+            });
+            chainBtnRow.addView(retry, chipLp());
+            Button end = chipButton("End chain");
+            end.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    onChainEndTapped();
+                }
+            });
+            chainBtnRow.addView(end, chipLp());
+        } else if (cardChainMode == CHAIN_COMBINED) {
+            TextView note = new TextView(this);
+            note.setText("Chain complete — the card above is "
+                    + "the whole chain.");
+            note.setTextSize(12);
+            note.setTextColor(COL_MUTED);
+            chainBtnRow.addView(note, chipLp());
+        } else if (cardChainMode == CHAIN_ADHOC) {
+            Button cont = chipButton(
+                    "Continue with these findings");
+            cont.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    onAdhocContinueTapped();
+                }
+            });
+            chainBtnRow.addView(cont, chipLp());
+        }
+    }
+
+    /** The next step's goal text for the continuation chip —
+     *  the step's own goal, or the chain's shape when the
+     *  chain itself is gone (a deleted chain's run state
+     *  still offers its retry; its next step has no text). */
+    private String nextStepGoalPreview(GoalChains.Chain chain) {
+        if (chain == null || chainRun == null
+                || chainRun.stepIndex < 0
+                || chainRun.stepIndex >= chain.steps.size()) {
+            return "…";
+        }
+        String g = chain.steps.get(chainRun.stepIndex).goal;
+        return g.length() > 42 ? g.substring(0, 41) + "…" : g;
+    }
+
+    private LinearLayout.LayoutParams chipLp() {
+        LinearLayout.LayoutParams lp =
+                new LinearLayout.LayoutParams(0,
+                        LinearLayout.LayoutParams.WRAP_CONTENT, 1);
+        lp.leftMargin = dp(4);
+        lp.rightMargin = dp(4);
+        return lp;
+    }
+
+    /** Start a chain from its first step (the Goals list's
+     *  Run chain): a fresh run state, the step loaded into the
+     *  goal field for review — chains stay attended; the tap
+     *  loads, Start still starts. */
+    private void startChain(GoalChains.Chain chain) {
+        if (chain == null || chain.steps.isEmpty()) return;
+        chainRun = new GoalChains.ChainRun();
+        chainRun.chainName = chain.name;
+        chainRun.stepIndex = 0;
+        persistChainRun();
+        loadChainStep(chain, 0, "Chain loaded: " + chain.name
+                + " — step 1 of " + chain.steps.size() + ".");
+    }
+
+    /** Load a chain step into the goal card and arm the
+     *  pending step the next Start will consume: the goal
+     *  text with {prev} substituted (a no-op on step 1), the
+     *  step's pack, on the Agent screen. */
+    private void loadChainStep(GoalChains.Chain chain, int index,
+                               String feedLine) {
+        GoalChains.Step step = chain.steps.get(index);
+        PendingChainStep p = new PendingChainStep();
+        p.chainName = chain.name;
+        p.stepIndex = index;
+        p.goalText = GoalChains.substitute(step.goal,
+                (chainRun == null) ? "" : chainRun.seedAnswer);
+        p.packId = step.packId;
+        p.noteLine = feedLine;
+        pendingChainStep = p;
+        goalEdit.setText(p.goalText);
+        goalEdit.setSelection(p.goalText.length());
+        currentPackId = PolicyPacks.loadPack(step.packId).name;
+        pack = PolicyPacks.loadPack(currentPackId);
+        loadedSavedName = null;
+        scheduleLaunched = false;
+        pendingPageWatchUrl = null;
+        goalNoteText.setVisibility(View.VISIBLE);
+        goalNoteText.setText("Chain: " + chain.name + " · step "
+                + (index + 1) + " of " + chain.steps.size()
+                + " · policy " + currentPackId
+                + (index > 0
+                        ? " · starts with the previous step's "
+                                + "findings" : ""));
+        showScreen(NavState.AGENT);
+        feed(feedLine + " Review the goal, then tap Start.");
+    }
+
+    /** The continuation tap: load the next step of the pinned
+     *  chain run, seeded with the step that just finished. */
+    private void onChainNextTapped(GoalChains.Chain chain) {
+        if (chainRun == null) return;
+        if (chain == null) {
+            feed("That chain is no longer in your list — the "
+                    + "run state is kept, and re-creating the "
+                    + "chain under the same name picks it up.");
+            return;
+        }
+        if (chainRun.stepIndex < 0
+                || chainRun.stepIndex >= chain.steps.size()) {
+            onChainEndTapped();
+            return;
+        }
+        loadChainStep(chain, chainRun.stepIndex,
+                "Chain " + chain.name + ": step "
+                        + (chainRun.stepIndex + 1) + " of "
+                        + chain.steps.size() + ", starting from "
+                        + "the last step's findings.");
+    }
+
+    /** A paused chain's retry: the SAME step again, with the
+     *  SAME seed it had (the seed snapshot is only ever
+     *  overwritten by a done). An ad-hoc chain's step text is
+     *  its previous run's goal — the retry re-runs the step
+     *  that failed, whose goal text the state never stored;
+     *  for a named chain it comes from the chain itself. */
+    private void onChainRetryStepTapped() {
+        if (chainRun == null) return;
+        if (chainRun.chainName != null
+                && chainRun.chainName.length() > 0) {
+            GoalChains.Chain chain = (goalChains == null) ? null
+                    : goalChains.find(chainRun.chainName);
+            if (chain != null && chainRun.stepIndex >= 0
+                    && chainRun.stepIndex < chain.steps.size()) {
+                loadChainStep(chain, chainRun.stepIndex,
+                        "Chain " + chain.name + ": retrying step "
+                                + (chainRun.stepIndex + 1) + ".");
+                return;
+            }
+        }
+        feed("This step's goal text is not on hand to retry — "
+                + "type the step's goal and tap Start; the "
+                + "chain's findings still seed it.");
+        PendingChainStep p = new PendingChainStep();
+        p.chainName = chainRun.chainName;
+        p.stepIndex = chainRun.stepIndex;
+        p.goalText = null;
+        p.packId = null;
+        p.noteLine = null;
+        pendingChainStep = p;
+        showScreen(NavState.AGENT);
+    }
+
+    /** End a chain early: the run state goes; the steps that
+     *  finished keep their own cards and trails. */
+    private void onChainEndTapped() {
+        chainRun = null;
+        persistChainRun();
+        cardChainMode = CHAIN_NONE;
+        refreshChainRow();
+        feed("Chain ended — the steps that finished keep "
+                + "their cards in History.");
+    }
+
+    /** The ad-hoc continuation: mint the unnamed two-step run
+     *  state from the live card (step 1 = this run), seed it
+     *  with the card's facts, and ask for the follow-up goal. */
+    private void onAdhocContinueTapped() {
+        if (lastCard == null) return;
+        chainRun = new GoalChains.ChainRun();
+        chainRun.chainName = "";
+        chainRun.stepIndex = 1;
+        if (lastCardTrailFile != null) {
+            chainRun.stepTrailNames.add(
+                    lastCardTrailFile.getName());
+            chainRun.seedFromTrail = lastCardTrailFile.getName();
+        }
+        List<String> seeds = GoalChains.captureSeedFacts(
+                lastCard.sourceEvents);
+        chainRun.seedFacts.addAll(seeds);
+        chainRun.seedAnswer = lastCard.outcomeLine;
+        chainRun.seedFromGoal = lastCard.goal;
+        chainRun.seedSourceTitle = lastCard.sourceTitle;
+        chainRun.seedSourceUrl = lastCard.sourceUrl;
+        persistChainRun();
+        showFollowUpDialog();
+    }
+
+    /** The follow-up goal prompt for an ad-hoc continuation:
+     *  one field; its text may use {prev} for the run's
+     *  answer. Confirming loads the step like any chain step. */
+    private void showFollowUpDialog() {        final EditText input = new EditText(this);
+        input.setHint("Follow-up goal — {prev} is the answer "
+                + "above");
+        input.setTextSize(15);
+        input.setTextColor(COL_TEXT);
+        input.setPadding(dp(16), dp(8), dp(16), dp(8));
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("Continue with these findings")
+                .setView(input)
+                .setPositiveButton("Load step 2",
+                        new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(
+                                    DialogInterface d, int w) {
+                                String text = input.getText()
+                                        .toString().trim();
+                                if (text.length() == 0) return;
+                                PendingChainStep p =
+                                        new PendingChainStep();
+                                p.chainName = "";
+                                p.stepIndex = 1;
+                                p.goalText = GoalChains.substitute(
+                                        text,
+                                        (chainRun == null) ? ""
+                                                : chainRun.seedAnswer);
+                                p.packId = currentPackId;
+                                p.noteLine = "Follow-up loaded "
+                                        + "with the last run's "
+                                        + "findings.";
+                                pendingChainStep = p;
+                                goalEdit.setText(p.goalText);
+                                goalEdit.setSelection(
+                                        p.goalText.length());
+                                loadedSavedName = null;
+                                scheduleLaunched = false;
+                                pendingPageWatchUrl = null;
+                                goalNoteText.setVisibility(
+                                        View.VISIBLE);
+                                goalNoteText.setText("Follow-up · "
+                                        + "step 2 of 2 · starts "
+                                        + "with the last run's "
+                                        + "findings");
+                                showScreen(NavState.AGENT);
+                                feed(p.noteLine + " Review the "
+                                        + "goal, then tap Start.");
+                            }
+                        })
+                .setNegativeButton("Cancel", null)
+                .create();
+        dlg.show();
+    }
+
+    /** The Goals screen's chains list: a waiting chain run's
+     *  resume offer first (a relaunch does not lose a chain
+     *  mid-flight — its state is persisted), then each chain
+     *  with its Run / Edit / delete chips. */
+    private void refreshChainsList() {
+        if (chainsListBox == null) return;
+        chainsListBox.removeAllViews();
+        if (chainRun != null) {
+            LinearLayout offer = new LinearLayout(this);
+            offer.setOrientation(LinearLayout.VERTICAL);
+            offer.setBackground(cardBg());
+            offer.setPadding(dp(10), dp(8), dp(10), dp(8));
+            TextView t = new TextView(this);
+            String who = (chainRun.chainName != null
+                    && chainRun.chainName.length() > 0)
+                    ? chainRun.chainName : "Follow-up";
+            int total = who.equals("Follow-up") ? 2
+                    : ((goalChains != null
+                            && goalChains.find(who) != null)
+                            ? goalChains.find(who).steps.size() : 0);
+            t.setText("▸ " + who + " — step "
+                    + (chainRun.stepIndex + 1)
+                    + (total > 0 ? " of " + total : "")
+                    + " waiting"
+                    + (chainRun.seedFromGoal.length() > 0
+                            ? "\nLast step: " + chainRun.seedFromGoal
+                            : ""));
+            t.setTextSize(13);
+            t.setTextColor(COL_TEXT);
+            offer.addView(t);
+            LinearLayout btnRow = new LinearLayout(this);
+            btnRow.setOrientation(LinearLayout.HORIZONTAL);
+            Button resumeBtn = chipButton("Resume");
+            resumeBtn.setOnClickListener(
+                    new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            onChainResumeTapped();
+                        }
+                    });
+            btnRow.addView(resumeBtn, chipLp());
+            Button discardBtn = chipButton("Discard");
+            discardBtn.setOnClickListener(
+                    new View.OnClickListener() {
+                        @Override public void onClick(View v) {
+                            chainRun = null;
+                            persistChainRun();
+                            refreshChainsList();
+                            feed("Chain run discarded — the "
+                                    + "steps that finished keep "
+                                    + "their cards in History.");
+                        }
+                    });
+            btnRow.addView(discardBtn, chipLp());
+            offer.addView(btnRow);
+            LinearLayout.LayoutParams olp =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT);
+            olp.bottomMargin = dp(8);
+            chainsListBox.addView(offer, olp);
+        }
+        if (goalChains == null || goalChains.size() == 0) {
+            TextView empty = new TextView(this);
+            empty.setText("No chains yet — a chain runs goals "
+                    + "one after another, each starting with "
+                    + "the last one's findings.");
+            empty.setTextSize(12);
+            empty.setTextColor(COL_MUTED);
+            empty.setPadding(dp(4), dp(10), dp(4), dp(6));
+            chainsListBox.addView(empty);
+            return;
+        }
+        List<GoalChains.Chain> all = goalChains.all();
+        for (int i = 0; i < all.size(); i++) {
+            final GoalChains.Chain c = all.get(i);
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(4), dp(8), dp(4), dp(8));
+            LinearLayout texts = new LinearLayout(this);
+            texts.setOrientation(LinearLayout.VERTICAL);
+            TextView nameText = new TextView(this);
+            nameText.setText(c.name);
+            nameText.setTextSize(14);
+            nameText.setTypeface(Typeface.DEFAULT_BOLD);
+            nameText.setTextColor(COL_TEXT);
+            texts.addView(nameText);
+            TextView meta = new TextView(this);
+            String first = c.steps.isEmpty() ? ""
+                    : c.steps.get(0).goal;
+            meta.setText(c.steps.size() + " steps · "
+                    + (first.length() > 60
+                            ? first.substring(0, 60) + "…" : first));
+            meta.setTextSize(11);
+            meta.setTextColor(COL_MUTED);
+            texts.addView(meta);
+            row.addView(texts, new LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+            Button runBtn = chipButton("Run chain");
+            runBtn.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    startChain(c);
+                }
+            });
+            row.addView(runBtn);
+            Button editBtn = chipButton("Edit");
+            editBtn.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    showChainEditor(c);
+                }
+            });
+            LinearLayout.LayoutParams elp =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT);
+            elp.leftMargin = dp(6);
+            row.addView(editBtn, elp);
+            Button delBtn = chipButton("✕");
+            delBtn.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    new AlertDialog.Builder(MainActivity.this)
+                            .setTitle("Delete chain")
+                            .setMessage("Delete \"" + c.name
+                                    + "\"? Its steps' runs and "
+                                    + "cards are untouched.")
+                            .setPositiveButton("Delete",
+                                    new DialogInterface
+                                            .OnClickListener() {
+                                        @Override public void onClick(
+                                                DialogInterface d,
+                                                int w) {
+                                            goalChains.remove(c.name);
+                                            persistChains();
+                                            refreshChainsList();
+                                            feed("Chain deleted: "
+                                                    + c.name);
+                                        }
+                                    })
+                            .setNegativeButton("Cancel", null)
+                            .show();
+                }
+            });
+            LinearLayout.LayoutParams dlp =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT);
+            dlp.leftMargin = dp(6);
+            row.addView(delBtn, dlp);
+            chainsListBox.addView(row);
+        }
+    }
+
+    /** The resume offer's tap: a named chain reloads its
+     *  waiting step from the chain itself; an ad-hoc follow-up
+     *  re-asks its goal (its state already stands). A named
+     *  chain that was deleted leaves the state standing — the
+     *  row says so, and Discard is the way out. */
+    private void onChainResumeTapped() {
+        if (chainRun == null) return;
+        if (chainRun.chainName == null
+                || chainRun.chainName.length() == 0) {
+            showFollowUpDialog();
+            return;
+        }
+        GoalChains.Chain chain = (goalChains == null) ? null
+                : goalChains.find(chainRun.chainName);
+        if (chain == null) {
+            feed("That chain is no longer in your list — "
+                    + "re-create it under the same name to "
+                    + "resume, or discard the run.");
+            return;
+        }
+        if (chainRun.stepIndex < 0
+                || chainRun.stepIndex >= chain.steps.size()) {
+            chainRun = null;
+            persistChainRun();
+            refreshChainsList();
+            return;
+        }
+        loadChainStep(chain, chainRun.stepIndex,
+                "Chain resumed: " + chain.name + " — step "
+                        + (chainRun.stepIndex + 1) + " of "
+                        + chain.steps.size() + ".");
+    }
+
+    /** The chain editor: a name and up to five step rows
+     *  (goal text + a policy cycler). Empty step rows are
+     *  simply not steps; GoalChains.validate judges the save
+     *  and the refusal is shown, never swallowed. */
+    private void showChainEditor(final GoalChains.Chain existing) {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(16), dp(8), dp(16), dp(8));
+        scroll.addView(box);
+        final EditText nameInput = new EditText(this);
+        nameInput.setHint("Chain name");
+        nameInput.setTextSize(15);
+        nameInput.setTextColor(COL_TEXT);
+        if (existing != null) nameInput.setText(existing.name);
+        box.addView(nameInput);
+        TextView hint = new TextView(this);
+        hint.setText("Later steps may use {prev} for the "
+                + "previous step's answer. Steps 2 to 5 — leave "
+                + "rows blank to stop there.");
+        hint.setTextSize(11);
+        hint.setTextColor(COL_MUTED);
+        box.addView(hint);
+        final EditText[] stepInputs =
+                new EditText[GoalChains.MAX_STEPS_CHAIN];
+        final String[] stepPacks =
+                new String[GoalChains.MAX_STEPS_CHAIN];
+        for (int i = 0; i < GoalChains.MAX_STEPS_CHAIN; i++) {
+            final int idx = i;
+            TextView lab = new TextView(this);
+            lab.setText("Step " + (i + 1));
+            lab.setTextSize(12);
+            lab.setTextColor(COL_MUTED);
+            box.addView(lab);
+            stepInputs[i] = new EditText(this);
+            stepInputs[i].setHint("Goal for step " + (i + 1));
+            stepInputs[i].setTextSize(14);
+            stepInputs[i].setTextColor(COL_TEXT);
+            stepPacks[i] = "standard";
+            if (existing != null && i < existing.steps.size()) {
+                stepInputs[i].setText(existing.steps.get(i).goal);
+                stepPacks[i] = existing.steps.get(i).packId;
+            }
+            box.addView(stepInputs[i]);
+            final Button packBtn = new Button(this);
+            packBtn.setText("policy: " + stepPacks[i]);
+            packBtn.setTextSize(12);
+            packBtn.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    int cur = 0;
+                    for (int j = 0; j < PolicyPacks.NAMES.length;
+                         j++) {
+                        if (PolicyPacks.NAMES[j]
+                                .equals(stepPacks[idx])) {
+                            cur = j;
+                            break;
+                        }
+                    }
+                    int next = (cur + 1) % PolicyPacks.NAMES.length;
+                    stepPacks[idx] = PolicyPacks.NAMES[next];
+                    packBtn.setText("policy: " + stepPacks[idx]);
+                }
+            });
+            box.addView(packBtn);
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(existing == null ? "New chain"
+                        : "Edit chain")
+                .setView(scroll)
+                .setPositiveButton("Save",
+                        new DialogInterface.OnClickListener() {
+                            @Override public void onClick(
+                                    DialogInterface d, int w) {
+                                GoalChains.Chain c =
+                                        new GoalChains.Chain(
+                                                nameInput.getText()
+                                                        .toString()
+                                                        .trim());
+                                for (int i = 0;
+                                     i < stepInputs.length; i++) {
+                                    String g = stepInputs[i]
+                                            .getText().toString()
+                                            .trim();
+                                    if (g.length() == 0) continue;
+                                    c.steps.add(
+                                            new GoalChains.Step(g,
+                                                    stepPacks[i]));
+                                }
+                                String problem =
+                                        GoalChains.validate(c);
+                                if (problem != null) {
+                                    Toast.makeText(
+                                            MainActivity.this,
+                                            problem,
+                                            Toast.LENGTH_LONG).show();
+                                    return;
+                                }
+                                if (existing != null
+                                        && !existing.name
+                                                .equals(c.name)) {
+                                    goalChains.remove(
+                                            existing.name);
+                                }
+                                goalChains.put(c);
+                                persistChains();
+                                refreshChainsList();
+                                feed("Chain saved: " + c.name
+                                        + " (" + c.steps.size()
+                                        + " steps)");
+                            }
+                        })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** v3.18 (R9): the condition chips under a scheduled
+     *  goal's row — shown only while the master switch is on
+     *  (hidden, not disabled, when off: a control that cannot
+     *  act is not shown). Toggling writes the record and
+     *  persists; nothing re-arms (conditions are judged at
+     *  fire time). */
+    private void addGoalConditionChips(LinearLayout list,
+                                       final SavedGoals.SavedGoal g) {
+        if (settings == null || !settings.checkConditionsOn
+                || !g.hasSchedule()) {
+            return;
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(dp(4), dp(0), dp(4), dp(6));
+        TextView lab = new TextView(this);
+        lab.setText("waits for:");
+        lab.setTextSize(11);
+        lab.setTextColor(COL_MUTED);
+        row.addView(lab);
+        Button charge = chipButton(g.condCharging
+                ? "charging ✓" : "charging");
+        charge.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                g.condCharging = !g.condCharging;
+                persistSavedGoals();
+                refreshGoalsList();
+            }
+        });
+        LinearLayout.LayoutParams lp1 =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp1.leftMargin = dp(6);
+        row.addView(charge, lp1);
+        Button wifi = chipButton(g.condWifi ? "Wi-Fi ✓" : "Wi-Fi");
+        wifi.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                g.condWifi = !g.condWifi;
+                persistSavedGoals();
+                refreshGoalsList();
+            }
+        });
+        LinearLayout.LayoutParams lp2 =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp2.leftMargin = dp(6);
+        row.addView(wifi, lp2);
+        list.addView(row);
+    }
+
+    /** v3.27 (R13): the unattended chip under a scheduled
+     *  goal's row — the per-goal opt-in itself. The feature
+     *  is off unless the user sets it up, per goal, here;
+     *  there is no global switch. Shown for scheduled goals
+     *  only (an unscheduled goal has no firing to run).
+     *  While on, the row also carries the goal's live state
+     *  line (Unattended.goalLine): ready, or naming the
+     *  missing grant — the spike's §8.1 rule that the UI
+     *  says which grant is missing. */
+    private void addGoalUnattendedChip(LinearLayout list,
+                                       final SavedGoals.SavedGoal g) {
+        if (!g.hasSchedule()) return;
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(dp(4), dp(0), dp(4), dp(6));
+        TextView lab = new TextView(this);
+        lab.setText("at its time:");
+        lab.setTextSize(11);
+        lab.setTextColor(COL_MUTED);
+        row.addView(lab);
+        Button un = chipButton(g.unattended
+                ? "unattended ✓" : "unattended");
+        un.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                onGoalUnattendedToggled(g);
+            }
+        });
+        LinearLayout.LayoutParams unLp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        unLp.leftMargin = dp(6);
+        row.addView(un, unLp);
+        if (g.unattended) {
+            TextView state = new TextView(this);
+            state.setText(Unattended.goalLine(true,
+                    Alerts.canScheduleExact(this),
+                    Alerts.batteryExempt(this)));
+            state.setTextSize(11);
+            state.setTextColor(COL_MUTED);
+            LinearLayout.LayoutParams stLp =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            LinearLayout.LayoutParams.WRAP_CONTENT);
+            stLp.leftMargin = dp(8);
+            row.addView(state, stLp);
+        }
+        list.addView(row);
+    }
+
+    /** v3.27 (R13): the unattended toggle itself. Switching
+     *  ON writes the record, stamps the firing book's
+     *  opt-in epoch (missed firings judge from it), and
+     *  re-arms — the arm mode follows the flag and the
+     *  grant state (Alerts.armCheck). With a grant missing
+     *  the feed says exactly which, and where its door is:
+     *  the check reminds only until then, by design.
+     *  Switching OFF returns the check to notify-and-launch
+     *  whole: re-armed inexact, and any condition retry
+     *  still outstanding is disarmed (the deferral record
+     *  itself clears at the next firing's re-judgement, as
+     *  it does for any posted check). */
+    private void onGoalUnattendedToggled(
+            final SavedGoals.SavedGoal g) {
+        g.unattended = !g.unattended;
+        persistSavedGoals();
+        if (g.unattended) {
+            SharedPreferences prefs = getSharedPreferences(
+                    PREFS_NAME, MODE_PRIVATE);
+            UnattendedLog log = UnattendedLog.parse(
+                    prefs.getString(
+                            UnattendedLog.PREF_UNATTENDED_LOG,
+                            ""));
+            log.stampEnabled(g.name,
+                    System.currentTimeMillis());
+            prefs.edit().putString(
+                    UnattendedLog.PREF_UNATTENDED_LOG,
+                    log.serialize()).apply();
+        } else {
+            Alerts.cancelCheckRetry(this, g.name);
+        }
+        Alerts.armCheck(this, g);
+        refreshGoalsList();
+        if (g.unattended) {
+            boolean exact = Alerts.canScheduleExact(this);
+            boolean exempt = Alerts.batteryExempt(this);
+            if (Unattended.grantsOk(exact, exempt)) {
+                feed("Unattended ON for \"" + g.name + "\": "
+                        + "at its time it runs itself — "
+                        + "charging, read-only, 10-minute "
+                        + "budget — and reminds instead "
+                        + "whenever the phone is not charging.");
+            } else {
+                feed("Unattended ON for \"" + g.name + "\", "
+                        + "but it cannot run yet: missing "
+                        + Unattended.missingText(exact, exempt)
+                        + ". Until both are given it reminds "
+                        + "only, exactly as before. The doors "
+                        + "are in Settings > ALERTS > "
+                        + "Unattended checks.");
+            }
+        } else {
+            feed("Unattended OFF for \"" + g.name + "\": "
+                    + "back to notify-and-launch.");
+        }
+    }
+
+    /** v3.18 (R9): the page-watch rows' condition chips — the
+     *  goal rows' discipline, on the watch's own record. */
+    private void addPageWatchConditionChips(
+            LinearLayout list, final PageWatches.PageWatch w) {
+        if (settings == null || !settings.checkConditionsOn
+                || !w.hasSchedule()) {
+            return;
+        }
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setPadding(dp(4), dp(0), dp(4), dp(6));
+        TextView lab = new TextView(this);
+        lab.setText("waits for:");
+        lab.setTextSize(11);
+        lab.setTextColor(COL_MUTED);
+        row.addView(lab);
+        Button charge = chipButton(w.condCharging
+                ? "charging ✓" : "charging");
+        charge.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                w.condCharging = !w.condCharging;
+                persistPageWatches();
+                refreshPageWatchList();
+            }
+        });
+        LinearLayout.LayoutParams lp1 =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp1.leftMargin = dp(6);
+        row.addView(charge, lp1);
+        Button wifi = chipButton(w.condWifi ? "Wi-Fi ✓" : "Wi-Fi");
+        wifi.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                w.condWifi = !w.condWifi;
+                persistPageWatches();
+                refreshPageWatchList();
+            }
+        });
+        LinearLayout.LayoutParams lp2 =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp2.leftMargin = dp(6);
+        row.addView(wifi, lp2);
+        list.addView(row);
+    }
+
     /** A page's readable text, whole (the reader's cap), from
      *  a live view — the extraction a watch signs, at creation
      *  and at a check alike. The callback lands on the UI
@@ -8635,7 +12290,9 @@ public class MainActivity extends Activity {
             metaText.append(w.url);
             if (w.hasSchedule()) {
                 metaText.append("\n· daily check at ")
-                        .append(SavedGoals.timeLabel(w.schedMinutes));
+                        .append(SavedGoals.timeLabel(w.schedMinutes))
+                        .append(SavedGoals.conditionSuffix(
+                                w.condCharging, w.condWifi));
             }
             if (w.lastVerdict.length() > 0 && w.lastCheckTsMs > 0) {
                 metaText.append("\nLast check ")
@@ -8644,6 +12301,19 @@ public class MainActivity extends Activity {
                                 new Date(w.lastCheckTsMs)))
                         .append(": ")
                         .append(pageWatchVerdictLine(w));
+                // v3.22 (R11): a check that could not
+                // complete leaves a pending watch pending —
+                // the suffix says so, beside the verdict.
+                if (!w.hasBaseline()) {
+                    metaText.append(
+                            PageWatches.pendingSuffix(w));
+                }
+            } else if (!w.hasBaseline()) {
+                // v3.22 (R11): a pending watch (a template's
+                // or a share's) has no baseline to name —
+                // its first completed check sets it.
+                metaText.append("\nNo check yet")
+                        .append(PageWatches.pendingSuffix(w));
             } else {
                 metaText.append("\nNo check yet — the baseline "
                         + "is what the page said when you "
@@ -8693,6 +12363,9 @@ public class MainActivity extends Activity {
             delLp.leftMargin = dp(6);
             row.addView(delBtn, delLp);
             pageWatchListBox.addView(row);
+            // v3.18 (R9): the condition chips, the goal rows'
+            // discipline (see addPageWatchConditionChips).
+            addPageWatchConditionChips(pageWatchListBox, w);
         }
     }
 
@@ -8908,6 +12581,14 @@ public class MainActivity extends Activity {
                     "verdict", WatchCompare.NOT_DONE,
                     "since_ms", Long.valueOf(
                             w.hasBaseline() ? w.baselineTsMs : 0)));
+            // v3.18 (R9): the briefing logs the could-not-check
+            // too — a NOT_DONE verdict is a state like any
+            // other (no baseline was judged, none is claimed).
+            appendBriefingEntry(PageWatches.label(watchUrl),
+                    BriefingLog.KIND_PAGE,
+                    new WatchCompare.Verdict(WatchCompare.NOT_DONE,
+                            new ArrayList<String>()),
+                    false);
             AnswerCard card = AnswerCard.fromEvents(
                     trail.events(), goal);
             if (card != null) showAnswerCard(card);
@@ -8954,9 +12635,19 @@ public class MainActivity extends Activity {
         trail.record("watch", step, fields);
         PageWatches.applyCompletedCheck(w, pageText, now);
         persistPageWatches();
+        // v3.18 (R9): the briefing logs the verdict at the
+        // moment it is recorded (the in-hand values rule).
+        appendBriefingEntry(PageWatches.label(watchUrl),
+                BriefingLog.KIND_PAGE, verdict, quietDefer);
         AnswerCard card = AnswerCard.fromEvents(trail.events(),
                 goal);
         if (card != null) showAnswerCard(card);
+        // v3.17: the page watch's change bounce fires here,
+        // where its verdict actually lands (finishRunUi fired
+        // only the ending's shot; the verdict was still out).
+        if (verdict.changed()) {
+            mascotEvent(MascotState.WATCH_CHANGED);
+        }
         if (verdict.changed() && quietDefer) {
             // Recorded; that is all (the goal watches' rule).
         } else if (verdict.changed()) {
@@ -9225,6 +12916,13 @@ public class MainActivity extends Activity {
             delLp.leftMargin = dp(6);
             row.addView(delBtn, delLp);
             list.addView(row);
+            // v3.18 (R9): the condition chips ride under a
+            // scheduled goal's row while the master switch is
+            // on (see addGoalConditionChips).
+            addGoalConditionChips(list, g);
+            // v3.27 (R13): the unattended chip rides under
+            // the same row (see addGoalUnattendedChip).
+            addGoalUnattendedChip(list, g);
         }
     }
 
@@ -9386,6 +13084,8 @@ public class MainActivity extends Activity {
         logMode = Settings.feedLogModeFor(settings != null
                 ? settings.endView : Settings.END_CARD);
         renderLog();
+        // v3.20 (R10): a finished card carries its ask panel.
+        refreshQaPanels();
     }
 
     private void shareCard() {
@@ -9396,8 +13096,23 @@ public class MainActivity extends Activity {
         }
         Intent send = new Intent(Intent.ACTION_SEND);
         send.setType("text/plain");
-        send.putExtra(Intent.EXTRA_TEXT, lastCard.shareText(cardDateLabel()));
+        // v3.18 (R9): the combined chain card shares as the
+        // chain, through the same path.
+        send.putExtra(Intent.EXTRA_TEXT, chainCardLive()
+                ? lastChainCard.shareText(cardDateLabel())
+                : lastCard.shareText(cardDateLabel()));
         startActivity(Intent.createChooser(send, "Share answer card"));
+    }
+
+    /** v3.18 (R9): is the live card showing the finished
+     *  chain's combined card? True only while the card on
+     *  screen is the trail the chain block was computed over —
+     *  a card opened from History renders and shares itself. */
+    private boolean chainCardLive() {
+        return cardChainMode == CHAIN_COMBINED
+                && lastChainCard != null && chainCardText != null
+                && lastCardTrailFile != null
+                && lastCardTrailFile.equals(cardChainTrailFile);
     }
 
     /** v3.5: the Past chip's picker graduated to the History
@@ -9446,6 +13161,8 @@ public class MainActivity extends Activity {
         }
         for (int i = 0; i < trails.size(); i++) {
             final File f = trails.get(i);
+            LinearLayout rowBox = new LinearLayout(this);
+            rowBox.setOrientation(LinearLayout.HORIZONTAL);
             TextView row = new TextView(this);
             row.setText(f.getName());
             row.setTextSize(13);
@@ -9456,9 +13173,484 @@ public class MainActivity extends Activity {
                     showHistoryCard(f);
                 }
             });
-            historyListBox.addView(row);
+            rowBox.addView(row, new LinearLayout.LayoutParams(0,
+                    LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+            // v3.20 (R10): the compare chip — the row tap still
+            // opens the card; the chip only selects.
+            boolean selected = sameTrailFile(f, compareFileA)
+                    || sameTrailFile(f, compareFileB);
+            Button chip = chipButton(selected ? "Compare \u2713"
+                    : "Compare");
+            chip.setTextColor(selected ? COL_CYAN : COL_TEXT);
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    toggleCompare(f);
+                }
+            });
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT);
+            clp.leftMargin = dp(6);
+            rowBox.addView(chip, clp);
+            historyListBox.addView(rowBox);
         }
     }
+
+    private static boolean sameTrailFile(File a, File b) {
+        return a != null && b != null
+                && a.getAbsolutePath().equals(b.getAbsolutePath());
+    }
+
+    /** Entering History starts unselected (session-only state):
+     *  both picks, both distillations, and the rendered
+     *  comparison go away. */
+    private void clearCompareSelection() {
+        compareFileA = null;
+        compareFileB = null;
+        compareSideA = null;
+        compareSideB = null;
+        refreshCompareUi();
+    }
+
+    /** A Compare chip tap. Selecting a third trail replaces
+     *  the FIRST pick (the pair is always the two most recent
+     *  picks, in pick order); tapping a picked trail unpicks
+     *  it. Selection never opens, starts, or writes anything —
+     *  it only re-renders. */
+    private void toggleCompare(File f) {
+        maybeHapticTick(null);
+        if (sameTrailFile(f, compareFileA)) {
+            compareFileA = compareFileB;
+            compareFileB = null;
+        } else if (sameTrailFile(f, compareFileB)) {
+            compareFileB = null;
+        } else if (compareFileA == null) {
+            compareFileA = f;
+        } else if (compareFileB == null) {
+            compareFileB = f;
+        } else {
+            compareFileA = compareFileB;
+            compareFileB = f;
+        }
+        if (compareFileA == null || compareFileB == null) {
+            compareSideA = null;
+            compareSideB = null;
+        } else {
+            List<Map<String, Object>> ea = parseTrailEvents(compareFileA);
+            List<Map<String, Object>> eb = parseTrailEvents(compareFileB);
+            compareSideA = (ea == null) ? new RunCompare.Side()
+                    : RunCompare.distill(ea, null);
+            compareSideB = (eb == null) ? new RunCompare.Side()
+                    : RunCompare.distill(eb, null);
+        }
+        refreshHistoryList();
+        refreshCompareUi();
+    }
+
+    /** Render the compare head (the pair, named) and, with two
+     *  sides distilled, the comparison itself: every diff row
+     *  with differing values in the accent, then the fact sets
+     *  (same goal) or per-side fact lists, then Share. */
+    private void refreshCompareUi() {
+        if (compareHeadText == null || compareBox == null) return;
+        compareBox.removeAllViews();
+        if (compareFileA == null && compareFileB == null) {
+            compareHeadText.setVisibility(View.GONE);
+            compareBox.setVisibility(View.GONE);
+            return;
+        }
+        if (compareFileB == null || compareSideA == null
+                || compareSideB == null) {
+            compareHeadText.setText("comparing: "
+                    + compareLabel(compareFileA, compareSideA)
+                    + " \u2014 pick one more");
+            compareHeadText.setVisibility(View.VISIBLE);
+            compareBox.setVisibility(View.GONE);
+            return;
+        }
+        compareHeadText.setText("comparing: "
+                + compareLabel(compareFileA, compareSideA) + " vs "
+                + compareLabel(compareFileB, compareSideB));
+        compareHeadText.setVisibility(View.VISIBLE);
+        TextView aLine = new TextView(this);
+        aLine.setText("A \u2014 " + compareFileA.getName());
+        aLine.setTextSize(11);
+        aLine.setTextColor(COL_MUTED);
+        compareBox.addView(aLine);
+        TextView bLine = new TextView(this);
+        bLine.setText("B \u2014 " + compareFileB.getName());
+        bLine.setTextSize(11);
+        bLine.setTextColor(COL_MUTED);
+        compareBox.addView(bLine);
+        List<RunCompare.Row> rows = RunCompare.diff(compareSideA,
+                compareSideB);
+        for (int i = 0; i < rows.size(); i++) {
+            RunCompare.Row r = rows.get(i);
+            TextView line = new TextView(this);
+            StringBuilder sb = new StringBuilder();
+            sb.append(r.label).append(": A ").append(r.a)
+                    .append(" \u00b7 B ").append(r.b);
+            if (r.delta.length() > 0 && !"0".equals(r.delta)) {
+                sb.append(" (").append(r.delta).append(")");
+            }
+            line.setText(sb.toString());
+            line.setTextSize(12);
+            line.setTextColor(r.differs ? COL_CYAN : COL_TEXT);
+            line.setPadding(0, dp(3), 0, 0);
+            compareBox.addView(line);
+        }
+        if (RunCompare.sameGoal(compareSideA, compareSideB)) {
+            RunCompare.FactSets sets = RunCompare.factSets(
+                    compareSideA, compareSideB);
+            addCompareFacts("Facts only in A", sets.onlyA);
+            addCompareFacts("Facts only in B", sets.onlyB);
+            addCompareFacts("Facts in both", sets.both);
+        } else {
+            addCompareFacts("Facts from A", compareSideA.facts);
+            addCompareFacts("Facts from B", compareSideB.facts);
+        }
+        Button shareBtn = chipButton("Share comparison");
+        shareBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { shareComparison(); }
+        });
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = dp(8);
+        compareBox.addView(shareBtn, slp);
+        compareBox.setVisibility(View.VISIBLE);
+    }
+
+    private void addCompareFacts(String head, List<String> facts) {
+        TextView h = new TextView(this);
+        h.setText(head);
+        h.setTextSize(12);
+        h.setTextColor(COL_TEXT);
+        h.setPadding(0, dp(8), 0, 0);
+        compareBox.addView(h);
+        if (facts.isEmpty()) {
+            TextView none = new TextView(this);
+            none.setText("- none");
+            none.setTextSize(12);
+            none.setTextColor(COL_MUTED);
+            compareBox.addView(none);
+            return;
+        }
+        for (int i = 0; i < facts.size(); i++) {
+            TextView f = new TextView(this);
+            f.setText("- " + facts.get(i));
+            f.setTextSize(12);
+            f.setTextColor(COL_TEXT);
+            compareBox.addView(f);
+        }
+    }
+
+    /** A side's plain-words label: its goal when the trail
+     *  carries one, else the trail's own file name (which is
+     *  its date). */
+    private static String compareLabel(File f, RunCompare.Side s) {
+        if (s != null && s.goal.length() > 0) return s.goal;
+        return f == null ? "" : f.getName();
+    }
+
+    private void shareComparison() {
+        if (compareSideA == null || compareSideB == null) {
+            Toast.makeText(this, "Pick two runs to compare first",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("text/plain");
+        send.putExtra(Intent.EXTRA_TEXT, RunCompare.shareText(
+                compareFileA.getName() + " \u2014 "
+                        + compareLabel(compareFileA, compareSideA),
+                compareSideA,
+                compareFileB.getName() + " \u2014 "
+                        + compareLabel(compareFileB, compareSideB),
+                compareSideB));
+        startActivity(Intent.createChooser(send, "Share comparison"));
+    }
+
+    // ---------------- v3.20 (R10): ask-about-a-run ----------
+
+    /** One ask panel: label, status line, thread, and the
+     *  question row. The panel is a reader of a CLOSED record:
+     *  it holds no path to the page, the loop, or any start —
+     *  its only engine use is the judged question call in
+     *  onQaAsk. */
+    private LinearLayout buildQaPanel(final boolean live) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setVisibility(View.GONE);
+        box.addView(cardLabel("ASK ABOUT THIS RUN"));
+        TextView status = new TextView(this);
+        status.setTextSize(11);
+        status.setTextColor(COL_MUTED);
+        status.setVisibility(View.GONE);
+        box.addView(status);
+        TextView thread = new TextView(this);
+        thread.setTextSize(12);
+        thread.setTextColor(COL_TEXT);
+        thread.setTextIsSelectable(true);
+        thread.setVisibility(View.GONE);
+        LinearLayout.LayoutParams thp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        thp.topMargin = dp(6);
+        box.addView(thread, thp);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        rp.topMargin = dp(8);
+        box.addView(row, rp);
+        EditText edit = new EditText(this);
+        edit.setHint("Ask about this run\u2026");
+        edit.setTextSize(13);
+        row.addView(edit, new LinearLayout.LayoutParams(0,
+                LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        Button ask = chipButton("Ask");
+        ask.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { onQaAsk(live); }
+        });
+        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        ap.leftMargin = dp(8);
+        row.addView(ask, ap);
+        if (live) {
+            qaLiveStatus = status;
+            qaLiveThread = thread;
+            qaLiveEdit = edit;
+            qaLiveAskBtn = ask;
+        } else {
+            qaHistStatus = status;
+            qaHistThread = thread;
+            qaHistEdit = edit;
+            qaHistAskBtn = ask;
+        }
+        return box;
+    }
+
+    /** Show each slot's panel exactly when its card's trail is
+     *  a finished record: the live card (never the combined
+     *  chain card — its steps carry their own panels in
+     *  History) and the picked History card. A slot whose card
+     *  changed trails starts a fresh session. */
+    private void refreshQaPanels() {
+        if (qaLiveBox != null) {
+            boolean show = lastCard != null
+                    && lastCardTrailFile != null && !chainCardLive();
+            qaLiveBox.setVisibility(show ? View.VISIBLE : View.GONE);
+            if (show) {
+                if (!sameTrailFile(lastCardTrailFile,
+                        qaLiveSession.file)) {
+                    qaLiveSession.reset();
+                    qaLiveSession.file = lastCardTrailFile;
+                }
+                refreshQaSlot(true);
+            }
+        }
+        if (qaHistBox != null) {
+            boolean show = historyCard != null
+                    && historyCardFile != null;
+            qaHistBox.setVisibility(show ? View.VISIBLE : View.GONE);
+            if (show) {
+                if (!sameTrailFile(historyCardFile,
+                        qaHistSession.file)) {
+                    qaHistSession.reset();
+                    qaHistSession.file = historyCardFile;
+                }
+                refreshQaSlot(false);
+            }
+        }
+    }
+
+    /** One slot's dynamic state: the thread, the Ask gate, and
+     *  the status line — busy first, then why asking is
+     *  unavailable, then the condensed disclosure the panel
+     *  owes whenever its digest was condensed to fit. */
+    private void refreshQaSlot(boolean live) {
+        QaSession s = live ? qaLiveSession : qaHistSession;
+        TextView thread = live ? qaLiveThread : qaHistThread;
+        TextView status = live ? qaLiveStatus : qaHistStatus;
+        Button ask = live ? qaLiveAskBtn : qaHistAskBtn;
+        if (thread == null) return;
+        thread.setText(s.thread.toString());
+        thread.setVisibility(s.thread.length() > 0
+                ? View.VISIBLE : View.GONE);
+        String line = null;
+        boolean enabled = true;
+        if (s.busy) {
+            line = "Thinking\u2026";
+            enabled = false;
+        } else {
+            String why = qaUnavailableReason();
+            if (why != null) {
+                line = why;
+                enabled = false;
+            } else if (s.digest != null && s.digest.condensed) {
+                line = "This run's record was condensed to fit.";
+            }
+        }
+        if (line != null) {
+            status.setText(line);
+            status.setVisibility(View.VISIBLE);
+        } else {
+            status.setVisibility(View.GONE);
+        }
+        ask.setEnabled(enabled);
+    }
+
+    /** Why asking is unavailable right now, or null when it is
+     *  available: a live run owns the model (one line says so),
+     *  no model is downloaded, or the model is not loaded —
+     *  the same states the model card itself reports. */
+    private String qaUnavailableReason() {
+        if (running || teaching) {
+            return "The model is busy with a live run \u2014 ask "
+                    + "again when it finishes.";
+        }
+        ModelStore.Spec spec = activeSpec();
+        if (store == null || spec == null || !store.ready(spec)) {
+            return "No model downloaded yet \u2014 the model card "
+                    + "above can fetch one.";
+        }
+        String path = store.fileFor(spec).getAbsolutePath();
+        if (!engine.isLoaded() || !path.equals(engine.loadedPath())) {
+            return "The model is not loaded yet \u2014 it loads "
+                    + "with the next run.";
+        }
+        return null;
+    }
+
+    /** Navigation discards both conversations (the thread is
+     *  the screen's, never the record's). */
+    private void resetQaSessions() {
+        qaLiveSession.reset();
+        qaHistSession.reset();
+    }
+
+    /** Ask one question of one closed record. The whole model
+     *  exchange runs on a worker thread with the grammar flag
+     *  forced OFF and restored after (the setting itself is
+     *  never written), the digest built once per session (the
+     *  chunked path compresses through the same judged seam),
+     *  and every completion judged by RunQa before a word of
+     *  it can render. The trail file is only ever READ. */
+    private void onQaAsk(final boolean live) {
+        final QaSession s = live ? qaLiveSession : qaHistSession;
+        final EditText edit = live ? qaLiveEdit : qaHistEdit;
+        if (s.busy || s.file == null) return;
+        if (qaUnavailableReason() != null) {
+            refreshQaSlot(live);
+            return;
+        }
+        final String question = edit.getText().toString().trim();
+        if (question.length() == 0) return;
+        edit.setText("");
+        s.busy = true;
+        if (s.thread.length() > 0) s.thread.append("\n\n");
+        s.thread.append("You asked: ").append(question);
+        refreshQaSlot(live);
+        final File file = s.file;
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() {
+                String answer = null;
+                boolean refused = false;
+                String engineError = null;
+                boolean prevGrammar = engine.grammarOn();
+                engine.setGrammarOn(false);
+                try {
+                    if (s.digest == null) {
+                        List<Map<String, Object>> events =
+                                parseTrailEvents(file);
+                        RunDigest.Digest d = RunDigest.build(
+                                events == null
+                                        ? new ArrayList<Map<String, Object>>()
+                                        : events, null);
+                        if (d.chunked) {
+                            List<String> notes =
+                                    new ArrayList<String>();
+                            for (int i = 0; i < d.chunks.size();
+                                    i++) {
+                                String raw = engine.generate(
+                                        RunQa.chunkPrompt(
+                                                d.chunks.get(i)),
+                                        RunQa.QA_MAX_TOKENS);
+                                notes.add(raw == null
+                                        || raw.startsWith("ERROR:")
+                                        ? "" : RunQa.cleanAnswer(raw));
+                            }
+                            d = RunDigest.assemble(d, notes);
+                        }
+                        s.digest = d;
+                    }
+                    String raw = engine.generate(
+                            RunQa.buildPrompt(s.digest.text,
+                                    s.priors, question),
+                            RunQa.QA_MAX_TOKENS);
+                    if (raw == null || raw.startsWith("ERROR:")) {
+                        engineError = (raw == null)
+                                ? "ERROR: no reply" : raw;
+                    } else {
+                        RunQa.Verdict v = RunQa.judge(s.digest.text,
+                                s.priors, question, raw);
+                        if (v.kind == RunQa.Verdict.CORRECT) {
+                            String raw2 = engine.generate(v.prompt,
+                                    RunQa.QA_MAX_TOKENS);
+                            if (raw2 == null
+                                    || raw2.startsWith("ERROR:")) {
+                                engineError = (raw2 == null)
+                                        ? "ERROR: no reply" : raw2;
+                                v = null;
+                            } else {
+                                v = RunQa.judgeCorrection(
+                                        RunQa.evidenceTokens(
+                                                s.digest.text), raw2);
+                            }
+                        }
+                        if (engineError == null && v != null) {
+                            if (v.kind == RunQa.Verdict.ANSWER) {
+                                answer = v.text;
+                            } else {
+                                refused = true;
+                            }
+                        }
+                    }
+                } finally {
+                    engine.setGrammarOn(prevGrammar);
+                }
+                final String fAnswer = answer;
+                final boolean fRefused = refused;
+                final String fError = engineError;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        s.busy = false;
+                        if (fError != null) {
+                            s.thread.append("\nGhost Hands: the "
+                                    + "model is unavailable right "
+                                    + "now.");
+                            feed("Ask about this run: " + fError);
+                        } else if (fRefused) {
+                            s.thread.append("\nGhost Hands: ")
+                                    .append(RunQa.REFUSED_LINE);
+                        } else {
+                            s.thread.append("\nGhost Hands: ")
+                                    .append(fAnswer);
+                            s.priors.add(new RunQa.Pair(question,
+                                    fAnswer));
+                        }
+                        refreshQaSlot(live);
+                    }
+                });
+            }
+        });
+        t.setName("ghost-hands-qa");
+        t.start();
+    }
+
 
     /** A past run's card, rebuilt from its trail (the same
      *  AnswerCard.fromTrailText the Agent card uses) and shown
@@ -9474,6 +13666,9 @@ public class MainActivity extends Activity {
             return;
         }
         historyCard = card;
+        // v3.20 (R10): the picked card's trail — its ask panel
+        // and its compare identity both key off this file.
+        historyCardFile = file;
         historyCardText.setText(card.cardText());
         Bitmap bm = null;
         if (card.screenshotFile.length() > 0) {
@@ -9496,6 +13691,8 @@ public class MainActivity extends Activity {
                 card.stepScreenshotFiles);
         refreshHistoryListenUi();
         historyCardBox.setVisibility(View.VISIBLE);
+        // v3.20 (R10): the picked card's ask panel.
+        refreshQaPanels();
         feed("Answer card: " + file.getName());
     }
 
@@ -9510,6 +13707,657 @@ public class MainActivity extends Activity {
         send.putExtra(Intent.EXTRA_TEXT,
                 historyCard.shareText(cardDateLabel()));
         startActivity(Intent.createChooser(send, "Share answer card"));
+    }
+
+    // ---------------- v3.22 (R11): run reports ------------
+
+    private File reportsDir() {
+        File dir = new File(getFilesDir(), RunReport.DIR_NAME);
+        if (!dir.exists()) dir.mkdirs();
+        return dir;
+    }
+
+    /** The content URI a report is shared under — the
+     *  DlProvider's second root (bare name under reports/). */
+    private android.net.Uri reportUri(String name) {
+        return new android.net.Uri.Builder()
+                .scheme("content")
+                .authority(DlProvider.AUTHORITY)
+                .appendPath(RunReport.DIR_NAME)
+                .appendPath(name)
+                .build();
+    }
+
+    private void shareLiveReport() {
+        if (lastCard == null || lastCardTrailFile == null) {
+            Toast.makeText(this, "No finished run yet — a "
+                    + "report is made from a run's trail",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        buildAndShareReport(lastCard, lastCardTrailFile);
+    }
+
+    private void shareHistoryReport() {
+        if (historyCard == null || historyCardFile == null) {
+            Toast.makeText(this, "Pick a past run first",
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        buildAndShareReport(historyCard, historyCardFile);
+    }
+
+    /**
+     * The one report path both cards' chips call: assemble
+     * the run's shots (end first, steps in step order, only
+     * the files the store still holds), encode them at the
+     * ladder's two sizes, ask RunReport's pure plan which
+     * survive the byte cap, render, write (overwriting the
+     * same trail's earlier report — regeneration is
+     * idempotent), prune by retention, and fire the share
+     * chooser. Generation runs on a background thread —
+     * bitmap decode never blocks the UI thread; a feed line
+     * covers the wait.
+     */
+    private void buildAndShareReport(final AnswerCard card,
+                                     final File trailFile) {
+        final List<Map<String, Object>> events =
+                (card.sourceEvents != null) ? card.sourceEvents
+                        : parseTrailEvents(trailFile);
+        if (events == null) {
+            Toast.makeText(this, "That trail could not be "
+                    + "read", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        feed("Building report…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    File shots = shotsDir();
+                    List<String> candFiles =
+                            new ArrayList<String>();
+                    List<Integer> candSteps =
+                            new ArrayList<Integer>();
+                    if (card.screenshotFile.length() > 0
+                            && new File(shots,
+                                    card.screenshotFile).isFile()) {
+                        candFiles.add(card.screenshotFile);
+                        candSteps.add(Integer.valueOf(0));
+                    }
+                    for (int i = 0; i < events.size(); i++) {
+                        Map<String, Object> ev = events.get(i);
+                        if (!"step_screenshot".equals(
+                                String.valueOf(ev.get("type")))) {
+                            continue;
+                        }
+                        Object f = ev.get("file");
+                        Object s = ev.get("step");
+                        if (f instanceof String
+                                && !candFiles.contains(f)
+                                && new File(shots,
+                                        (String) f).isFile()) {
+                            candFiles.add((String) f);
+                            candSteps.add(Integer.valueOf(
+                                    (s instanceof Number)
+                                            ? ((Number) s)
+                                                    .intValue()
+                                            : 0));
+                        }
+                    }
+                    int n = candFiles.size();
+                    byte[][] full = new byte[n][];
+                    byte[][] small = new byte[n][];
+                    long[] sizesFull = new long[n];
+                    long[] sizesSmall = new long[n];
+                    for (int i = 0; i < n; i++) {
+                        File f = new File(shots, candFiles.get(i));
+                        full[i] = encodeShotJpeg(f,
+                                RunReport.IMG_MAX_WIDTH,
+                                RunReport.JPEG_QUALITY);
+                        small[i] = encodeShotJpeg(f,
+                                RunReport.SMALL_WIDTH,
+                                RunReport.SMALL_QUALITY);
+                        sizesFull[i] = RunReport.base64Length(
+                                full[i] == null ? 0
+                                        : full[i].length);
+                        sizesSmall[i] = RunReport.base64Length(
+                                small[i] == null ? 0
+                                        : small[i].length);
+                    }
+                    long now = System.currentTimeMillis();
+                    String textOnly = RunReport.render(card,
+                            events, new ArrayList<RunReport.Image>(),
+                            new ArrayList<String>(), now);
+                    long overhead = textOnly
+                            .getBytes("UTF-8").length;
+                    RunReport.ImagePlan plan =
+                            RunReport.planImages(n, sizesFull,
+                                    sizesSmall, overhead);
+                    List<RunReport.Image> images =
+                            new ArrayList<RunReport.Image>();
+                    for (int i = 0; i < plan.includedCount; i++) {
+                        byte[] bytes = (plan.rung >= 2
+                                && small[i] != null)
+                                ? small[i] : full[i];
+                        if (bytes == null) continue;
+                        images.add(new RunReport.Image(
+                                candFiles.get(i),
+                                candSteps.get(i).intValue(),
+                                candSteps.get(i).intValue() == 0,
+                                android.util.Base64.encodeToString(
+                                        bytes,
+                                        android.util.Base64.NO_WRAP)));
+                    }
+                    String html = RunReport.render(card, events,
+                            images, plan.notes, now);
+                    String name = RunReport.fileNameForTrail(
+                            trailFile.getName());
+                    if (name == null) {
+                        throw new Exception("no report name");
+                    }
+                    File out = new File(reportsDir(), name);
+                    FileOutputStream fos =
+                            new FileOutputStream(out);
+                    try {
+                        fos.write(html.getBytes("UTF-8"));
+                    } finally {
+                        fos.close();
+                    }
+                    File[] files = reportsDir().listFiles();
+                    if (files != null) {
+                        List<String> names =
+                                new ArrayList<String>();
+                        for (int i = 0; i < files.length; i++) {
+                            if (files[i].isFile()) {
+                                names.add(files[i].getName());
+                            }
+                        }
+                        List<String> old =
+                                RunReport.excess(names);
+                        for (int i = 0; i < old.size(); i++) {
+                            new File(reportsDir(), old.get(i))
+                                    .delete();
+                        }
+                    }
+                    final String reportName = name;
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            Intent send = new Intent(
+                                    Intent.ACTION_SEND);
+                            send.setType("text/html");
+                            send.putExtra(Intent.EXTRA_STREAM,
+                                    reportUri(reportName));
+                            send.addFlags(Intent
+                                    .FLAG_GRANT_READ_URI_PERMISSION);
+                            try {
+                                startActivity(Intent.createChooser(
+                                        send, "Share report"));
+                            } catch (Exception ex) {
+                                Toast.makeText(
+                                        MainActivity.this,
+                                        "Sharing is not "
+                                                + "available",
+                                        Toast.LENGTH_SHORT).show();
+                            }
+                        }
+                    });
+                } catch (final Exception e) {
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            Toast.makeText(MainActivity.this,
+                                    "The report could not be "
+                                            + "built",
+                                    Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    /** Decode a stored shot with sampling, scale it to at
+     *  most maxWidth wide, and re-encode it as a JPEG at the
+     *  given quality — the Activity's half of the report's
+     *  size discipline (RunReport's constants, its plan).
+     *  Null when the file will not decode. */
+    private byte[] encodeShotJpeg(File f, int maxWidth,
+                                  int quality) {
+        try {
+            BitmapFactory.Options bounds =
+                    new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(f.getAbsolutePath(), bounds);
+            if (bounds.outWidth <= 0) return null;
+            int sample = 1;
+            while (bounds.outWidth / (sample * 2) >= maxWidth) {
+                sample *= 2;
+            }
+            BitmapFactory.Options opts =
+                    new BitmapFactory.Options();
+            opts.inSampleSize = sample;
+            Bitmap bm = BitmapFactory.decodeFile(
+                    f.getAbsolutePath(), opts);
+            if (bm == null) return null;
+            if (bm.getWidth() > maxWidth) {
+                int h = (int) ((long) bm.getHeight() * maxWidth
+                        / bm.getWidth());
+                Bitmap scaled = Bitmap.createScaledBitmap(bm,
+                        maxWidth, Math.max(1, h), true);
+                if (scaled != bm) {
+                    bm.recycle();
+                    bm = scaled;
+                }
+            }
+            ByteArrayOutputStream out =
+                    new ByteArrayOutputStream();
+            bm.compress(Bitmap.CompressFormat.JPEG, quality,
+                    out);
+            bm.recycle();
+            return out.toByteArray();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    // ---------------- v3.22 (R11): the templates shelf -----
+
+    /** The shelf: one row per catalogue entry (title,
+     *  blurb, Use), the open one's slot form expanded
+     *  inline under it — the accordion discipline (one form
+     *  open at a time; opening another closes the first). */
+    private void refreshTemplatesShelf() {
+        if (templatesBox == null) return;
+        templatesBox.removeAllViews();
+        templateSlotEdits.clear();
+        templateCreateBtn = null;
+        List<GoalTemplates.Template> all = GoalTemplates.all();
+        for (int i = 0; i < all.size(); i++) {
+            final GoalTemplates.Template t = all.get(i);
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setBackground(roundedBg(COL_CARD_INNER,
+                    COL_CARD_EDGE, 10));
+            box.setPadding(dp(10), dp(9), dp(10), dp(9));
+            LinearLayout.LayoutParams blp =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            blp.topMargin = dp(8);
+            box.setLayoutParams(blp);
+            TextView title = new TextView(this);
+            title.setText(t.title);
+            title.setTextSize(13);
+            title.setTypeface(Typeface.DEFAULT_BOLD);
+            title.setTextColor(COL_TEXT);
+            box.addView(title);
+            TextView blurb = new TextView(this);
+            blurb.setText(t.blurb);
+            blurb.setTextSize(11);
+            blurb.setTextColor(COL_MUTED);
+            box.addView(blurb);
+            Button useBtn = chipButton(
+                    t.id.equals(openTemplateId) ? "Close" : "Use");
+            useBtn.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    openTemplateId = t.id.equals(openTemplateId)
+                            ? null : t.id;
+                    refreshTemplatesShelf();
+                }
+            });
+            LinearLayout.LayoutParams ulp =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.WRAP_CONTENT,
+                            LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            ulp.topMargin = dp(6);
+            box.addView(useBtn, ulp);
+            if (t.id.equals(openTemplateId)) {
+                box.addView(templateForm(t));
+            }
+            templatesBox.addView(box);
+        }
+    }
+
+    /** The open template's slot form: one labelled field
+     *  per slot, and Create — enabled exactly when
+     *  GoalTemplates' pure validation passes (the form asks
+     *  the class at every keystroke; there is no second
+     *  validation logic here). */
+    private LinearLayout templateForm(
+            final GoalTemplates.Template t) {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        android.text.TextWatcher watcher =
+                new android.text.TextWatcher() {
+                    @Override public void beforeTextChanged(
+                            CharSequence s, int a, int b, int c) {
+                    }
+                    @Override public void onTextChanged(
+                            CharSequence s, int a, int b, int c) {
+                    }
+                    @Override public void afterTextChanged(
+                            android.text.Editable s) {
+                        updateTemplateCreateState(t);
+                    }
+                };
+        for (int i = 0; i < t.slots.length; i++) {
+            GoalTemplates.Slot slot = t.slots[i];
+            TextView lab = new TextView(this);
+            lab.setText(slot.label);
+            lab.setTextSize(11);
+            lab.setTextColor(COL_MUTED);
+            LinearLayout.LayoutParams llp =
+                    new LinearLayout.LayoutParams(
+                            LinearLayout.LayoutParams.MATCH_PARENT,
+                            LinearLayout.LayoutParams
+                                    .WRAP_CONTENT);
+            llp.topMargin = dp(8);
+            form.addView(lab, llp);
+            EditText e = new EditText(this);
+            e.setHint(slot.hint);
+            e.setSingleLine(true);
+            e.setTextSize(13);
+            e.setTextColor(COL_TEXT);
+            e.addTextChangedListener(watcher);
+            form.addView(e);
+            templateSlotEdits.put(slot.key, e);
+        }
+        templateCreateBtn = chipButton("Create");
+        templateCreateBtn.setOnClickListener(
+                new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        onTemplateCreate(t);
+                    }
+                });
+        LinearLayout.LayoutParams clp =
+                new LinearLayout.LayoutParams(
+                        LinearLayout.LayoutParams.WRAP_CONTENT,
+                        LinearLayout.LayoutParams.WRAP_CONTENT);
+        clp.topMargin = dp(10);
+        form.addView(templateCreateBtn, clp);
+        updateTemplateCreateState(t);
+        return form;
+    }
+
+    private java.util.Map<String, String> templateFieldValues() {
+        java.util.Map<String, String> values =
+                new java.util.LinkedHashMap<String, String>();
+        for (java.util.Map.Entry<String, EditText> e
+                : templateSlotEdits.entrySet()) {
+            values.put(e.getKey(),
+                    e.getValue().getText().toString());
+        }
+        return values;
+    }
+
+    private void updateTemplateCreateState(
+            GoalTemplates.Template t) {
+        if (templateCreateBtn == null) return;
+        templateCreateBtn.setEnabled(GoalTemplates.validate(
+                t, templateFieldValues()).length() == 0);
+    }
+
+    /** Create, per kind: a GOAL template opens the save
+     *  editor prefilled (nothing is stored by tapping
+     *  Create — the store write is the editor's own Save);
+     *  the PAGE_WATCH template writes its watch directly
+     *  (no page-watch editor exists), baseline pending. */
+    private void onTemplateCreate(GoalTemplates.Template t) {
+        java.util.Map<String, String> values =
+                templateFieldValues();
+        String err = GoalTemplates.validate(t, values);
+        if (err.length() > 0) {
+            Toast.makeText(this, err, Toast.LENGTH_SHORT)
+                    .show();
+            return;
+        }
+        if (GoalTemplates.KIND_PAGE_WATCH.equals(t.kind)) {
+            String url = GoalTemplates.watchUrl(t, values);
+            if (!GoalTemplates.isValidUrl(url)) {
+                Toast.makeText(this, "That page address does "
+                        + "not look usable — it must start "
+                        + "with http:// or https:// and name "
+                        + "a site.", Toast.LENGTH_LONG).show();
+                return;
+            }
+            if (createPendingPageWatch(url)) {
+                openTemplateId = null;
+                refreshTemplatesShelf();
+            }
+            return;
+        }
+        GoalTemplates.EditorBundle bundle =
+                GoalTemplates.editorBundle(t, values,
+                        settings != null
+                                ? settings.defaultPackId
+                                : "standard");
+        if (bundle == null) {
+            Toast.makeText(this, err, Toast.LENGTH_SHORT)
+                    .show();
+            return;
+        }
+        openTemplateId = null;
+        refreshTemplatesShelf();
+        showTemplateSaveDialog(bundle);
+    }
+
+    /** The saved-goal editor, prefilled from a template
+     *  bundle: the standing Save-goal dialog's shape, with
+     *  the bundle's name, goal, pack, and watch/schedule
+     *  suggestions applied at Save — and only at Save.
+     *  Backing out leaves no trace. A same-name re-save
+     *  keeps the existing record's baseline (its history is
+     *  not the template's to wipe). */
+    private void showTemplateSaveDialog(
+            final GoalTemplates.EditorBundle bundle) {
+        final EditText nameEdit = new EditText(this);
+        nameEdit.setHint("Name this goal");
+        nameEdit.setText(bundle.name);
+        new AlertDialog.Builder(this)
+                .setTitle("Save goal")
+                .setView(nameEdit)
+                .setPositiveButton("Save",
+                        new DialogInterface.OnClickListener() {
+                            @Override public void onClick(
+                                    DialogInterface d,
+                                    int which) {
+                                String name = nameEdit
+                                        .getText().toString()
+                                        .trim();
+                                if (name.length() == 0) {
+                                    Toast.makeText(
+                                            MainActivity.this,
+                                            "Give the goal a "
+                                                    + "name first",
+                                            Toast.LENGTH_SHORT)
+                                            .show();
+                                    return;
+                                }
+                                SavedGoals.SavedGoal existing =
+                                        savedGoals.find(name);
+                                SavedGoals.SavedGoal fresh =
+                                        new SavedGoals.SavedGoal(
+                                                name, bundle.goal,
+                                                bundle.packId,
+                                                bundle.schedMinutes);
+                                fresh.watched = bundle.watched;
+                                if (existing != null
+                                        && existing.baseline
+                                                != null) {
+                                    fresh.baseline =
+                                            existing.baseline;
+                                    fresh.baselineSummary =
+                                            existing
+                                                    .baselineSummary;
+                                    fresh.baselineTsMs =
+                                            existing.baselineTsMs;
+                                    fresh.baselineTrailName =
+                                            existing
+                                                    .baselineTrailName;
+                                }
+                                savedGoals.put(fresh);
+                                persistSavedGoals();
+                                if (fresh.hasSchedule()) {
+                                    Alerts.armCheck(
+                                            MainActivity.this,
+                                            fresh);
+                                } else {
+                                    Alerts.cancelCheck(
+                                            MainActivity.this,
+                                            name);
+                                }
+                                loadedSavedName = name;
+                                scheduleLaunched = false;
+                                currentPackId = bundle.packId;
+                                goalEdit.setText(bundle.goal);
+                                goalEdit.setSelection(
+                                        bundle.goal.length());
+                                goalNoteText.setVisibility(
+                                        View.VISIBLE);
+                                goalNoteText.setText(
+                                        "Saved goal: " + name
+                                                + " · policy "
+                                                + bundle.packId
+                                                + (fresh.hasSchedule()
+                                                        ? " · "
+                                                                + SavedGoals
+                                                                        .scheduleLabel(fresh)
+                                                        : "")
+                                                + (fresh.watched
+                                                        ? " · watching"
+                                                        : ""));
+                                feed("Goal saved from the "
+                                        + bundle.name
+                                        + " template: " + name);
+                                refreshGoalsList();
+                            }
+                        })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    /** Write a pending-baseline page watch (baseline null,
+     *  unscheduled) — the path the restock template takes;
+     *  the intake activity writes the same record from its
+     *  own side. The confirmation says what happens next,
+     *  in words. False when the page is already watched. */
+    private boolean createPendingPageWatch(String url) {
+        if (pageWatches == null) pageWatches = new PageWatches();
+        if (pageWatches.find(url) != null) {
+            feed("Already watching this page — its baseline "
+                    + "stands (Saved Goals ▸ Page watches).");
+            Toast.makeText(this, "Already watching this page",
+                    Toast.LENGTH_SHORT).show();
+            return false;
+        }
+        PageWatches.PageWatch w =
+                new PageWatches.PageWatch(url);
+        pageWatches.put(w);
+        persistPageWatches();
+        String host = SiteGrants.hostOf(url);
+        String msg = "Watching "
+                + ((host != null && host.length() > 0)
+                        ? host : url)
+                + " — its baseline is set on its first check. "
+                + "Set a check time in Saved Goals.";
+        feed(msg);
+        Toast.makeText(this, msg, Toast.LENGTH_LONG).show();
+        refreshPageWatchList();
+        return true;
+    }
+
+    // ---------------- v3.22 (R11): the launch-extra seam ---
+
+    /**
+     * The one prefill seam, shared by the share intake and
+     * the QS tile (handleIntent calls it first, from
+     * onCreate and onNewIntent alike). Every extra is
+     * consumed exactly once — removed as it is read, so a
+     * second pass over the same intent cannot re-fire it.
+     *
+     * The decision is ShareIntake.prefillDecision's: with a
+     * run live the incoming text changes NOTHING about the
+     * run or the field (the v3.5 never-disturb invariant) —
+     * a feed line says why; with no text, the empty line;
+     * otherwise the text loads into the goal field, the
+     * Agent screen comes forward, and a feed line names the
+     * source. Start is the user's tap, as with a typed or
+     * spoken goal.
+     */
+    private void consumeLaunchExtras(Intent intent) {
+        boolean openGoals = intent.getBooleanExtra(
+                EXTRA_OPEN_GOALS, false);
+        if (openGoals) intent.removeExtra(EXTRA_OPEN_GOALS);
+        String prefill = intent.getStringExtra(
+                EXTRA_PREFILL_GOAL);
+        if (prefill != null) {
+            intent.removeExtra(EXTRA_PREFILL_GOAL);
+        }
+        boolean fromClipboard = intent.hasExtra(
+                EXTRA_CLIPBOARD_GOAL);
+        if (fromClipboard) {
+            intent.removeExtra(EXTRA_CLIPBOARD_GOAL);
+        }
+        if (openGoals) showScreen(NavState.GOALS);
+        if (prefill == null && !fromClipboard) return;
+        String text;
+        String source;
+        if (fromClipboard) {
+            text = readClipboardText();
+            source = "the clipboard";
+        } else {
+            text = ShareIntake.capForField(prefill);
+            source = "a share";
+        }
+        int decision = ShareIntake.prefillDecision(running,
+                text != null && text.trim().length() > 0);
+        if (decision == ShareIntake.LOAD) {
+            String t = text.trim();
+            goalEdit.setText(t);
+            goalEdit.setSelection(t.length());
+            loadedSavedName = null;
+            scheduleLaunched = false;
+            pendingPageWatchUrl = null;
+            showScreen(NavState.AGENT);
+            feed("Goal filled from " + source
+                    + " — review, then Start.");
+        } else if (decision == ShareIntake.IGNORE_WITH_NOTE) {
+            feed("A run is live — the goal from " + source
+                    + " was not loaded.");
+        } else if (fromClipboard) {
+            feed("The clipboard is empty — type or speak a "
+                    + "goal instead.");
+        } else {
+            feed("Nothing usable arrived in that share.");
+        }
+    }
+
+    /** The primary clip's text, read in the foreground
+     *  (where the platform allows it), trimmed and capped
+     *  by ShareIntake's rule. Null/empty when the clip is
+     *  empty, non-text, or an OEM-restricted clipboard
+     *  refuses — the caller speaks the empty line for all
+     *  three, which is the honest summary of each. */
+    private String readClipboardText() {
+        try {
+            android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager)
+                            getSystemService(
+                                    CLIPBOARD_SERVICE);
+            if (cm == null || !cm.hasPrimaryClip()) return null;
+            android.content.ClipData clip =
+                    cm.getPrimaryClip();
+            if (clip == null || clip.getItemCount() == 0) {
+                return null;
+            }
+            CharSequence cs = clip.getItemAt(0)
+                    .coerceToText(this);
+            if (cs == null) return null;
+            return ShareIntake.capForField(cs.toString());
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private void refreshHistoryListenUi() {
@@ -9616,7 +14464,14 @@ public class MainActivity extends Activity {
     }
 
     private void onMicTapped() {
+        // v3.23 (R12): a goal-mic tap during the loop's listen
+        // SUPERSEDES it — the loop closes (one feed line), its
+        // recognizer session is torn down, and this tap opens
+        // a fresh goal session whose results land in the field
+        // for review and start nothing.
+        if (voiceForFollowUp) closeLoopQuietly(true);
         voiceForAsk = false;
+        voiceForFollowUp = false;
         if (speechListening) return;
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             Toast.makeText(this, "Speech recognition isn't available "
@@ -9648,6 +14503,9 @@ public class MainActivity extends Activity {
             return;
         }
         voiceForAsk = true;
+        // v3.23 (R12): the routes are mutually exclusive —
+        // setting one clears the other.
+        voiceForFollowUp = false;
         if (speechListening) return;
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             voiceForAsk = false;
@@ -9675,6 +14533,7 @@ public class MainActivity extends Activity {
             startListening();
         } else {
             voiceForAsk = false;
+            voiceForFollowUp = false;
             Toast.makeText(this, "Microphone permission denied — "
                     + "voice goals are off", Toast.LENGTH_SHORT).show();
             feed("Voice goals: microphone permission denied");
@@ -9701,6 +14560,16 @@ public class MainActivity extends Activity {
             @Override public void onError(int error) {
                 speechListening = false;
                 voiceForAsk = false;
+                // v3.23 (R12): the loop's session erroring —
+                // timeout, no match, anything — is the loop's
+                // silence: it closes quietly, once, with its
+                // one feed line and no second listen.
+                if (voiceForFollowUp) {
+                    voiceForFollowUp = false;
+                    closeLoopQuietly(true);
+                    refreshMicUi();
+                    return;
+                }
                 feed("Voice input stopped (recognizer error " + error + ")");
                 refreshMicUi();
             }
@@ -9717,6 +14586,24 @@ public class MainActivity extends Activity {
                 // submits itself.
                 boolean forAsk = voiceForAsk;
                 voiceForAsk = false;
+                // v3.23 (R12): the loop's session — its hearing
+                // becomes a run through startFollowUpRun, or
+                // its silence closes the loop. The machine
+                // judges; VoiceGoal.pickHeard above is the same
+                // candidate rule every route uses.
+                boolean forFollowUp = voiceForFollowUp;
+                voiceForFollowUp = false;
+                if (forFollowUp) {
+                    String accepted = voiceLoop.onHeard(text);
+                    if (accepted != null) {
+                        startFollowUpRun(accepted);
+                    } else {
+                        restoreGoalHint();
+                        feed(VoiceLoop.NO_HEARD_LINE);
+                    }
+                    refreshMicUi();
+                    return;
+                }
                 if (text != null) {
                     if (forAsk && askEdit != null) {
                         askEdit.setText(text);
@@ -9739,7 +14626,9 @@ public class MainActivity extends Activity {
         ri.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
                 RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         ri.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, Integer.valueOf(3));
-        ri.putExtra(RecognizerIntent.EXTRA_PROMPT, "Say the goal");
+        ri.putExtra(RecognizerIntent.EXTRA_PROMPT,
+                voiceForFollowUp ? VoiceLoop.LISTEN_PROMPT
+                        : "Say the goal");
         speechListening = true;
         refreshMicUi();
         try {
@@ -9837,12 +14726,18 @@ public class MainActivity extends Activity {
     private Map<String, String> captureRunRules(String packId,
             RunMarker resume, Settings resumeRules,
             String effModelId, boolean effGrammar,
-            String effFallback, boolean effDesktop, int effStyle) {
+            String effFallback, boolean effDesktop, int effStyle,
+            String effBrain) {
         Settings src = (resume != null) ? resumeRules : settings;
         Map<String, String> rules =
                 new java.util.LinkedHashMap<String, String>();
         rules.put(RunMarker.RULE_PACK, packId);
         rules.put(Settings.KEY_MODEL_ID, effModelId);
+        // v3.29: the brain choice rides the marker too — a
+        // resumed run plans where its predecessor planned.
+        // The Fireworks KEY never rides it (it is not a
+        // Settings value; see CloudBrain).
+        rules.put(Settings.KEY_BRAIN, effBrain);
         rules.put(Settings.KEY_GRAMMAR_ON,
                 ModelStore.grammarPrefValue(effGrammar));
         rules.put(Settings.KEY_MAX_STEPS,
@@ -9879,6 +14774,95 @@ public class MainActivity extends Activity {
             File f = runMarkerFile();
             if (f.exists()) f.delete();
         } catch (Exception ignored) { }
+    }
+
+    // ---------------- v3.23: the widget's store (R12) --------
+    // WidgetState is written ONLY here (the plan's rule): each
+    // write is immediately followed by a GhostWidget.refresh,
+    // because the widget never polls (updatePeriodMillis 0).
+    // Every helper is guard-wrapped — a widget failure must
+    // never break a run path.
+
+    private void persistWidgetState() {
+        try {
+            getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+                    .putString(WidgetState.PREF_WIDGET_STATE,
+                            widgetState == null ? ""
+                                    : widgetState.serialize())
+                    .apply();
+        } catch (Throwable ignored) { }
+    }
+
+    private void pushWidget() {
+        persistWidgetState();
+        GhostWidget.refresh(this);
+    }
+
+    /** A run (agent or replay) started: the board goes live. */
+    private void widgetRunStarted(String goal, String trailName) {
+        try {
+            widgetState = WidgetState.started(goal, trailName,
+                    System.currentTimeMillis());
+            pushWidget();
+        } catch (Throwable ignored) { }
+    }
+
+    /** A phase change mid-run (a wait opening or closing, a
+     *  Stop tap): goal, step and trail ride along. A no-op
+     *  write (same phase) pushes nothing. */
+    private void widgetPhase(String phase) {
+        try {
+            if (widgetState == null
+                    || phase.equals(widgetState.phase)) return;
+            widgetState = widgetState.withPhase(phase,
+                    System.currentTimeMillis());
+            pushWidget();
+        } catch (Throwable ignored) { }
+    }
+
+    /** The status callback's step advance: writes only when
+     *  the step actually moved (steps arrive at this app's
+     *  pace, but a refresh per status string is still wasted
+     *  motion). */
+    private void widgetStep(int step) {
+        try {
+            if (widgetState == null || !widgetState.isLive()
+                    || widgetState.step == step) return;
+            widgetState = widgetState.withStep(step,
+                    System.currentTimeMillis());
+            pushWidget();
+        } catch (Throwable ignored) { }
+    }
+
+    /** The run ended: the finished phase with the card's
+     *  outcome line (or the ending's plain word when no card
+     *  exists — a model that would not load still ends). */
+    private void widgetRunFinished(String outcomeLine) {
+        try {
+            if (widgetState == null) return;
+            widgetState = widgetState.finished(
+                    outcomeLine == null ? "" : outcomeLine,
+                    System.currentTimeMillis());
+            pushWidget();
+        } catch (Throwable ignored) { }
+    }
+
+    /** The launch pass: judge the stored state against the
+     *  marker's presence, persist the judged phase back, and
+     *  push the corrected board. */
+    private void correctWidgetAtLaunch() {
+        try {
+            if (widgetState == null) {
+                widgetState = WidgetState.idle();
+            }
+            WidgetState judged = WidgetState.judged(widgetState,
+                    runMarkerFile().exists());
+            if (judged != widgetState) {
+                widgetState = judged;
+                persistWidgetState();
+            }
+            GhostWidget.refresh(this);
+        } catch (Throwable ignored) { }
     }
 
     /**
@@ -10041,6 +15025,83 @@ public class MainActivity extends Activity {
             }
             lastPerceivedMap = p.elements;
             return p;
+        }
+
+        /**
+         * v3.25 (accessibility eyes): the eyes' perception of
+         * the current page, for the Agent.Hands contract.
+         *
+         * Every gate is a reason to return null — the loop then
+         * proceeds exactly as v3.24 — and each gate is cheap:
+         *  service off — the user has not enabled the Ghost
+         *    Hands service in Android Settings, so its instance
+         *    is null. (The DIAGNOSTICS spike toggle does NOT
+         *    gate the eyes: the SPIKE's probes, actuation
+         *    included, stand behind that toggle; the eyes are
+         *    a product perception path whose only switch is the
+         *    user's own Android grant, given in Settings.)
+         *  another app's window — the foreground capture's
+         *    package is not ours: the eyes read THIS app's
+         *    WebView only, and say so by returning nothing
+         *    (the loop consults only at a step whose page the
+         *    DOM eyes just failed on, i.e. our own window; the
+         *    package check is the belt to that suspenders).
+         *  the keyguard — a locked capture is stamped secure
+         *    node by node (the class), so labels would come
+         *    back empty anyway; refused up front instead.
+         *  no visible WebView, or a tree whose page converts
+         *    to no elements — A11yMap's verdict, not ours: the
+         *    loop applies its own thinness judgement to what
+         *    survives (a conversion can be non-null yet thin,
+         *    and thin eyes do not displace the text fallback).
+         *
+         * READ-ONLY by construction: the only service calls
+         * here are instance() and captureForeground() — the
+         * class's pure read. tapAt (the spike's gesture probe)
+         * and every other actuation on the service stay in the
+         * DIAGNOSTICS spike, behind the SpikeGate; nothing in
+         * the eyes' path can reach them.
+         *
+         * The capture and the WebView's URL/title are gathered
+         * on the UI thread (runOnUiAndWait), the thread the
+         * spike's proven read path runs on; the loop thread
+         * waits on the latch. A failure anywhere — service,
+         * window, conversion — returns null: the eyes are a
+         * fallback sense and never a new way for a step to die.
+         */
+        @Override
+        public Eyes.Perception perceiveA11y() {
+            final GhostA11yService svc = GhostA11yService.instance();
+            if (svc == null) return null;
+            final Eyes.Perception[] box = new Eyes.Perception[1];
+            runOnUiAndWait(new Runnable() {
+                @Override public void run() {
+                    try {
+                        GhostA11yService.Capture cap =
+                                svc.captureForeground();
+                        if (cap == null || cap.root == null) return;
+                        if (cap.keyguardLocked) return;
+                        if (!getPackageName().equals(cap.packageName)) {
+                            return;
+                        }
+                        A11yMap.Result res = A11yMap.convert(cap.root);
+                        if (res == null || res.elements.isEmpty()) {
+                            return;
+                        }
+                        Eyes.Perception p = new Eyes.Perception();
+                        p.url = (webView == null) ? ""
+                                : String.valueOf(webView.getUrl());
+                        p.title = (webView == null) ? ""
+                                : String.valueOf(webView.getTitle());
+                        p.textPreview = res.textPreview;
+                        p.elements = res.elements;
+                        box[0] = p;
+                    } catch (Exception e) {
+                        box[0] = null;
+                    }
+                }
+            });
+            return box[0];
         }
 
         private ElementInfo perceivedElement(int el) {
@@ -10510,7 +15571,10 @@ public class MainActivity extends Activity {
             // Path (c), the fallback. v3.6: the engine is the
             // run's READING setting (SearchEngines — the mapping
             // is pure and host-pinned); DuckDuckGo, the default,
-            // produces the pre-v3.6 URL and report byte-for-byte.
+            // produces the pre-v3.6 report byte-for-byte, and
+            // since v3.26 its URL with the US English region
+            // pinned (kl=us-en), so the landing is results, not
+            // DDG's region picker.
             String url = SearchEngines.searchUrl(runFallbackEngineId,
                     java.net.URLEncoder.encode(query, "UTF-8"));
             gotoUrl(url);

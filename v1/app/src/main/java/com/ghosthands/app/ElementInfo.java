@@ -34,6 +34,18 @@ public class ElementInfo {
     // builds a radio group's choices (the label fallback).
     public String domValue;
 
+    // v3.25 (accessibility eyes): where this element was
+    // perceived — null for the WebView eyes' own elements,
+    // "a11y" (A11yMap.SOURCE) for elements converted from the
+    // accessibility node tree. An a11y element is READ-ONLY
+    // evidence: it has no stash slot (domIndex stays -1), and
+    // the agent loop refuses element actions against it before
+    // the Governor's turn — the browser hands address the DOM
+    // stash by number, so acting on an a11y number would
+    // strike whatever DOM element holds that number, a
+    // different element than the one the planner read.
+    public String source;
+
     // v2.1 lookup-box bookkeeping (also not rendered, not in the
     // trail descriptor): the enclosing form's visible text —
     // its labels, legend and plain text — capped at 200 chars by
@@ -130,6 +142,12 @@ public class ElementInfo {
         m.put("tag", tag);
         m.put("role", role);
         m.put("name", name);
+        // v3.25: an element the accessibility eyes supplied
+        // says so in the trail (additive — DOM elements'
+        // descriptors are unchanged in shape).
+        if (source != null && source.length() > 0) {
+            m.put("source", source);
+        }
         if (type != null && type.length() > 0) m.put("type", type);
         if (href != null && href.length() > 0) m.put("href", href);
         if (label != null && label.length() > 0) m.put("label", label);

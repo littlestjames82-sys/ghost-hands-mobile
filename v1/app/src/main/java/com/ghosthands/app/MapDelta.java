@@ -52,6 +52,25 @@ import java.util.Map;
  * v3.9 form state (a checkbox's [x], a select's starred
  * option, a radio group's starred choice), so a pure state
  * flip with an unmoved DOM still diffs as a change.
+ *
+ * v3.24 (the map budget): the FULL block no longer carries
+ * the standing render whole. A full map is capped at
+ * MAP_BUDGET_TOKENS estimated tokens, filled by
+ * budgetSelect: elements whose text overlaps the goal rank
+ * first (more overlap, earlier rank; ties keep document
+ * order), then the rest in document order, until the budget
+ * is spent. Two kinds of element are never trimmed away —
+ * the contract floor: anything that overlaps the goal, and
+ * the interactive controls (the shaping tiers 0-2: search
+ * boxes, inputs, buttons) the planner acts through. The
+ * floor is kept even when it alone exceeds the budget; the
+ * budget caps the page's long tail of goal-irrelevant
+ * links, which is where a dense page's map text actually
+ * goes. Perception itself is still untouched (the loop's
+ * `rendered` stays the full standing render for the trail
+ * and the density judgement); budgetRender is the full
+ * block's text, and sentSet is its element set, so the
+ * diff runs over exactly what the planner was shown.
  */
 public final class MapDelta {
 
@@ -65,6 +84,17 @@ public final class MapDelta {
     /** Consecutive delta blocks a run may send before a full
      *  resync goes out regardless of the diff. */
     public static final int RESYNC_AFTER_DELTAS = 8;
+
+    /** v3.24: the full map block's budget, in estimated
+     *  tokens (Agent.estTokens — the prompt budgeter's own
+     *  measure). The standing render it replaces runs to
+     *  Eyes.MAP_BUDGET_CHARS (1500 chars, roughly 375-450
+     *  est tokens on a link-heavy page); 250 keeps the
+     *  goal's elements and the page's controls and cuts
+     *  the irrelevant tail. The contract floor (see the
+     *  class doc) is exempt: it is kept whole even when it
+     *  alone measures over this budget. */
+    public static final int MAP_BUDGET_TOKENS = 250;
 
     /** The whole delta block when nothing changed: one line. */
     public static final String UNCHANGED_TEXT =
@@ -153,27 +183,146 @@ public final class MapDelta {
     }
 
     /**
-     * The sent set of a perception: the prefix of its element
-     * list whose rendered lines fit the standing render's char
-     * budget (Eyes.MAP_BUDGET_CHARS), accumulated exactly as
-     * Eyes.renderElements accumulates them. These are the
-     * elements a full block for this page actually shows.
+     * v3.24: how much of the goal an element's text carries —
+     * the number of significant goal tokens (the guard
+     * family's RelevanceGuard.significantTokens) that match
+     * the element's own words, judged by the family's
+     * nameMatches rule over the text the planner reads: the
+     * name, the label, the placeholder and the href. Zero
+     * when the goal has no significant tokens (or is null):
+     * every element then ranks by document order alone.
+     */
+    public static int goalOverlap(ElementInfo e, String goal) {
+        if (e == null || goal == null) return 0;
+        java.util.Set<String> tokens =
+                RelevanceGuard.significantTokens(goal);
+        if (tokens.isEmpty()) return 0;
+        StringBuilder text = new StringBuilder();
+        if (e.name != null) text.append(e.name).append(' ');
+        if (e.label != null) text.append(e.label).append(' ');
+        if (e.placeholder != null) {
+            text.append(e.placeholder).append(' ');
+        }
+        if (e.href != null) text.append(e.href);
+        String hay = text.toString();
+        int n = 0;
+        for (String t : tokens) {
+            java.util.Set<String> one =
+                    new java.util.HashSet<String>();
+            one.add(t);
+            if (RelevanceGuard.nameMatches(hay, one)) n++;
+        }
+        return n;
+    }
+
+    /** The contract floor of the map budget: an element the
+     *  trim may never drop — it overlaps the goal, or it is
+     *  an interactive control of the shaping tiers 0-2
+     *  (search boxes, inputs, buttons/selects), the elements
+     *  the planner's actions address. Same priority notion
+     *  as the fit ladder's reduced set (Eyes.topElements). */
+    public static boolean isContractFloor(ElementInfo e, int overlap) {
+        return overlap > 0 || Eyes.tierOf(e) <= 2;
+    }
+
+    /**
+     * v3.24: the elements a full map block shows, chosen
+     * against a token budget. Ranking: goal overlap
+     * descending, then document order. The contract floor
+     * (isContractFloor) is always kept, whole, even when it
+     * alone exceeds the budget — the budget never drops the
+     * map below what the planner's contract needs. The
+     * remaining elements fill in rank order while the kept
+     * lines' total estimated tokens stay within the budget
+     * (an element that does not fit is skipped, and a later
+     * shorter one may still fit). The result is in the
+     * map's own order, with the elements' own numbers: a
+     * trimmed map never renumbers. A null list selects
+     * nothing; a budget under the floor's own cost returns
+     * exactly the floor.
+     */
+    public static List<ElementInfo> budgetSelect(
+            List<ElementInfo> els, String goal, int tokenBudget) {
+        List<ElementInfo> out = new ArrayList<ElementInfo>();
+        if (els == null || els.isEmpty()) return out;
+        final int n = els.size();
+        final int[] overlap = new int[n];
+        final int[] cost = new int[n];
+        Integer[] rank = new Integer[n];
+        for (int i = 0; i < n; i++) {
+            overlap[i] = goalOverlap(els.get(i), goal);
+            cost[i] = Agent.estTokens(lineOf(els.get(i), goal));
+            rank[i] = Integer.valueOf(i);
+        }
+        java.util.Arrays.sort(rank, new java.util.Comparator<Integer>() {
+            @Override public int compare(Integer a, Integer b) {
+                int oa = overlap[a.intValue()];
+                int ob = overlap[b.intValue()];
+                if (oa != ob) return ob - oa;
+                return a.intValue() - b.intValue();
+            }
+        });
+        boolean[] kept = new boolean[n];
+        int total = 0;
+        // The floor first: kept whole, at whatever it costs.
+        for (int i = 0; i < n; i++) {
+            int idx = rank[i].intValue();
+            if (isContractFloor(els.get(idx), overlap[idx])) {
+                kept[idx] = true;
+                total += cost[idx];
+            }
+        }
+        // Then the tail, in rank order, while it fits.
+        for (int i = 0; i < n; i++) {
+            int idx = rank[i].intValue();
+            if (kept[idx]) continue;
+            if (total + cost[idx] <= tokenBudget) {
+                kept[idx] = true;
+                total += cost[idx];
+            }
+        }
+        for (int i = 0; i < n; i++) {
+            if (kept[i]) out.add(els.get(i));
+        }
+        return out;
+    }
+
+    /**
+     * v3.24: the full map block's text — the budget-selected
+     * elements rendered at the standing caps, in map order,
+     * plus the standing truncation line naming how many
+     * elements the budget left out. A page the budget trims
+     * nothing from renders byte-identical to the standing
+     * render (Perception.render): the same lines, and no
+     * truncation line when nothing was dropped.
+     */
+    public static String budgetRender(Eyes.Perception p,
+                                      String goal) {
+        if (p == null) return "";
+        List<ElementInfo> kept = budgetSelect(p.elements, goal,
+                MAP_BUDGET_TOKENS);
+        String body = Eyes.renderElements(kept, goal,
+                Integer.MAX_VALUE, 80, Integer.MAX_VALUE);
+        if (kept.size() < p.elements.size()) {
+            body += "... truncated: "
+                    + (p.elements.size() - kept.size())
+                    + " more element(s) not shown\n";
+        }
+        return body;
+    }
+
+    /**
+     * The sent set of a perception: the elements its full
+     * block actually shows. v3.24: the budget selection
+     * (budgetSelect at MAP_BUDGET_TOKENS) — before, the
+     * standing render's char-budget prefix; the truth either
+     * way is "what the planner was shown", and an element
+     * outside the set is "added" the first time it enters.
      */
     public static List<ElementInfo> sentSet(Eyes.Perception p,
                                             String goal) {
-        List<ElementInfo> out = new ArrayList<ElementInfo>();
-        if (p == null) return out;
-        int used = 0;
-        for (int i = 0; i < p.elements.size(); i++) {
-            ElementInfo e = p.elements.get(i);
-            String line = lineOf(e, goal);
-            if (used + line.length() + 1 > Eyes.MAP_BUDGET_CHARS) {
-                break;
-            }
-            used += line.length() + 1;
-            out.add(e);
-        }
-        return out;
+        if (p == null) return new ArrayList<ElementInfo>();
+        return budgetSelect(p.elements, goal, MAP_BUDGET_TOKENS);
     }
 
     /** The rendered lines of a sent set (parallel, no trailing

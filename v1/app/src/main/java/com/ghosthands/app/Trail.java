@@ -98,6 +98,73 @@ import java.util.Map;
  * watch's label, a url field and a page_watch flag added —
  * so the answer card's watch banner reads them exactly as
  * it reads a goal watch's, untouched.
+ * v3.18 adds "chain_seed" (R9): a chain step's inheritance —
+ * the facts the previous step's done run left for this one,
+ * recorded by the loop at run start BEFORE the scratchpad
+ * is seeded (record-before-touch, the "note" discipline),
+ * carrying the seeded facts, their provenance stamps, the
+ * previous step's goal as run (from_goal) and its trail's
+ * file name (from_trail). Only a DONE run ever seeds; a
+ * failure's findings are never laundered into a later
+ * goal's evidence.
+ * v3.24 adds "thin_map": a step's perception came back with
+ * fewer than ThinMap.THIN_ELEMENT_LIMIT elements on a loaded
+ * page, so the loop waited and re-perceived instead of
+ * letting the planner step blind (the Oct 25 weather-goal
+ * failure). Carries the phase: "retry" (one per attempt, with
+ * the attempt number, the backoff waited and the element
+ * count seen), "recovered" (an attempt's map filled in),
+ * "retry_error" (a re-perception itself failed; the step
+ * continues on the last perception), "fallback_read" (the
+ * map stayed thin through every attempt, so the loop read
+ * the page's text for the step — the extraction itself
+ * rides the "read" event with phase "thin_fallback") and
+ * "fallback_unread" (still thin, but no loop read happened,
+ * with the reason: "auto_read_off", "read_failed", or
+ * "text_already_present").
+ * v3.25 adds "a11y_perception": a step's DOM perception was
+ * unavailable or stayed thin, and the accessibility eyes —
+ * the user's own enabled accessibility service, reading
+ * this app's WebView subtree only — supplied the step's
+ * element map instead. Carries the phase: "used" (the eyes'
+ * map replaced a still-thin DOM map; carries the element
+ * count supplied and the DOM count it replaced) and
+ * "dom_failed" (the DOM perception itself threw and the
+ * eyes' map carried the step; carries the failure's
+ * message). The elements the eyes supply are read-only:
+ * their descriptors carry source "a11y", and the loop's
+ * guard refuses element actions against them before the
+ * Governor's turn (that refusal rides the existing "guard"
+ * event, its reason naming the eyes).
+ * v3.26 adds no type. Its DuckDuckGo region recovery rides
+ * the standing "recover" event with phase "ddg_region": a
+ * fallback search landed on DDG's region-picker page instead
+ * of results, and the loop re-issued the search against the
+ * region-pinned results URL inside the same step (carries
+ * the picker's url, the recovered_url navigated to, and the
+ * query re-issued). One recovery per query per run.
+ * v3.28 adds no type either. Its redirect-shim settle rides
+ * "recover" with two phases: "redirect_shim" (the step's
+ * page was a redirect stub — carries the stub's url and the
+ * destination it forwards to, empty when the stub's target
+ * does not decode to an http(s) address) and
+ * "redirect_shim_goto" (the stub never resolved inside the
+ * wait, so the loop navigated to the decoded destination
+ * itself). Its ddg_region amendment also shows here: a
+ * ddg_region event whose recovered_url EQUALS its url is
+ * the no-navigation case — the pinned address was already
+ * open, so the recovery recorded and noted without
+ * navigating.
+ * v3.32 adds no type either. It makes this class honest
+ * about its own writes: record() tracks whether the latest
+ * write actually reached the file (see fileWritten()), and
+ * Agent's record-before-execute gate stops a run whose
+ * govern / approval / execute records did not land on disk,
+ * rather than acting unrecorded. The failure itself stays
+ * accounted in memory — record() keeps the event in the
+ * in-memory list whether or not the file write succeeded,
+ * so the run's own stop record survives to say why it
+ * stopped.
  */
 public class Trail {
 
@@ -108,11 +175,20 @@ public class Trail {
             "fit", "run", "note", "watch", "route", "screenshot",
             "assist", "step_screenshot", "ask", "answer",
             "tab_opened", "tab_switched", "tab_closed",
-            "page_watch",
+            "page_watch", "chain_seed", "thin_map",
+            "a11y_perception",
     };
 
     private final File path;
     private final List<Map<String, Object>> events = new ArrayList<Map<String, Object>>();
+
+    // v3.32: the durability of the most recent record()'s file
+    // write. True until a write fails; a successful write sets
+    // it true again (the semantics are per-write, not a latch —
+    // see fileWritten()). A null-path (in-memory) trail never
+    // attempts a write, so this stays true for it by design.
+    private boolean lastWriteOk = true;
+    private String lastWriteError = null;
 
     public Trail(File path) {
         this.path = path;
@@ -124,6 +200,37 @@ public class Trail {
 
     public File getPath() {
         return path;
+    }
+
+    /** True when this trail is backed by a file on disk (as
+     *  opposed to a null-path, memory-only trail). */
+    public synchronized boolean fileBacked() {
+        return path != null;
+    }
+
+    /**
+     * v3.32: did the most recent record() actually reach its
+     * backing store? For a file-backed trail: true iff the
+     * latest write opened, wrote, flushed and synced without
+     * throwing; false when it failed (lastWriteError() names
+     * the failure). The semantics are deliberately per-write:
+     * a trail whose storage recovers reports true again after
+     * its next successful record, so a caller checking right
+     * after the record it cares about learns about THAT
+     * record. For a memory-only trail (null path) the
+     * in-memory list is the only store there is and every
+     * record lands in it, so this is always true — durability
+     * has no second store to fail against; Agent's gate
+     * enforces only on file-backed trails regardless.
+     */
+    public synchronized boolean fileWritten() {
+        return lastWriteOk;
+    }
+
+    /** The most recent write failure's message, or null when
+     *  the latest write landed (or none was attempted). */
+    public synchronized String lastWriteError() {
+        return lastWriteError;
     }
 
     public synchronized Map<String, Object> record(String type, int step,
@@ -148,10 +255,20 @@ public class Trail {
                 out.flush();
                 out.getFD().sync();
                 out.close();
-            } catch (Exception ignored) {
-                // The in-memory copy remains; a trail write failure must
-                // not crash the run, but record-before-execute callers
-                // check fileWritten() when it matters.
+                lastWriteOk = true;
+                lastWriteError = null;
+            } catch (Exception e) {
+                // The in-memory copy remains (the event was added
+                // above, before the write was attempted); a trail
+                // write failure must not crash the run, but it is
+                // no longer silent: lastWriteOk / lastWriteError
+                // carry it, and Agent's record-before-execute
+                // gate checks fileWritten() after the govern,
+                // approval and execute records — when it matters,
+                // which is before the hands move.
+                lastWriteOk = false;
+                lastWriteError = e.getMessage() != null
+                        ? e.getMessage() : String.valueOf(e);
             }
         }
         return ev;

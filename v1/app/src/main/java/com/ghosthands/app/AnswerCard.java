@@ -123,6 +123,18 @@ public class AnswerCard {
      *  everything else on the card: never rendered into the
      *  card text or the share text. */
     public List<Map<String, Object>> sourceEvents = null;
+    /** v3.18 (R9 — chaining): the facts this run INHERITED
+     *  from a previous chain step, from its "chain_seed" trail
+     *  event — rendered under their own "From the previous
+     *  step:" heading, NEVER merged into facts: a run's card
+     *  distinguishes what it found from what it was handed,
+     *  and the reader deserves the same distinction. Empty for
+     *  every run that was not a chain step. */
+    public final List<String> seededFacts = new ArrayList<String>();
+    /** v3.18 (R9): the previous step's goal as run, from the
+     *  chain_seed event — the previous-step group's heading
+     *  context. */
+    public String seededFromGoal = "";
 
     private AnswerCard() { }
 
@@ -156,6 +168,10 @@ public class AnswerCard {
         // event, which the loop records only on success.
         String lastExecuteKind = null;
         String lastReadResult = null;
+        // v3.18 (R9): the chain_seed event's material, collected
+        // through the same single pass.
+        String cardSeededFromGoal = "";
+        List<String> cardSeededFacts = new ArrayList<String>();
         List<Scratchpad.Fact> noted = new ArrayList<Scratchpad.Fact>();
         Set<String> notedTexts = new LinkedHashSet<String>();
         for (int i = 0; i < events.size(); i++) {
@@ -179,6 +195,19 @@ public class AnswerCard {
             } else if ("read".equals(type)) {
                 String r = str(ev.get("result"));
                 if (r.length() > 0) lastReadResult = r;
+            } else if ("chain_seed".equals(type)) {
+                // v3.18 (R9): the inherited facts, kept in
+                // their own group — never merged into facts.
+                cardSeededFromGoal = str(ev.get("from_goal"));
+                Object fl = ev.get("facts");
+                if (fl instanceof List) {
+                    List<?> arr = (List<?>) fl;
+                    for (int j = 0; j < arr.size(); j++) {
+                        if (arr.get(j) instanceof String) {
+                            cardSeededFacts.add((String) arr.get(j));
+                        }
+                    }
+                }
             } else if ("note".equals(type)) {
                 String status = str(ev.get("status"));
                 if (status.length() > 0
@@ -234,6 +263,8 @@ public class AnswerCard {
             }
             card.facts.add(line);
         }
+        card.seededFacts.addAll(cardSeededFacts);
+        card.seededFromGoal = cardSeededFromGoal;
         // v3.1: the findings fallback — only when the run
         // produced neither an answer (a done summary) nor
         // noted facts to show for itself.
@@ -426,6 +457,12 @@ public class AnswerCard {
                 sb.append('\n').append(facts.get(i));
             }
         }
+        if (!seededFacts.isEmpty()) {
+            sb.append("\nFrom the previous step:");
+            for (int i = 0; i < seededFacts.size(); i++) {
+                sb.append("\n- ").append(seededFacts.get(i));
+            }
+        }
         return sb.toString();
     }
 
@@ -470,6 +507,12 @@ public class AnswerCard {
             sb.append("\nFacts noted:");
             for (int i = 0; i < facts.size(); i++) {
                 sb.append('\n').append(facts.get(i));
+            }
+        }
+        if (!seededFacts.isEmpty()) {
+            sb.append("\nFrom the previous step:");
+            for (int i = 0; i < seededFacts.size(); i++) {
+                sb.append("\n- ").append(seededFacts.get(i));
             }
         }
         return sb.toString();

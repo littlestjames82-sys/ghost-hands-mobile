@@ -5,6 +5,2736 @@ entirely on the phone. Foundation reused from the on-device proof
 (~/workspace/ghost-hands-mobile/BUILD_NOTES.md): same pinned llama.cpp
 b11382 Android build, same JNI shim design, same model download flow.
 
+## v3.32.0 (Nov 1, 2026) — trust hardening: the record is the product
+
+Four defects, each verified firsthand against this tree
+before a line was written (an outside review of the stale
+public snapshot pointed at the family; every claim below
+was re-proven on the current code). No features, no
+settings keys, no permission changes, no prompt changes,
+no new trail types. Build-start checks: the tree matched
+the v3.31.0 record (version pin 3.31.0 / code 53, registry
+at 33 types) and the suite was re-verified green in the
+foreground (2,286) before the first edit. Version is now
+54 / "3.32.0".
+
+- FIX 1, TRAIL DURABILITY (the headline). Through v3.31,
+  Trail.record() wrote each event with flush+sync but
+  caught and ignored write failures — and its own comment
+  claimed "record-before-execute callers check
+  fileWritten() when it matters", a method that did not
+  exist, checked by no one. Agent executed governed
+  actions whether or not the govern/execute records had
+  reached disk: a full disk or a storage fault meant a
+  consequential action with no durable account of its
+  decision, in the product whose whole claim is the
+  record. Now: record() tracks its latest write —
+  fileWritten() reports whether the most recent record
+  actually landed (opened, wrote, flushed, synced),
+  lastWriteError() names the failure, fileBacked() says
+  whether there is a file at all. The semantics are
+  per-write, not a latch: a trail whose storage recovers
+  reports written again after its next landed record, so
+  a caller checking immediately after the record it cares
+  about learns about THAT record. A memory-only trail
+  (null path — the host harness's shape) has no second
+  store to fail against: its records land in the only
+  list it has, fileWritten() is always true for it, and
+  the gate below enforces only on file-backed trails.
+  THE GATE (Agent.stopIfTrailBroken): immediately after
+  the govern, approval and execute records in BOTH
+  governed paths — the planner loop and route replay —
+  a file-backed trail whose latest write failed stops
+  the run: the action does NOT execute, the feed names
+  the failure, and the stop record (reason "error",
+  summary naming the trail write failure and the record
+  that did not land) is itself recorded — into the
+  trail's in-memory copy, which keeps every event
+  whether or not the file write succeeded, so the
+  account of the failure survives even when the file
+  does not. The misleading comment in record() now
+  describes the real mechanism.
+
+- FIX 2, NAVIGATION SCHEME POLICY (new pure class
+  NavScheme). Page-initiated navigations never pass the
+  Governor, and the WebViewClient's
+  shouldOverrideUrlLoading returned false for everything
+  through v3.31 — a page could navigate the view to
+  file:, javascript:, data:, content: or intent: and be
+  waved through. NavScheme.schemeOf reads a URL's scheme
+  the way the URL standard does (tab/newline removed
+  anywhere, leading whitespace/C0 stripped, case folded,
+  a legal-scheme shape required — anything else reads as
+  no scheme), and allowed() admits exactly http:, https:
+  and about: (the app's own blank page). The client now
+  consults it: a refused navigation is cancelled and fed
+  a visible line naming the scheme — never silent.
+  SCOPE BOUNDARY, stated plainly: this is scheme policy
+  only. Host/domain policy stays the Governor's job on
+  agent actions, unchanged; an http(s) navigation is not
+  re-judged here. data:/blob: DOWNLOADS are not
+  navigations and are untouched — they still arrive
+  through the DownloadListener and are judged there.
+
+- FIX 3, DOWNLOAD REDIRECT REVALIDATION (new pure class
+  DownloadRedirects; MainActivity.fetchHttpDownload
+  rewired). The http(s) download transport followed
+  redirects automatically (setInstanceFollowRedirects
+  (true)), so the platform rode the chain wherever it
+  went — Downloads.decide had judged the OFFERED address,
+  but a permitted host could 302 the fetch to a blocked
+  domain or down to http and the bytes arrived unjudged.
+  Automatic following is now OFF; the fetch follows
+  301/302/303/307/308 by hand, at most MAX_HOPS (5).
+  Every hop's destination is judged by
+  DownloadRedirects.hopDenial behind a small Policy
+  interface, wired in MainActivity to THE SAME
+  Downloads.decide(policy, name, mime, url) evaluation
+  the offered address got — no second policy exists. A
+  denied hop aborts the download in the flow's standing
+  failure shapes (a "download" trail record + a feed
+  line) with the policy's own reason; a hop that would
+  merely ASK does not re-ask mid-fetch (the download as
+  a whole was already allowed or approved; only a DENY
+  bars a hop, and the domain rules are the part of
+  decide() a redirect could actually escape). An
+  https -> http hop is refused outright, before policy
+  is even consulted. Cookies are never carried across a
+  host change (DownloadRedirects.sendCookies, hosts read
+  through SiteGrants.hostOf — the parser the policy
+  itself uses): the chain's first request sends the
+  WebView's cookies for the offered address exactly as
+  before; a same-host hop keeps them; a cross-host hop
+  sends none. Non-redirect answers keep every existing
+  behaviour and failure shape, including a redirect
+  status with no Location, which fails as the server's
+  answer, as it effectively did before.
+
+- FIX 4, THE BUILD FAILS CLOSED ON THE KEYSTORE.
+  build-apk.sh step [0/9] used to GENERATE a fresh
+  keystore (keytool -genkeypair) whenever app.keystore
+  was missing — silently minting a new signing identity,
+  after which no update could ever install over the
+  shipped app again. It now exits 1 immediately with a
+  message naming the missing keystore and why no
+  replacement will be improvised. Proven in a scratch
+  tree (a fake-$HOME workspace, every dependency
+  symlinked, the keystore absent and no APK present):
+  the script stopped at [0/9] with the message, exit 1,
+  produced no APK and created no keystore. The preserved
+  keystore's builds are unaffected — this build signed
+  with it, cert de6969f0…25cd71b as always.
+
+- TESTS (2,286 -> 2,315, all green, run three times in
+  the foreground; 29 new checks, all in v332Tests, plus
+  the two import lines the harness's explicit-import
+  discipline requires). Pure: the durability accessor —
+  memory-only semantics, a landed write (bytes verified
+  on disk), a failed write (path under a regular file:
+  not written, error named, the event surviving in
+  memory), and per-write recovery (the blocker replaced
+  by a directory, the next record lands and reports
+  written). Scripted runs, on one fixture world: BROKEN
+  TRAIL drives a governed tap against an unwritable
+  file trail — the govern record stands in memory, no
+  execute record exists, the tap never ran, exactly one
+  planner call was spent, and the run stops "error" with
+  the trail write failure named in the summary and the
+  feed; GOOD TRAIL (control) runs the same script
+  against a writable file — the gate never trips, the
+  tap executes, govern and execute are verified on disk,
+  the run completes done. The scheme matrix: the allowed
+  set; the escape family (file/javascript/data/content/
+  blob/intent/ftp/mailto); case evasions; whitespace and
+  control evasions (leading junk, embedded tab/newline,
+  a raw C0 byte — stored in the harness as an explicit
+  escape); scheme-less refusals (null, empty, bare host,
+  scheme-relative, colon-less); illegal scheme shapes.
+  The hop matrix behind a fake policy: the followed
+  status set exactly; same-host and policy-clean
+  cross-host hops proceed; a policy-denied cross-host
+  hop aborts with the policy's own reason; downgrade
+  refused, upgrade proceeds; off-web hops refused; the
+  5-hop cap (fifth proceeds, sixth refused); Location
+  resolution on the platform's relative semantics, with
+  unreadable pairs returning null; the cookie rule
+  (first request, same host, host change, case folded);
+  a null policy judging nothing while the structural
+  rules stand. Pins: the registry stands at 33 types;
+  the client consults NavScheme; follow-redirects(true)
+  is nowhere in MainActivity and (false) stands in its
+  place; hopDenial is wired; the gate stands after all
+  three records in both governed paths (2+2+2 call
+  sites); Trail exposes fileWritten(); the build script
+  contains no -genkeypair and carries the refusal.
+
+- EXISTING CHECKS CHANGED (one, the standing one): the
+  version pin moves to 3.32.0 / code 54. No registry pin
+  moved, no permission pin moved, no other expectation
+  changed, and no fixture world needed repair — the
+  harness's scripted runs ride memory-only trails, which
+  fileWritten() always reports written, so the new gate
+  is inert across the whole pre-existing suite by
+  construction. One test-authoring correction, disclosed:
+  the resolve check first expected a "://nope" Location
+  to be unreadable; the JDK resolves it as a same-host
+  path (the platform semantics the helper promises), so
+  the null case is pinned with an unknown-protocol
+  Location instead — the helper was right, the
+  expectation was wrong.
+
+- BUILD. Host suite is not this record: the APK was
+  built in-tree with ./build-apk.sh (BUILD-OK) —
+  4,700,999 bytes, sha256
+  ad6fb7df8843f47dfeb88c758ef927a0c9b744ff77d5bf9fdec756a99bf6a2e5
+  — badging verified 54 / "3.32.0", signing cert
+  de6969f0…25cd71b (the preserved product keystore),
+  permissions byte-identical to v3.31's ten, and the dex
+  verified to carry NavScheme, DownloadRedirects and the
+  gate's stop wording. At ~/workspace/ghost-hands-mobile/
+  v1/ghost-hands.apk; nothing pushed, nothing uploaded
+  — the parent ships.
+
+- WHAT THE HOST CANNOT PROVE, stated plainly: the
+  unwritable-path fault is real file I/O on the host's
+  filesystem, but a phone's storage failing MID-RUN
+  (the field shape: the trail file's directory filling
+  or the flash faulting after earlier records landed)
+  is only approximated by a path that never writes —
+  the per-write semantics are exactly what that shape
+  needs, and only a device can stage it. The scheme
+  gate's Android half (that the platform routes every
+  page-initiated navigation through the String overload
+  consulted here, including redirect chains) is the
+  documented platform behaviour, not something the host
+  suite can observe. The redirect revalidation's live
+  half — a real server's chain, a real CDN's cross-host
+  hop, the cookie-less cross-host hop failing at a login
+  wall it once passed — is network behaviour; the host
+  proves the judge, not the judged world.
+
+- DEVICE PASS OWED (Ryan's phone, on the shipped
+  build): any ordinary run (the gate is invisible while
+  storage is healthy); a page that tries to navigate
+  somewhere odd (a file:/intent: link) shows the block
+  line and stays put; a download that redirects — a
+  same-host chain still lands, and a cross-host one
+  lands cookie-less or fails honestly. The standing
+  device queue (weather exam on v3.31+, grammar A/B)
+  is untouched by this release.
+
+## v3.31.0 (Nov 1, 2026) — the fact-grounding guard
+
+The trained planner's first full run is this release's
+whole brief. On Nov 1, 2026 the imported trained brain ran
+the Oakdale weather goal end to end for the first time
+(trail saved at device-trails/2026-11-01-weather-trained-
+run.jsonl): it read only the generic National Weather
+Service landing page — 2,036 chars of menus and footer, no
+forecast anywhere in it — then noted "Next three days:
+High 60°F, Low 40°F, Chance of rain 20%" and answered
+done with the same figures. Those figures appear in
+NOTHING the run read (the real forecast was 61/54 at 80%,
+71/53 at 10%, 76/61 at 10%). Three action guards fired
+correctly that run; nothing judged the facts. Worse, the
+note laundered the done past the v3.0 evidence rule: that
+rule's evidence includes the scratchpad, so once an
+invented figure is NOTED, a done repeating it finds the
+figure "in the evidence" — its own note. This release
+closes both holes with one deterministic guard in the
+standing family. Build-start checks: the tree matched the
+v3.30.0 record (version pin 3.30.0 / code 52, registry at
+33 types) and the suite was re-verified green in the
+foreground (2,264) before the first edit. Version is now
+53 / "3.31.0". No new permissions, no new settings keys,
+no policy-pack changes, no prompt changes, no new trail
+types — the guard rides the standing "guard" event.
+
+- THE GUARD (new pure class GroundingGuard, the
+  RelevanceGuard family's shape: no Android, no I/O, no
+  state; the loop owns the corpus and the counter).
+  judge(candidate, corpus, correctionsSoFar) returns a
+  Verdict — PASS / CORRECT / BYPASSED, the ungrounded
+  tokens, and the wording. NUMERIC TOKENS are
+  RelevanceGuard.numberTokens — the tokenizer the whole
+  family (and RunQa, and WatchCompare) already shares:
+  maximal digit runs, a decimal point kept between
+  digits ("20.5" is its own token, distinct from "20"),
+  grouping commas dropped ("1,200" -> "1200"), so
+  "60°F", "60 degrees" and "60" are the one token "60".
+  A token is GROUNDED iff it appears among the corpus's
+  own tokens — standalone-token equality on both sides,
+  so substring hits never count: a corpus carrying
+  "2036" does not ground "20", and "20910" grounds
+  neither "20" nor "2091" (both pinned). PASS when the
+  candidate has no numeric tokens or every token is
+  grounded; CORRECT when any token is ungrounded —
+  including the empty-corpus case, where a figured
+  candidate corrects by definition. A figureless
+  candidate passes untouched at any count, so the
+  honest "I could not find it" done stays open.
+
+- THE CORPUS. The loop accumulates a per-run READ
+  CORPUS (Agent.run's readCorpus) from the strings that
+  are actually surfaced to the planner as read text:
+  every successful planner `read` result and `read_file`
+  result (the result strings carried into history nearly
+  whole), the arrival auto-read's section (the exact
+  string the prompt injects), and the thin-map fallback
+  read's chunk (which rides history verbatim). Perceive
+  previews and element maps never enter it — seeing a
+  number in a snippet is not reading it. Notes never
+  enter it either: that is the anti-laundering rule, and
+  the TONIGHT harness run proves it (below). The corpus
+  is run-global, not per-tab — the run's reading, whole.
+  One seeding exception, deliberate: when the run is a
+  chain step, the corpus OPENS with the chain seed's
+  fact texts. A seed is not the planner's own noting —
+  it is a previous step's delivered findings, handed
+  over through the trail-recorded chain_seed event
+  before the first decide and provenance-stamped in the
+  prompt; the R9 contract is that a seeded step may
+  answer from its seed, and the v3.18 seeded-done check
+  pins that contract. The planner still cannot ground
+  any NEW figure by noting it first.
+
+- THE INTERCEPTION. In the decide loop, after the
+  standing done guards and before the Governor ever
+  sees the action, every `note` and `done` is judged:
+  the note against its fact, the done against its
+  summary. On CORRECT the action is NOT executed (a
+  corrected note never reaches the scratchpad; the
+  correction consumes the step, is not stagnation, and
+  never reaches the Governor as an execute): a "guard"
+  event (outcome "correct", reason prefixed "fact
+  grounding corrected by guard:") names the ungrounded
+  figures and instructs — those figures appear in
+  nothing you have read this run; read a page that
+  actually contains the answer, or finish with done
+  saying you could not find it, without figures. The
+  same history note carries the wording to the planner.
+  CAP: GROUNDING_CORRECTION_CAP = 3 per run. Past it
+  the verdict is BYPASSED: the action proceeds exactly
+  as the planner wrote it (the guard never rewrites
+  planner text), a "guard" event with outcome
+  "bypassed" names the still-ungrounded figures, and
+  the figures also ride the run_summary record as
+  "grounding_bypassed" (both summary branches in
+  stop(); the field is present only when a bypass
+  happened). Both the interactive and unattended paths
+  get the check by construction — ServiceHands is the
+  hands, Agent.run is the one loop both ride; the
+  UNATTENDED harness run below proves it headless
+  under the readonly pack.
+
+- RELATION TO THE OLDER RULE. The v2.1/v3.0
+  done-grounding guard stands, untouched, ahead of
+  this one in the chain: it still owns the numberless
+  restatement on a number-cued goal (this guard passes
+  figureless candidates by design) and its at-least-
+  one-figure-in-evidence shape. The two divide the
+  work: shape and presence there, provenance of EVERY
+  figure here. A done invented wholesale is refused by
+  whichever speaks first; a done mixing read and
+  invented figures — which the old rule passed on the
+  read one's strength — is refused here, with the
+  invented figures named.
+
+- TESTS (2,264 -> 2,286, all green, run twice in the
+  foreground; 22 new checks, all in v331Tests). Pure:
+  unit dressings normalize away (60°F / 47 degrees /
+  20%); separators in both directions; decimals are
+  their own tokens in both directions; standalone
+  matching (2036 vs 20; 20910 vs 20 and 2091, and
+  grounding 20910 itself); partial grounding names
+  only the invented figure; empty and null corpora
+  ground nothing; a figureless candidate passes on
+  any corpus (nulls safe); duplicates collapse in
+  candidate order; the cap's CORRECT -> BYPASSED turn
+  and PASS's immunity to the count; both wordings
+  name the figures. Scripted runs: TONIGHT replays
+  the field shape — read a forecast-free landing page,
+  note the invented 60/40/20 (corrected, figures
+  named), note a figure that WAS read (the 20910 ZIP —
+  lands), answer done with the invention (corrected
+  again: the corrected note laundered nothing), then
+  finish with the honest figureless done; the
+  run_summary carries no bypass field. GROUNDED reads
+  a real forecast and is never touched (note lands,
+  done completes, three calls). BYPASS spends the cap
+  with three corrections and lets the fourth proposal
+  proceed with its text byte-identical ("The answer
+  is 42."), the bypass trailed and the figure named
+  in the run_summary. UNATTENDED fires the same
+  correction headless under the readonly pack.
+
+- EXISTING CHECKS CHANGED (one, the standing one):
+  the version pin moves to 3.31.0 / code 53. No
+  registry pin moved (no new type), no permission pin
+  moved, and NO other check's expectation changed.
+  Two fixture worlds were repaired instead, both
+  disclosed: (1) the v3.0 note scenario in main() —
+  its scripted planner noted figures in a world where
+  nothing could be read (the shared stub's read
+  always errors); it now stands on an arrived forecast
+  page whose arrival auto-read carries the noted
+  figures, so the note states what the run read —
+  script and all four of its assertions unchanged.
+  (2) the v3.18 capture scenario — its run's page read
+  now serves the bolt price its note states (the
+  loop's thin-map fallback reads that zero-element
+  page before the first decide); script and assertion
+  unchanged. A first full-suite run with the guard
+  live failed exactly six checks, all in these two
+  fixtures plus the seeded-done check the corpus
+  seeding answers; after the repairs the suite is
+  green with every prior expectation intact.
+
+- BUILD. Host suite only is not this record: the APK
+  was built in-tree with ./build-apk.sh (BUILD-OK) —
+  4,696,903 bytes, sha256
+  dd458eea0473f67a127698a98dd3ecaa4a98424a09fa71dd27b0a31988a79cc9
+  — badging verified 53 / "3.31.0", signing cert
+  de6969f0…25cd71b (the preserved product keystore),
+  permissions byte-identical to v3.30's ten, and the
+  dex verified to carry GroundingGuard and the
+  correction string. At ~/workspace/ghost-hands-mobile/
+  v1/ghost-hands.apk; nothing pushed, nothing uploaded
+  — the parent ships.
+
+- WHAT THE HOST CANNOT PROVE, stated plainly: the
+  scripted runs replay tonight's SHAPE against
+  fixtures. Whether the trained planner, corrected
+  twice with its invented figures named, actually
+  goes and reads a real forecast on the phone — or
+  spends its cap and gets bypassed with the invention
+  standing (trailed, but standing) — is behaviour only
+  a device run shows. The guard also cannot judge
+  figures stated in words ("sixty degrees"), figures
+  a page carried only in its preview or map (never
+  corpus, by design — the planner must actually read),
+  or arithmetic: a done that ADDS two read figures and
+  reports the sum states a token it never read, and
+  will be corrected for it. That last one is the
+  guard's known hard edge, accepted for this release:
+  three corrections teach, the bypass keeps it from
+  becoming a trap, and the trail keeps any bypassed
+  figure honest.
+
+- DEVICE PASS OWED (Ryan's phone, on the shipped
+  build): the weather goal on the TRAINED brain — the
+  exam re-run: watch the trail for the fact-grounding
+  corrections naming 60/40/20 if it invents again, and
+  for what it does next (reads a forecast, or answers
+  honestly figureless). The same goal on stock Q5 as
+  control. A run that reads a real forecast first
+  should show no grounding events at all.
+
+## v3.30.0 (Nov 1, 2026) — the trained planner, imported
+
+The everything train's first item lands: the QLoRA
+fine-tune of the Q5 brain (718 planner examples aimed at
+the failures the stock planner kept making — search-first
+discipline chief among them), trained in Colab Oct 31 -
+Nov 1, 2026, becomes a model the app can actually run.
+There is no download: the trained GGUF's only home is a
+file in Ryan's Google Drive (MyDrive/ghosthands-trained/
+qwen2.5-1.5b-instruct-q5_k_m.gguf) with no stable public
+URL, so this release builds an IMPORT path beside the
+download path, and the two never cross. Build-start
+checks: the tree matched the v3.29.0 record (version pin
+3.29.0 / code 51, registry at 33 types, 2,253 host tests)
+and the suite was re-verified green in the foreground
+before the first edit. Version is now 52 / "3.30.0". No
+new manifest permissions — the picker is SAF, as the
+file reader's has been since v3.16; the only manifest
+change is the version stamp. Host suite and an APK
+compile pass in this record; nothing was shipped or
+pushed — the parent verifies and ships, and the device
+pass below is owed.
+
+- THE PIN (ModelStore.TRAINED). A third registry entry,
+  id "q5_k_m_trained", display name "Qwen2.5-1.5B
+  Q5_K_M — Ghost Hands trained planner", short name
+  "Q5 TRAINED", in picker order after the two quants.
+  Its spec carries no URL (Spec.isImport() is exactly
+  url == null) and the verification the training run
+  itself printed: SIZE 1125049888 bytes and SHA256
+  5f68b8b848bd96a544e1af4a003f2b5551d0c98408a070f769208135d20d4c16
+  — the notebook's final cell, confirmed a second
+  time against the Drive copy's read-back
+  (~/memory/2026-11-01.md). Those two values are the
+  release: the app accepts as "the trained planner"
+  exactly the file they describe. The on-phone filename
+  is its own (…-q5_k_m-trained.gguf) — the Drive file
+  shares the stock Q5's name and must never collide
+  with its file.
+
+- THE IMPORT (ModelStore.importModel + the pure
+  importVerdict). The user picks the file; the store
+  streams it into a sibling staging file (fileName +
+  ".import" — never the download flow's ".part"),
+  counting bytes and hashing as it copies, then the
+  pure judgement rules on (spec, bytes, sha256): exact
+  size first, then the hash; null refuses. Only
+  IMPORT_OK renames the staging file over the model's
+  own file. Every other ending — wrong size, wrong
+  hash, a read failure, a failed rename — deletes the
+  staging file and reports importStatusLine's honest
+  line (the refusal names the fact that failed and
+  says nothing was imported). A selectable trained
+  entry is therefore always the trained bytes, a
+  partial is never selectable, and deleting the landed
+  file (the DATA model manager's standing delete; the
+  rows iterate the registry, so the trained row and
+  its "— not imported" state came with the entry)
+  returns it to not-imported. download() itself now
+  refuses a url-less spec before touching a file or
+  the network, and importModel refuses a downloadable
+  spec the same way — neither flow can be mistaken
+  for the other even by a future caller.
+
+- THE UI (MainActivity). Settings > BRAIN gains a
+  third chip (Q5 TRAINED, through the same
+  onModelPicked path — choosing an unimported trained
+  planner opens the picker instead of a download) and
+  an "Import trained model" action under it, with a
+  note that says where the file lives and what the
+  verification is. The model card's one action follows
+  the active spec's own arrival (Download for the
+  quants, "Import trained model (1.1 GB)" for the
+  trained), its status line says "not imported yet …
+  pick the file from your Drive", and refreshBrainChips
+  / pickerLabel speak the same shapes for all three
+  (an absent trained file reads "· 1.1 GB import",
+  never "download"). The picker is ACTION_OPEN_DOCUMENT
+  under its own request code (REQ_IMPORT_MODEL); the
+  copy runs on a worker thread under an `importing`
+  flag that locks the brain chips, the delete row and
+  the pickers like a download does, and a successful
+  import of the ACTIVE trained choice loads it on the
+  spot, the way a model switch does. Three standing
+  paths were taught the spec's source: launch never
+  auto-downloads an import-sourced choice (it feeds
+  the honest line instead), the run-start refusal
+  names the import ("Trained model not imported yet —
+  Settings > BRAIN > Import trained model"), and the
+  delete confirm says "imported again" for this file.
+  Once imported, nothing else is special: selection,
+  the generic load path (fileFor → engine.load — no
+  name is assumed anywhere in ModelEngine, the shim
+  or the bridge; llama.cpp judges the file by its own
+  bytes), runs, stats and resumes all treat it as a
+  model, and its distinct id rides the run and decide
+  records, so a trail always shows which brain
+  planned it.
+
+- TESTS (v330 section, 11 checks). The pin asserted
+  field for field (id, size, sha, names, picker
+  order, no collision with either stock file); the
+  pure verdict against the shipped pin (exact self
+  passes, a byte either way is a size refusal, the
+  stock Q5 hash at the right size is a sha refusal,
+  a missing hash refuses); each verdict's honest
+  line. The state machine runs on a scratch dir with
+  an INJECTED fixture spec (3 bytes, sha256("abc")) —
+  wrong-hash and short copies refused with no file
+  and no staging left, the exact copy landed, ready,
+  and deleted back to not-imported — while the
+  shipped pin itself is asserted to refuse the same
+  3-byte fixture outright: no fixture can satisfy it,
+  and the shipped values were never weakened to let
+  one pass. Separation both ways (download refuses
+  the trained spec before touching a file; import
+  refuses Q4). A scripted run under q5_k_m_trained
+  completes with every record naming the trained id.
+  Source pins: the picker + request code + the
+  store's import call in MainActivity, the pin string
+  in ModelStore. EXISTING CHECKS CHANGED (two,
+  disclosed): the standing version pin (3.30.0 /
+  code 52), and the v2.6 registry check "the registry
+  holds exactly the two quants" — now three entries,
+  renamed to say so. Suite: 2,264 passed, 0 failed
+  (was 2,253 at v3.29.0). Trail registry unchanged:
+  33 types. APK compile pass run in-tree: BUILD-OK,
+  4,696,903 bytes, badging verified versionCode 52 /
+  versionName "3.30.0".
+
+- DEVICE PROOF OWED. Everything above is proven on
+  the host: the judgement, the state machine, the
+  refusal shapes, the run records. Nothing here
+  proves the real 1.05 GB file's passage — that the
+  Drive app hands the picker a readable stream of
+  that size on Ryan's phone, that the copy and hash
+  complete at phone speeds, or that the fine-tune
+  actually loads and plans on device. The owed pass:
+  install, Settings > BRAIN > Import trained model,
+  pick the ghosthands-trained .gguf from Drive, let
+  it verify, pick Q5 TRAINED, and run the weather
+  goal — the goal the stock planner has failed three
+  nights running is the trained model's own exam,
+  and its trail must name q5_k_m_trained.
+
+## v3.29.0 (Nov 1, 2026) — the Fireworks cloud brain, opt-in
+
+Ryan's Oct 31, 2026 direction, the last car of the
+everything train: an alternative planner engine behind a
+Settings choice. The on-device Qwen stays the default and
+the whole app behaves byte-identically when the feature
+is off or unconfigured — the swap hangs off ONE new
+nullable field on the Agent (every pre-v3.29 constructor
+delegates with null, i.e. the on-device road) and one
+branch at the loop's single generate site. When Fireworks
+is chosen, the decide step sends the SAME assembled
+prompt the local engine would have received to the
+Fireworks inference API (OpenAI-compatible chat
+completions) and the reply text re-enters the loop at
+exactly the point engine output does: same action parser,
+same Governor, same guards, same trails, same step
+machinery. The cloud is a brain swap, never a governance
+bypass — provenance is by construction, not by parallel
+code. Build-start checks: the tree matched the v3.28.0
+record (version pin 3.28.0 / code 50, registry at 33
+types, 2,237 host tests) and the suite was re-verified
+green in the foreground before the first edit. Version is
+now 51 / "3.29.0". No new manifest permissions — INTERNET
+has been declared since v1; the only manifest change is
+the version stamp. Scope calls, disclosed: unattended
+runs stay on-device in v3.29 (UnattendedService builds
+its Agent through the delegating constructor — R13's
+premise is an idle, plugged-in phone, and a cloud run
+nobody is present to consent to per-run is not that
+premise), and RunQa (ask-about-a-run) and the engine
+self-test stay on-device too, because they call
+MainActivity's engine directly rather than the planner
+decide. Host suite and an APK compile pass in this
+record; nothing was shipped or pushed — the parent
+verifies and ships, and the device pass below is owed.
+
+- THE ENGINE (CloudBrain, new, pure Java). API_URL is
+  the Fireworks chat-completions endpoint and
+  DEFAULT_MODEL is the named constant
+  "accounts/fireworks/models/llama-v3p1-8b-instruct" — a
+  small instruct model chosen for fast instruction
+  following; it is a default, not a promise of
+  availability, and an account that cannot serve it gets
+  the honest error path below. The request is one user
+  message carrying the assembled prompt verbatim,
+  temperature 0.0 (the local engine's greedy posture),
+  max_tokens from the caller (the local 160 cap); usage
+  maps onto the trail's standing stats shape (prompt
+  tokens from the API's count, none reused, none
+  KV-cached, grammar never claimed). The HTTP half sits
+  behind a Transport interface so the suite drives the
+  whole engine on a fake wire — no test touches the
+  network. The device half is HttpURLConnection, bearer
+  auth, 15 s connect / 60 s read, no blind redirects (a
+  3xx is surfaced as an HTTP error, never followed with
+  the key attached).
+
+- THE KEY. Entered on device in Settings > BRAIN
+  (masked field), stored in the app's private
+  preferences under CloudBrain.PREF_API_KEY. It is
+  deliberately NOT a Settings value: the Settings map is
+  captured into run markers and settings snapshots, so a
+  credential must never ride it (a suite pin asserts no
+  Settings key carries it and a default settings map has
+  no such entry). The key never appears in source, tests,
+  fixtures, trails, markers or feed lines — the feed says
+  only "saved" / "cleared". The build ships with no key;
+  with the brain chosen but no key stored, a run refuses
+  to start (a toast names where the key goes) and the
+  engine itself refuses before the wire is touched.
+
+- HONEST NAMES. A cloud run's records carry the distinct
+  model id "fireworks:<model id>" on the run, decide and
+  stop records — never an on-device id, and ModelStore
+  resolves it to nothing, so no resume or marker can
+  mistake it for a local spec. The Settings status line
+  speaks the three states plainly: on-device ("nothing
+  leaves the phone"), cloud with a key ("prompts - page
+  text, the element map, run history - are sent to
+  Fireworks... page content leaves the phone", the
+  standing voice-loop cloud caveat's wording), cloud
+  without a key ("runs will not start"). The BRAIN
+  section's note says the same where the choice is made,
+  and the feed announces the brain by name at run start.
+  The run-rules marker carries the brain CHOICE
+  (Settings.KEY_BRAIN) so a resume restores the cloud
+  brain — never the key.
+
+- THE DEGRADATION RULE (chosen to match the app's
+  existing engine-failure handling). Any network failure,
+  timeout, HTTP error, or malformed reply returns the
+  local engine's own failure shape — an "ERROR:..."
+  planner string after EXACTLY ONE attempt — and the
+  loop's standing engine-error path stops the run
+  honestly with it on the decide record. No retry loop,
+  no silent fall back to the on-device engine mid-run
+  (the records would lie about which brain planned the
+  earlier steps), and never a fabricated action. A cloud
+  run also never loads the model: the start path skips
+  the GGUF readiness gate and the worker skips the load
+  block entirely, so cloud runs work with no model file
+  on the phone at all.
+
+- EXISTING CHECKS CHANGED (one, disclosed): the standing
+  version pin (3.29.0 / code 51). New coverage: the v329
+  section (16 checks) — the request's shape (one user
+  message, the prompt verbatim, the named model, greedy
+  temperature, the token cap), reply and usage extraction
+  against malformed shapes, the trail id's distinctness,
+  the three honest status wordings, generate on a fake
+  wire (verbatim content, endpoint and bearer recorded,
+  stats in the trail's shape), the four failure shapes
+  (HTTP error, transport throw, malformed reply, keyless
+  refusal before the wire), the settings matrix (default
+  on-device, junk resolves on-device, round-trip, the key
+  is not a setting), four scripted runs (CLOUD: completes
+  on cloud decides with the local engine provably never
+  called and every record naming the cloud; GOVERN: a
+  cloud-planned write under readonly is denied by the
+  same Governor and never executes; ERROR: an HTTP 503
+  stops the run at the first decide after one wire
+  attempt; OFF: an agent built the pre-v3.29 way runs
+  exactly as it always did), and source pins (the bearer
+  header is built in CloudBrain alone, the decide has
+  exactly two roads, and no Fireworks key literal — the
+  "fw_" prefix — exists in any app source). Suite: 2,253
+  passed, 0 failed (was 2,237 at v3.28.0). Trail registry
+  unchanged: 33 types — cloud decides ride the standing
+  records under their own model id. APK compile pass run
+  in-tree: BUILD-OK, 4,692,807 bytes, badging verified
+  versionCode 51 / versionName "3.29.0".
+
+- DEVICE PROOF OWED. Everything above is proven against
+  a fake transport. Nothing here proves a live Fireworks
+  call: that Ryan's own key (entered on his phone) is
+  accepted, that the default model is available to his
+  account, what a real reply's latency and usage numbers
+  look like inside a run, or the BRAIN section's on-device
+  behaviour. The owed pass: install, Settings > BRAIN,
+  paste the key, pick Fireworks cloud, run the weather
+  goal, and read the trail back — its records must name
+  the fireworks: model id and the run must finish (or
+  fail honestly) on cloud decides alone.
+
+The Nov 1, 2026 device run of the weather goal on v3.26.0
+(trail-20261101-005359) is this release's whole brief, and
+it corrected the theory v3.26 was built on. The v3.26 fixes
+themselves fired on device — the empty-page correction
+stopped the five-read loop at step 1, the kl pin rode the
+fallback URL, the recovery detected and recorded — but the
+run still died at the step cap, and the trail shows why:
+(1) there is no DDG region-picker PAGE. The picker is
+furniture on the results page itself: its text leads the
+results page's preview and read chunks ("All Regions /
+Argentina / Australia / ...") while the same page's
+element map holds the real result links. The planner read
+the country list, concluded it was stranded, and
+re-proposed its search five times; the v3.26 recovery
+fired on the results page (a false positive) and navigated
+to the identical URL — a no-op. (2) The planner's step-7
+tap on the AccuWeather result landed on DDG's redirect
+shim (duckduckgo.com/l/?uddg=..., a ~200-byte stub) and
+the app perceived the stub as a settled empty page
+through the whole thin-map ritual and a failed read: the
+redirect never got waited out, because the hands' settle
+wait tracks page loads and the stub's own load FINISHES —
+nothing is in flight when the step perceives. Both fixes
+are deterministic loop/perception machinery in the
+standing patterns. Build-start checks: the tree matched
+the v3.27.0 record (version pin 3.27.0 / code 49, registry
+at 33 types, 2,220 host tests) and the suite was
+re-verified green in the foreground before the first
+edit. Version is now 50 / "3.28.0". The declared
+uses-permissions stay v3.27's ten, byte-identical; the
+only manifest change is the version stamp. Host suite
+only in this record: the APK build was run as a compile
+check (BUILD-OK) but nothing was shipped or pushed; the
+parent verifies and ships, and the device pass below is
+owed.
+
+- FIX 1a, THE TEXT STRIP (SearchEngines.regionRunLength /
+  stripRegionFurniture, applied in Agent.buildPrompt).
+  The planner's "Page text:" line no longer leads with
+  the picker on DuckDuckGo pages: a pure matcher measures
+  the picker's run at the text's head — the "all regions"
+  header, then region names matched whole, longest first,
+  at least three — and buildPrompt shows the text with
+  the run removed. Strict by design: a header without the
+  run, or names short of three, strips nothing, and a
+  non-DDG host returns the text untouched. The perception
+  itself keeps the RAW preview — the trail records it,
+  the region detector judges it, the a11y and error rules
+  read it as before; only the planner's surface is
+  cleaned. A page that is all furniture shows no Page
+  text line at all, which is the honest preview of a bare
+  picker. One matcher lesson the suite caught: the run
+  list needs the picker's WHOLE alphabet — the v3.26
+  detector's contains-based signature never noticed it
+  omits Czech Republic, Estonia and Iceland (all in the
+  trail's preview), because three hits anywhere satisfy
+  it; the sequential matcher stalls at the first missing
+  name, so REGION_RUN_MATCH carries the signature plus
+  every omitted region and label variant.
+
+- FIX 1a, THE EXTRACTION SKIP (Eyes: DDG_PICKER_JS in
+  READ_WALK_JS's walks and in readTextJs). The read side
+  cannot be stripped in Java — chunks are sliced from the
+  live DOM text in the scripts, offsets and totals
+  computed there — so the walks skip the picker subtree
+  at the source: on a DuckDuckGo host (the hostname test
+  is inside the script), a <select> that is recognisably
+  the region picker — named "kl", or carrying 8+ options
+  whose first reads "All Regions" — contributes no text
+  to ghWalkText, ghPreviewText or the legacy walk. Totals
+  and cursor offsets are computed over the skipped text,
+  so a DDG results page reads as its results from char 0,
+  in both hands (WebHands' session extractor and legacy
+  fallback, ServiceHands' legacy extractor — all three
+  walks carry the skip). Element enumeration is
+  untouched: the select still appears in the map as one
+  element. The metrics collector (READ_SENSE_JS) is also
+  untouched: candidate scores still count the picker's
+  text, which costs ranking accuracy on DDG pages and
+  nothing else. DISCLOSED ASSUMPTION: the skip rests on
+  the picker's select shape — the trails prove the option
+  labels flatten into the text and that the map was not
+  flooded with region links (one shaped element, not
+  fifty), but the sandbox could not fetch DDG's markup to
+  confirm the node (DDG bot-walled the fetch), so the
+  select shape is inference from the trail, not a reading
+  of the page. If the device shows the picker is some
+  other node, the skip silently does nothing and the
+  layers below still carry the run.
+
+- FIX 1b, THE MAP GATES THE DETECTOR
+  (SearchEngines.hasResultLinks + the three-arg
+  isRegionPage; Agent's gate and still-picker recheck).
+  A page is the picker, for recovery purposes, only when
+  its text carries the signature AND its element map
+  holds NO result links — no duckduckgo.com/l/?uddg=
+  hrefs. The html endpoint wraps every result href in
+  the shim, so a map carrying one is a results page
+  whatever its text says: results wearing furniture can
+  no longer false-fire the recovery. The two-arg detector
+  stands for what it literally judges (the text
+  signature); both Agent call sites moved to the gated
+  form.
+
+- FIX 1c, THE RECOVERY NEVER NAVIGATES TO THE OPEN PAGE.
+  In the v3.26 trail the picker's URL WAS the pinned
+  results URL, so the recovery's navigation reloaded the
+  page in front of the planner. Now, when the recovery
+  URL equals the current URL, the block still records the
+  "recover" event and spends the query's one recovery,
+  but does not navigate: the feed line and the history
+  note say the pinned address is already open, that
+  re-issuing would only reload it, and that the planner
+  should goto a results page directly or search a
+  specific site instead. (Trail readers: a ddg_region
+  event whose recovered_url equals its url is this case
+  — documented in Trail's header.)
+
+- FIX 2, THE SHIM SETTLE (new pure RedirectShims; a
+  perceive-phase block in Agent ahead of the region
+  recovery and the thin ritual). A step whose page is a
+  known redirect shim — a DuckDuckGo host, the /l/ path,
+  a uddg parameter — is never judged as a page. The loop
+  records "recover" phase "redirect_shim" (the stub's
+  URL and its decoded destination), waits out the
+  forward with bounded re-perceptions (WAIT_ATTEMPTS 3,
+  1 s apart — the ThinMap seam precedent,
+  WAIT_DIVISOR), and a stub that still has not resolved
+  is bypassed: a second event, phase "redirect_shim_goto",
+  and the loop navigates to the decoded destination
+  itself — the address the tapped link pointed at all
+  along. Every exit carries the destination's perception,
+  or, when even the direct navigation fails, the stub's
+  perception WITH a history note naming it an empty
+  forwarding page, not a readable one, and the
+  destination to goto directly. Why the loop and not the
+  hands: WebHands' waitForPageSettled waits on the load
+  callbacks, and the stub's own load completes — the hole
+  is that a finished stub is indistinguishable from a
+  finished page at that layer, while its URL gives it
+  away at the loop's. ServiceHands rides the same loop,
+  so unattended runs get the settle too. The known shape
+  is deliberately narrow (DDG /l/?uddg= only); another
+  engine's shim joins when a field trail names one.
+
+- EXISTING CHECKS CHANGED (two, both disclosed): the
+  standing version pin (3.28.0 / code 50), and the v2.8
+  check "preview: the planner's page-text line follows
+  the preview" — its wall half asserted the prompt
+  CONTAINS the raw furniture ("All Regions") because
+  through v3.27 the page-text line carried the preview
+  verbatim; v3.28 strips DDG furniture in buildPrompt, so
+  the wall (a preview that is all furniture) now shows no
+  page-text line and the check asserts exactly that. The
+  check's content half and its neighbours (recognition
+  ignoring the preview, identical auto-read verdicts) are
+  untouched and stand. New coverage: the v328 section
+  (17 checks) — the strip's purity (whole-run measurement,
+  bare-picker empties, host scope, no-header no-strip),
+  the link gate and gated detector, shim recognition and
+  destination decoding against the trail's own URLs,
+  source pins + structure checks for both walks' skip,
+  and five scripted runs: FURNITURE (results wearing the
+  picker — no recovery, no navigation, the prompt leads
+  with results content), BARE (a true picker at an
+  unpinned address — the gated detector fires, the
+  recovery navigates somewhere new), SAMEURL (the picker
+  at the pinned address — recorded, never navigated; the
+  planner's own goto is the only navigation), SHIM (the
+  trail's tap-through — waited out, bypassed to the
+  decoded AccuWeather address, the planner's next prompt
+  is the destination) and SHIMWAIT (the forward fires
+  inside the wait — no bypass). Suite: 2,237 passed, 0
+  failed (was 2,220 at v3.27.0). Trail registry
+  unchanged: 33 types — both fixes ride the standing
+  "recover" event.
+
+- DEVICE PROOF OWED (host tests prove none of this):
+  (1) the weather goal from a blank start, end to end —
+  the run the last three releases have been chasing:
+  the search should land on results the planner reads AS
+  results (no five re-searches), and the result tap
+  should reach the forecast page through the shim settle;
+  (2) the picker's true DOM shape — whether the walks'
+  select skip fires on the live page (a read of a DDG
+  results page should now lead with results text; if it
+  still leads with regions, the picker is not the select
+  the skip expects and the shape needs naming from a
+  device trail); (3) a live shim's forward timing —
+  whether real DDG stubs resolve inside the 3-second
+  wait or always need the bypass; (4) the Clinch River
+  clean test as the no-regression witness, as ever.
+
+## v3.27.0 (Nov 1, 2026) — R13: unattended mode, the spike's GO-IF build
+
+Everything Train item 6, and the last car of the train
+that needs a design: R13 ships exactly the GO-IF design
+in ~/workspace/ghost-hands-mobile/R13_SPIKE_REPORT.md
+(§8), with the conservative option taken wherever the
+spike left a choice open, each one disclosed below. The
+shape in one breath: a saved check the user has opted in,
+one goal at a time, may run itself when its alarm fires —
+but only with both on-device grants in hand (the exact-
+alarm permission and the battery-optimization exemption),
+only while the phone is charging, only under the readonly
+policy pack, only with nobody able to approve anything,
+and only inside a ten-minute wall clock. Anything less
+and the firing degrades to the v3.9 behavior this app has
+always had: a notification that launches the check for a
+tap. The feature is off unless the user sets it up: no
+goal is opted in by default, there is no global switch,
+and both grants are the user's own taps in system
+settings — this build can only show their status and
+deep-link to the doors. Build-start checks: the spike
+was read in full; the tree matched the v3.26.0 record
+(version pin 3.26.0 / code 48, trail registry at 33
+types, 2,180 host tests) and the suite was re-verified
+green in the foreground before the first edit. Version
+is now 49 / "3.27.0". Host suite only in this record: no
+APK was built and nothing was pushed; the parent
+verifies and ships, and the device pass below is owed.
+
+- THE MANIFEST DELTA (spike §8.3, named): six new
+  uses-permissions, each with its spike reason — FOREGROUND_SERVICE and FOREGROUND_SERVICE_SPECIAL_USE (the run's home), WAKE_LOCK (the run's partial wake lock), SCHEDULE_EXACT_ALARM (the user's own "Alarms & reminders" grant, checked with canScheduleExactAlarms(); USE_EXACT_ALARM deliberately never declared), REQUEST_IGNORE_BATTERY_OPTIMIZATIONS (surfaces the exemption's status and deep-links its setting; the exemption itself is granted only by the user there), and RECEIVE_BOOT_COMPLETED (the re-arm receiver). Ten permissions total, up from the standing four. POST_NOTIFICATIONS is deliberately STILL not declared: the standing posture holds, and the cost is disclosed under DEVICE PROOF — on Android 13+ the foreground service's ongoing notification may be demoted to the notification shade's FGS section rather than shown promoted. Two new components: .UnattendedService (exported=false, foregroundServiceType="specialUse", the PROPERTY_SPECIAL_USE_FGS_SUBTYPE declared in plain words: "Periodically re-runs a user-saved read-only web check with an on-device model") and .BootReceiver (exported=true with the BOOT_COMPLETED filter, re-arms and nothing more).
+
+- THE FIRING JUDGEMENT (new pure class Unattended): one function decides every scheduled firing — NOTHING (the goal is gone or unscheduled), POST (not opted in, or a grant is missing, or a deferred run outlived its give-up window), DEFER (opted in and granted, but the conditions are not met), RUN (opted in, granted, charging, and the goal's own conditions met). The judgement order is the guardrail order: the opt-in is per goal (SavedGoal.unattended, default false, serialized only when set, carried by copyWatchFrom, shown on the goal row as "· unattended" and toggled by a labeled chip on that row — turning it on stamps the firing book's epoch, turning it off cancels any pending retry). CONSERVATIVE CHOICE, disclosed: the spike (§8.1) said an opted-in goal "should add charging as a required condition even if the goal itself sets none" — v3.27 makes charging STRUCTURAL for every unattended run, not a condition the goal can waive, because R13's whole premise is an idle, plugged-in phone. The goal's own Wi-Fi condition still rides on top. The R9 "run checks automatically" master switch does NOT gate unattended conditions (that switch governs attended auto-runs; conflating them would let one toggle silently disarm the other feature) — disclosed here because it is a real semantic choice: the per-goal opt-in is the unattended feature's only switch.
+
+- DEFERRAL IS THE R9 MACHINERY, SHARED: a deferred unattended firing rides CheckDeferrals and the same 30-minute retry cadence and 6-hour give-up (CheckConditions.MAX_DEFER_MS) as attended checks — but at give-up it falls back to POST (the reminder), never to an unconditioned run. One seam this required: when the R9 master switch is off, the launch pass used to clear every deferral; it now keeps deferrals belonging to unattended opted-in goals (their feature is armed independently) and clears the rest exactly as before.
+
+- THE RUN ITSELF (new UnattendedService): a real foreground service, the spike's §3 primary shape. It posts its ongoing notification and calls startForeground BEFORE any work. One run at a time, enforced twice: a static latch plus the plain v3.19 RunMarker as witness — a firing that finds another run live refuses, records the refusal in the firing book, and posts the check as a notification instead (it never queues and never preempts). The run's discipline is by construction, not configuration: the service loads PolicyPacks "readonly" and nothing else (a source pin holds this), builds no grant book (every site ask denies), pins tabs off, and drives the standing Agent loop through the new HeadlessUi screen and its own ServiceHands. Wall clock: the run's budget is Unattended.MAX_RUN_MS (10 minutes); HeadlessUi.stopRequested() is the loop's standing poll point OR'd with the widget's RunControl latch, so the home-screen widget's Stop ends an unattended run exactly like an attended one, and the budget ends it at the line even if the planner still has steps. A partial wake lock is held for budget + 60 seconds and released in a finally at every ending. The model is the service's own ModelEngine on the user's standing settings; a model that is not downloaded or fails to load is an honest failed run in the book and the briefing, never a silent skip. A home page set in Settings is opened first, mirroring attended runs. The trail is a standing trail file, and the Agent stamps its run record "unattended": true — attended runs' records stay byte-identical (a pin holds both directions). Trail registry unchanged: 33 types; v3.27 adds no event type.
+
+- THE HEADLESS SCREEN (new HeadlessUi): the Ui contract with nobody present. approve() is false, always; askUser returns null; awaitUserTap returns null; awaitUserResume returns false; foreground() is false (so the copilot is never offered a headless run). This is the Governor's standing rule — approval silence is a deny — extended over the whole screen, and it is what makes the readonly force sufficient rather than merely important: even a pack that would ask gets a no. Two scripted host runs hold it: a write tap under the forced readonly pack is denied by the Governor and never executes (stop: denied), and a consequential tap under the STANDARD pack — which would ask a present user — is declined headlessly and never executes (stop: denied).
+
+- SERVICEHANDS, AND ITS DISCLOSED SIMPLIFICATIONS: the service cannot borrow the Activity's WebHands (the view-ownership wall the spike measured), so it hosts its own WebView on the main thread, never attached to any window. perceive() mirrors WebHands (same element-map script, stash protocol, and main-content text-preview swap); tap/type/choose/toggle run the PLAIN stash scripts — the self-heal retry is an Activity-side composition and is NOT replicated headless (disclosed: a stale-element tap fails honestly instead of healing); read() uses the legacy full-page extractor with the standing ReadCursor chunk walk — no read sessions, no settle wait, no thin-map re-read (disclosed); search mirrors WebHands' three paths including the user's fallback engine (the v3.26 region pin rides along, since the fallback URLs come from the same SearchEngines builders); tabs, documents and a11y perception are the interface defaults (tabs are pinned off; documents were never in R13's scope). One renderer death is recovered by rebuilding the WebView and reloading the last URL; a second death ends the run with an honest error. Whether an unattached WebView lays pages out well enough for the element map is the spike's UNVERIFIED question — see DEVICE PROOF.
+
+- ENDINGS REPORT LIKE ATTENDED RUNS: the finish mirrors the Activity's matrix against the same stores — an AnswerCard over the trail, the watch replication for watched goals (baseline advance, a "watch" event, a BriefingLog entry, the changed-notification unless quiet hours defer it, silence on no-change), a finished notification for unwatched successes, and a BriefingLog NOT_DONE with the plain reason for failures that had no watch to speak for them. The firing book (new pure UnattendedLog, pref "unattended_log") records every firing's outcome — started / done / failed / deferred / posted_grant / posted_giveup — with the trail's name on starts. DISCLOSED: no finish buzz, beep or spoken readout headless (all three are Activity-side compositions; the spike never asked for them, and a phone that beeps itself awake at 3 AM is not this feature's promise).
+
+- MISSED FIRINGS ARE REPORTED, NOT BURIED: the spike (§4) dismissed force-stop/bootstrap detection as out of scope because alarms do not survive those states; v3.27 takes the cheap honest half of that road. BootReceiver re-arms every schedule at BOOT_COMPLETED (force-stop still cannot be received — Android will not deliver to a force-stopped app — so a force-stopped app's checks stay dead until the user opens the app, exactly as the spike said). At every app launch, a pass compares each opted-in goal's last scheduled occurrence against its firing book: an occurrence with no firing inside the grace window appends a BriefingLog NOT_DONE saying plainly that the unattended check did not run because its alarm chain was broken (restart or force-stop), once per occurrence. The book is pruned to live unattended goals in the same pass.
+
+- GRANT HONESTY IN THE UI: Settings gains an ALERTS section addition — a status line that reads "Unattended ready: exact alarms allowed, battery exemption in place" or names exactly what is missing ("missing the Alarms & reminders permission", "missing the battery exemption (set Ghost Hands to Unrestricted)"), with two buttons that deep-link to the two system doors ("Open Alarms & reminders settings", "Open battery settings (Unrestricted)"). The goal-row chip's feed line names missing grants the moment unattended is switched on, and says when the unattended run is standing by. Nothing anywhere claims a run will happen while a grant is missing: the receiver re-checks both grants at FIRE time (they can be revoked after arming), a missing one degrades the firing to the notification with the missing grant logged, and SecurityException on exact arming falls back to the inexact arm rather than failing. One attended-path consequence, disclosed: armCheck now arms EXACTLY whenever the exact-alarm grant exists (previously it always armed inexact) — attended checks fire closer to their minute when the user has granted the permission, and stay inexact when they have not.
+
+- DEVIATION — PAGE WATCHES STAY NOTIFY-AND-LAUNCH: the spike's §8.1 spoke of checks only, and §8.2 listed page watches among what "can be scheduled". v3.27 opts in SAVED GOALS only; a firing page watch posts its notification and launches exactly as it does today, never runs itself. Conservative on purpose: a watch's firing path carries its own judge and change semantics, and folding it into R13's first build would have doubled the unattended surface for a case the spike's worked example (the 7:30 forecast) never uses. Recorded here as the known gap, not an oversight.
+
+- PINS MOVED, DISCLOSED (the standing permission and
+  version pins, all in GovernorTest): the v3.14 permission-count pin (4 → 10) and its named-set pin, the v3.16 count pin, the v3.18 exact-alarm pin (now: count 10, SCHEDULE_EXACT_ALARM present, USE_EXACT_ALARM absent), the v3.19 count pin, and the v3.22 count pin all moved to v3.27's deliberate ten-permission set; the standing version pin now reads 3.27.0 / code 49. Each moved pin's text says it was moved by v3.27. New coverage: the v327 section (40 checks) — the judgeFiring matrix end to end (gone/unscheduled → nothing; not opted in → post; each grant missing → post; charging structural; Wi-Fi on top; give-up → post, never run), missing-grant/arming/budget/status wording, occurrence math and missed-firing rules, the firing book's round-trip and prune, the goal flag's round-trip and label, the headless screen's contract, six scripted runs through the real Agent (readonly deny, readonly completion, standard-pack ASK declined, outside stop honored, wall-clock budget honored, attended records unstamped), and source pins for the service's forced pack, the receiver's judgement, the boot receiver's re-arm-only body, the widget's never-a-runner rule, and the manifest's new surface. Suite: 2,220 passed, 0 failed (was 2,180 at v3.26.0).
+
+- DEVICE PROOF OWED (host tests prove none of this): (1) the spike's own acceptance run — enable both grants, opt in the weather goal, plug in, and let the 7:30 firing run itself end to end, trail stamped unattended; (2) the same firing inside real Doze with the exemption in place; (3) revoke the exemption mid-schedule and confirm the firing degrades to the notification with the missing grant named, no silent skip; (4) reboot the phone and confirm BootReceiver re-arms and the next firing lands; (5) force-stop the app, let an occurrence pass, reopen, and confirm the briefing's did-not-run line names the broken chain; (6) THE unattached-WebView question — whether ServiceHands' never-attached WebView lays out real pages well enough for the element map and stash scripts (if it starves layout, the fallback is the spike's §9 note: a 1px host activity, a different build than this one); (7) exact-alarm delivery timing on Ryan's Motorola; (8) whether the foreground service's notification shows promoted or demoted without POST_NOTIFICATIONS.
+
+## v3.26.0 (Nov 1, 2026) — the weather trail's two fixes: empty-page reads, DDG region picker
+
+The Nov 1, 2026 device run of the weather goal on v3.24.0
+(trail-20261101-002036) is this release's whole brief. The
+machinery shipped in v3.24/v3.25 fired correctly on the
+device (thin-map ritual, empty-map tap correction,
+repeat-search correction, prompt trimmer); the run still
+failed, on two planner-level shapes neither release owned:
+(1) the run opened on about:blank and the planner proposed
+"read" five times (steps 1-5 of a 10-step budget), each
+executing and erroring "no readable text found on this
+page", before it searched at step 6; (2) that search,
+executed through the DuckDuckGo fallback, landed on DDG's
+region-picker page ("All Regions / Argentina / Australia /
+..."), which the planner read AS the results at step 8,
+and the run died at the step cap on the wrong page. Both
+fixes are deterministic loop machinery in the standing
+patterns — a guard correction in the RelevanceGuard
+family, and a perceive-phase recovery in the error-page
+recovery's shape. Build-start checks: the tree matched
+the v3.25.0 record (version pin 3.25.0 / code 47, registry
+at 33 types, 2,160 host tests, re-verified green in the
+foreground before the first edit); the device trails were
+read raw and in run view; the correction blocks, the
+search bookkeeping, SearchEngines and the Hands contract
+were re-read at their current lines. The declared
+uses-permissions stay the four standing ones,
+byte-identical; the only manifest change is the version
+stamp (48 / "3.26.0"). Host suite only in this record: no
+APK was built and nothing was pushed; the parent verifies
+and ships, and the device pass below is owed.
+
+- FIX 1, THE EMPTY-PAGE READ CORRECTION
+  (RelevanceGuard.emptyPageReason + isHostlessUrl, judged
+  in Agent's decide loop immediately after the v1.6
+  empty-map block). A proposed "read" is corrected — not
+  executed — when the current perception is PROVABLY
+  empty, a triple stricter than the v1.6 rule's element
+  count alone: zero elements AND no page text AND a
+  hostless URL (about:blank and its kin: about:, file:,
+  data:, an absent URL). The correction is the family
+  shape: a "guard" trail event (outcome "correct", the
+  standing reason string), a feed line, a history note
+  telling the planner the page is completely empty and to
+  use search or goto, a per-run counter capped at
+  EMPTY_PAGE_CORRECTION_CAP (3, the empty-map cap's size),
+  and a correction is not stagnation. Why the triple: a
+  tap has nothing to hit on ANY zero-element page, which
+  is why v1.6 judges tap/type on elements alone; a read
+  on a zero-element page that carries TEXT (a plain-text
+  file, a text-only article) is legitimate and must never
+  be corrected, and a hosted page that is merely sparse
+  or still loading is not the empty room either. Error
+  pages are excluded twice over: they keep their hosted
+  failed URL (never hostless), and the loop's error-page
+  recovery owns them in the perceive phase, before any
+  decide. Stated plainly, the scope calls made here:
+  tap/type are NOT re-handled — the v1.6 rule already
+  corrects them at zero elements, and this rule returns
+  null for them by construction (a harness check pins the
+  division of labour); every other action kind returns
+  null too, the escape actions (search/goto/back/wait/
+  done/stuck) above all, since those are how the planner
+  LEAVES the empty room. After the cap the proposal falls
+  through and the governor / stuck logic owns the repeat,
+  as with the other guards.
+
+- FIX 2, PREVENTION (SearchEngines). The DDG fallback URL
+  now carries the region pin:
+  "https://html.duckduckgo.com/html/?q=...&kl=us-en"
+  (DDG_REGION = "us-en", the user's locale). The
+  results-page recognition keys on host + path, so the pin
+  changes nothing there; Google and Bing URLs are
+  untouched, and the fallback's report string is still
+  byte-for-byte the legacy line. This is the one
+  deliberate break of SearchEngines' pre-v3.6 byte-for-byte
+  URL discipline, made because the unpinned URL is what
+  produced the field failure; it is disclosed again under
+  EXISTING CHECKS CHANGED below.
+
+- FIX 2, THE BACKSTOP (SearchEngines.isRegionPage, judged
+  in Agent's perceive phase, after the error-page recovery
+  and before the read-chunk sizing and the thin-map
+  ritual). If the pin does not prevent the landing, the
+  picker is recognised deterministically: a DuckDuckGo
+  host (bare domain or any subdomain) AND the picker's
+  text signature in the perception's preview — the "all
+  regions" header plus at least three region names (the
+  picker lists every region alphabetically from the top,
+  so its head is the signature; a genuine results page
+  carries neither). The gate also requires the run's
+  fallback engine to be DuckDuckGo and a search to have
+  actually executed this run (ts.lastExecutedSearchQuery)
+  — a picker reached any other way is left to the planner
+  like any other page. The recovery is the error-page
+  recovery's shape inside the same step: one "recover"
+  trail event with phase "ddg_region" (carrying the
+  picker's url, the recovered_url and the query), a feed
+  line, navigation to the region-pinned results URL for
+  the last executed query (SearchEngines.searchUrlForQuery
+  encodes the raw query the loop holds), a fresh
+  perception recorded as a second "perceive" event, and a
+  history note naming what happened (its wording branches
+  honestly: if the fresh page is the picker again, the
+  note says so and warns the planner not to read it as
+  results). One recovery per query per run
+  (regionRecoveredQueries — the recoveredUrls discipline,
+  keyed by query because the picker can be served from
+  more than one DDG URL); if navigation or re-perception
+  fails, the step falls through with the picker in front
+  of the planner and the failure wording in its history —
+  no stop, no loop.
+
+- NO NEW TRAIL TYPE. The recovery rides the standing
+  "recover" event (v1.6) with the documented phase
+  "ddg_region" (Trail's header documents it); the registry
+  stands at 33 types and every registry pin stands
+  unchanged.
+
+- TESTS (2,160 -> 2,180, all green; 20 new checks, all in
+  v326Tests). Pure: the empty-page rule's firing shape and
+  each leg of the triple standing it down (an element
+  present, text present, a hosted URL), the cap, the
+  escape-action sweep, the tap division of labour, the
+  hostless judgement; the region detector on both DDG
+  hosts, against results text, off-DDG, header-only and
+  null text; the recovery URL and the pin's placement.
+  Scripted runs, both on the device trail's own goal text:
+  BLANK replays the trail's opening (about:blank, the
+  ritual's fallback read failing exactly as on the device,
+  the planner reading on) — three reads corrected at the
+  cap, none executed (hands.read is called exactly twice
+  all run: the ritual's fallback and the one legitimate
+  read), the search then executes, a read executes on the
+  results page, the run finishes done, and the step-4
+  prompt proves the correction note reached the planner.
+  REGION lands the fallback search on a picker fixture —
+  one ddg_region recovery trailed with the pinned URL and
+  the query, exactly one navigation all run (the
+  recovery's), the picker perceived exactly once (the
+  triggering sighting), the planner's step-2 prompt is the
+  results page with no country in it, and the run reads
+  the results and finishes done.
+
+- EXISTING CHECKS CHANGED (two, both deliberate): the
+  standing version pin moves to 3.26.0 / code 48 (the one
+  check every release moves); and "search engines:
+  DuckDuckGo URL is the pre-v3.6 URL verbatim" becomes
+  "...carries the v3.26 region pin", its expected string
+  gaining "&kl=us-en" — the Fix 2 prevention, pinned. No
+  registry pin moved (no new type), no permission pin
+  moved, and no other existing check's expectation
+  changed; the suite re-ran in full to prove it.
+
+- WHAT THE HOST CANNOT PROVE, stated plainly: both
+  scripted runs replay the trail's SHAPE against fixtures.
+  Whether DuckDuckGo still serves the picker the way the
+  Nov 1 trail met it, whether the kl pin prevents the
+  landing on the live service, what URL the live picker is
+  actually served from, and whether a second navigation to
+  the pinned URL passes it — all of that is network
+  behaviour the host suite cannot see, and the detector's
+  signature is pinned to the picker's text as the trail
+  recorded it (a DDG redesign of that page would need the
+  signature revisited). The weather goal still owes its
+  completed end-to-end device pass; this release is built
+  so that pass is no longer blocked by either failure.
+
+- DEVICE PASS OWED (Ryan's phone, on the shipped build):
+  the weather goal from a blank start (the planner's first
+  reads corrected, the search happening early, a forecast
+  actually answered); a fallback search observed live for
+  its landing (results directly under the pin, or a
+  ddg_region recovery on the trail); the Clinch River
+  clean-test goal as the no-regression witness.
+
+## v3.25.0 (Nov 1, 2026) — accessibility eyes, read-only first
+
+The R6 spike's GO-IF, built in exactly the shape it
+returned: an alternate PERCEPTION source, not a second
+pair of hands. When the browser (DOM) element map is
+unavailable or still thin after the v3.24 retry ritual,
+the agent may perceive the page through the accessibility
+node tree instead — the user's own enabled
+GhostA11yService reading THIS app's window, its WebView
+subtree converted into the same numbered element-map
+contract the planner already uses. Build-start checks:
+the tree matched the v3.24.0 record (version pin 3.24.0 /
+code 46, registry at 32 types, 2,143 host tests); the R6
+spike's parts were re-read (GhostA11yService's pure
+capture, A11yNode, NodeSketch's label and redaction
+discipline, SpikeGate's boundary), as were Eyes'
+Perception contract, the v3.24 ritual's settle semantics
+and the WebHands stash discipline the read-only guard
+below exists because of. One correction to the build
+brief, stated plainly: the brief called the accessibility
+service declaration "the one manifest addition" — the
+declaration already exists, shipped with the v3.14 spike
+(service, BIND_ACCESSIBILITY_SERVICE protection, config
+and all). v3.25 adds NO manifest surface at all: no second
+service, no new permission, no config change — the eyes
+ride the spike's declaration, and only the version stamp
+moves (47 / "3.25.0"). The declared uses-permissions stay
+the four standing ones, byte-identical. Host suite only
+in this record: no APK was built and nothing was pushed;
+the parent verifies and ships, and the device pass below
+is owed.
+
+- THE CONVERTER (new pure A11yMap). Capture stays the
+  service's (GhostA11yService.captureForeground, unchanged
+  from the spike); A11yMap.convert walks the captured tree
+  and keeps ONLY the subtree of the first VISIBLE node of
+  class android.webkit.WebView — the page. The rest of the
+  tree is this app's own chrome (goal field, RUN button,
+  feed) and is never handed to the planner as page
+  evidence; a tree with no visible WebView converts to
+  null, and inactive tabs' WebViews report not-visible, so
+  the visible one is the active tab's. Interactive nodes
+  (clickable, editable or checkable, and visible — the DOM
+  map's admission discipline) become elements, at most
+  MAX_ELEMENTS (40) with the overflow counted;
+  non-interactive nodes still feed the text preview.
+  Mapping onto the contract is the tree's own declarations
+  and nothing inferred: editable -> input (type password
+  when the node is a password field, else text), checkable
+  -> checkbox/radio with its checked state, Spinner ->
+  select, Button -> button, any other clickable surface ->
+  div. There is no href: the tree does not declare
+  destinations (the R6 evidence), so an eyes element never
+  pretends to know where it leads. Redaction is the
+  spike's, shared not re-invented: labels come from
+  NodeSketch.labelOf, and a withheld node (password, or
+  any node under a secure/keyguard ancestor — the secure
+  flag is inherited down the walk) contributes no text to
+  its element, to the preview, or to the render, judged by
+  the FLAG so even a misbehaving tree whose password node
+  still carries text converts clean. Every element is
+  stamped source "a11y" (ElementInfo.source, new; carried
+  in the element's trail descriptor, additive only — DOM
+  descriptors are byte-identical) and keeps domIndex -1:
+  it has no slot in the JS stash, because it is not one.
+- THE LOOP'S CONSULTATIONS (Agent; one new trail event
+  type "a11y_perception", registry 32 -> 33). The hands
+  contract gains a DEFAULT method, perceiveA11y() -> null
+  (the choose/toggle/tab/document precedent): hands
+  without eyes are untouched, so an eyes-less run is
+  v3.24's at the trail level exactly. WebHands implements
+  it over the service — instance() null (service off), a
+  keyguard-locked capture, a foreground window whose
+  package is not ours, a null conversion, or a conversion
+  with no elements all return null; the capture and the
+  WebView's URL/title are gathered on the UI thread
+  (runOnUiAndWait, the tabUrl precedent — the thread the
+  spike's proven read path runs on). The loop consults at
+  three points, each through one helper (tryEyes) that
+  serves only a NON-THIN map of the SAME page (a tree read
+  at another URL is stale evidence and is refused) and
+  records nothing when it cannot serve: (1) DOM
+  perception threw — phase "dom_failed": the eyes carry
+  the step, or the step stops with v3.24's exact error,
+  word for word; (2) the thin ritual settled still-thin —
+  phase "used": the step proceeds on the eyes' map INSTEAD
+  of the text fallback (the map rides the ordinary
+  contract whole: same rendering, same budget, same
+  read-chunk sizing); (3) a later step on a settled URL
+  whose DOM map is still thin — the eyes are consulted per
+  step for as long as the DOM cannot see the page, so the
+  planner keeps the map past the settling step. Each served
+  step records "a11y_perception" (phase, url, element
+  count, the DOM count replaced or the failure's message),
+  feeds one line, and puts a plain note in the step's
+  history: this map came from the accessibility eyes, the
+  eyes are READ-ONLY, do not tap their numbers, the
+  browser map is tried again on later steps. No second
+  "perceive" record is written for an eyes step — the swap
+  is one event, not double map accounting.
+- THE READ-ONLY GUARD (Agent, decide loop). An eyes
+  element is evidence, not a target: the browser hands
+  address the DOM stash BY NUMBER, so acting on an a11y
+  number would strike whatever DOM element holds that
+  number — a different element than the one the planner
+  read. Element actions (tap, type, choose, toggle)
+  against a source-"a11y" element are therefore corrected
+  by a guard BEFORE the Governor's turn and before any
+  hands call, recorded on the standing "guard" event with
+  the reason naming the eyes. It is the one absolute guard
+  in the loop — no correction cap, no fall-through: there
+  is no count of corrections after which acting on the
+  number becomes safe (a planner that insists burns steps
+  and the step cap ends the run honestly). Non-element
+  actions (read, scroll, back, goto, search, note, ask,
+  done) are untouched — an eyes step keeps its full
+  vocabulary, which is the point: the page can be read,
+  noted and navigated away from; it just cannot be
+  operated through numbers the hands do not own.
+- THE SETTINGS ROW (MainActivity; new pure A11yEyes).
+  Settings > DIAGNOSTICS gains an "Accessibility eyes"
+  block above the spike's: a status line (A11yEyes
+  .statusLine — "Eyes ON: ..." / "Eyes OFF: ..." with what
+  each state means), refreshed wherever the spike gate
+  line refreshes (refreshSpikeGate), and the same "Open
+  Android Accessibility settings" button the spike uses.
+  The grant itself stays the user's, in Android's
+  settings; there is deliberately NO in-app toggle for the
+  eyes — the DIAGNOSTICS toggle arms the spike's probes, a
+  different feature, and the eyes do not consult it: the
+  Android grant is their only switch, re-judged at every
+  consultation (revoke the service and the eyes stop at
+  the next step, not the next launch). With the service
+  off, WebHands returns null at the instance check and
+  every run is byte-identical to v3.24.0 — the EYESOFF
+  scripted run proves it at the trail level.
+
+Read-only, enforced in layers, stated plainly:
+
+- A11yMap holds no reference to the service, dispatches
+  no gesture and calls no node action — it could not act
+  if it wanted to (pinned on its source: no
+  dispatchGesture, no performAction, no ACTION_CLICK, no
+  GhostA11yService reference). The WebHands eyes path
+  calls only instance() and captureForeground(); the
+  spike's tapAt probe stays in DIAGNOSTICS behind
+  SpikeGate, unreachable from the eyes.
+- The service still does nothing on events (its
+  onAccessibilityEvent stays empty) and reads only the
+  ACTIVE window's tree when asked; the package gate in
+  WebHands refuses any capture that is not this app's own
+  window. No cross-app reach was added, and none of the
+  spike's cross-app findings change: acting beyond the
+  browser remains the NO-GO the spike returned.
+- The service config is UNCHANGED — canPerformGestures
+  still reads "true", because the spike's diagnostics tap
+  probe stands behind it (toggle + press-time and
+  fire-time re-judgement). The eyes never call it; the
+  flag's presence is the spike's, disclosed here so the
+  config is not misread as the eyes claiming a capability
+  they forswear.
+- Governor classification needs no new branch: an eyes
+  step's proposals classify exactly as a DOM step's do
+  (the elements wear the same tags, types and roles), and
+  the one classification that must differ — acting on an
+  eyes element — never reaches the Governor at all: the
+  guard corrects it first, which is the stronger outcome
+  (no approval prompt can bless it either).
+- EXISTING CHECKS CHANGED: the standing version pin
+  (3.25.0 / code 47) and the three trail-registry pins
+  (the v3.20 and v3.22 lists and the v3.24 count) now
+  include "a11y_perception" / 33 types — the registry
+  growth is this release's point, registered first per
+  the roadmap gate. No other existing check changed.
+
+2,160 host tests green in the foreground (2,143 baseline
++ 17 new: the conversion suite — walk order and chrome
+exclusion, source marking, the class/flag mapping,
+password redaction through element, preview and render,
+descriptor marking, the visible-WebView scope rule,
+secure withholding, the 40-cap with counted overflow, a
+text-only page, spinner/radio — the status line, three
+source pins, and three scripted loop runs: EYES (the
+ritual retries, the eyes serve all three steps, a tap on
+an eyes element is guard-corrected and the hands' tap is
+never called, the run finishes on the read evidence),
+DOMFAIL (the eyes carry both steps when the DOM
+perception throws), EYESOFF (no eyes: the v3.24 text
+fallback serves and zero eyes events exist)), suite wall
+time ~13 s. Manifest changes are the version stamp and a
+comment only: permissions byte-identical (the four
+standing), grammar still defaults OFF. Honest
+limitations: host tests cannot exercise a real
+AccessibilityService — the conversion is proven on
+hand-built trees and the loop on scripted hands; whether
+a real WebView's tree on Ryan's phone carries the labels
+and flags the converter expects is exactly what the
+device pass is for. The eyes see the page as the tree
+declares it, which can differ from the DOM (server-driven
+pages may expose less; nothing here reconciles the two —
+a step uses one map or the other, never a merge). An eyes
+map can still be thin (a text-only page converts to a
+preview, not elements) — then the run falls back to
+v3.24's text discipline untouched. The eyes consult runs
+the capture on the UI thread from the agent thread (the
+spike's read path ran on the UI thread at a button press;
+under a live run the latch wait is bounded by
+runOnUiAndWait's 10 s, and a failure returns null and the
+run continues as v3.24's). Device-owed: install v3.25.0;
+enable the service (Android Settings > Accessibility >
+Installed services > Ghost Hands — on Android 13+ the
+"Allow restricted settings" step may be needed first, the
+spike's own enablement was never device-proven either);
+run a page whose DOM map comes back empty or thin — the
+weather goal is the standing candidate — with the service
+ON and confirm an eyes-served step in the trail, the
+read-only guard correcting an element action on device,
+and the eyes stopping when the service is revoked
+mid-run; confirm service-OFF runs behave exactly as
+v3.24.0; and eyeball that no other app's tree is ever
+read (have another app in the foreground when a step
+consults: the run must proceed eyes-less).
+
+## v3.24.0 (Nov 1, 2026) — the weather fix (thin maps) + the map budget
+
+Two changes, one release, aimed at the two standing field
+costs: the Oct 25, 2026 weather run's death on an empty
+element map (R14 gap 3), and the map's prompt weight on
+every step. Build-start checks: the tree matched the
+shipped v3.23.0 record (version pin reading 3.23.0 / code
+45, registry at 31 types); Eyes tiers, the auto-read
+machinery, the arrival guard's trigger (ts.autoReadUrl),
+the per-tab read-completion state and the Thorough
+cross-check's read-page counting were all re-read before
+the fallback's delivery channel was chosen, because the
+first design (ride the auto-read section) broke three of
+them, as disclosed below. Host suite only in this record:
+no APK was built and nothing was pushed; the parent
+verifies and ships, and the device pass below is owed.
+
+- THE WEATHER FIX (new pure ThinMap; one new trail event
+  type "thin_map", registry 31 -> 32). A step whose
+  perception carries fewer than ThinMap.THIN_ELEMENT_LIMIT
+  (3) elements on a loaded page no longer steps blind: the
+  loop waits with a short backoff and re-perceives, up to
+  MAX_ATTEMPTS (3) times — schedule 500 / 1000 / 2000 ms,
+  3.5 s at most — recording every attempt ("thin_map",
+  phase "retry", with the nominal backoff and the element
+  count seen). A map that fills in is an ordinary
+  perception and the step proceeds untouched (phase
+  "recovered"; a re-perception that itself throws records
+  "retry_error" and the step judges the last perception).
+  A map STILL thin after the last attempt settles the URL
+  for the tab (TabState.thinSettledUrl — the ritual never
+  taxes a later step on the same page twice) and the loop
+  reads the page's text itself: the extraction rides the
+  trail as a "read" event with phase "thin_fallback", and
+  the chunk enters the step's history as a read-shaped
+  entry (preceded by a plain note saying the map is nearly
+  empty, the text follows, and not to tap element numbers
+  blind), so the planner decides the step with text in
+  front of it. Error pages never reach the ritual — the
+  standing error-page recovery above it owns them first —
+  and Stop during a backoff stops the run honestly.
+- THE MAP BUDGET (MapDelta.budgetSelect / budgetRender;
+  MAP_BUDGET_TOKENS = 250). A FULL map block is no longer
+  the standing render whole: elements are ranked by goal
+  overlap (RelevanceGuard's token matching over name,
+  label, placeholder and href) descending, then document
+  order, and filled while the kept lines' estimated tokens
+  stay within the budget. The CONTRACT FLOOR — any element
+  overlapping the goal, plus every control of tiers 0-2
+  (search boxes, inputs, buttons and selects) — is always
+  kept whole, even when the floor alone exceeds the
+  budget: the budget never drops the map below what the
+  planner's actions address. The kept set renders in map
+  order with the elements' own numbers (a trimmed map
+  never renumbers), plus the standing "... truncated: N
+  more element(s) not shown" line when anything dropped;
+  a page the budget trims nothing from renders
+  byte-identical to the standing render. MapDelta.sentSet
+  now names the budget selection (what the planner was
+  actually shown); MapDelta.choose itself is unchanged,
+  and Perception.render stays frozen — signature, trail
+  records and the fit fixtures keep the full render; only
+  the prompt's map block is trimmed. Measured on the host
+  fixtures (MAP-TRIM-MEASUREMENT, v324 tests): the
+  40-element AccuWeather-class page under a rain goal,
+  full render est 474 tokens vs budget render est 239 —
+  saved 49%; a 33-element portal fixture, 507 vs 258 —
+  saved 49%. The floor's honesty cuts the other way on
+  term-dense pages (a goal word inside every href makes
+  everything floor): those save less by design, contract
+  first, and the fit ladder above the block still
+  guarantees the assembled prompt fits.
+
+Adaptations, stated plainly:
+
+- THE FALLBACK DOES NOT RIDE THE AUTO-READ SECTION. The
+  first design stamped the auto-read state (autoReadUrl /
+  autoReadSection / read-completion totals); three
+  standing behaviours broke on contact, each reproduced
+  against its fixture before the redesign: the arrival
+  guard read the stamp as an arrival and corrected the
+  planner's goto away from the page (the Thorough runs
+  went 4 calls -> 6 with a spurious cross-check
+  correction); a fallback chunk that reached a page's end
+  stamped its completion, so the planner's own first read
+  was corrected as a re-read and per-tab read isolation
+  inverted (READISO); and an arrival page would have been
+  extracted twice (fallback + auto-read). The shipped
+  delivery stamps NONE of it: no arrival state, no
+  completion totals, no style read-page tracking. It adds
+  the URL only to ts.autoReadUrls — the loop has read
+  this page once, so a later arrival extraction of the
+  same URL would duplicate the chunk — and nothing else.
+- THE EXTRACTION IS GATED ON THE AUTO-READ SETTING. A
+  run with auto-read OFF gets the retries and the history
+  note, never a loop read (trail phase "fallback_unread",
+  reason "auto_read_off"): the standing settings pin —
+  auto-read OFF means the loop never reads on its own —
+  holds exactly. Two more no-extract outcomes ride the
+  same phase: "read_failed" (the extraction errored; the
+  note still lands and tells the planner to read itself)
+  and "text_already_present" (an earlier arrival read
+  already put this page's text in the prompt; no note, no
+  second read).
+- THE BACKOFF HAS A TEST SEAM. ThinMap.BACKOFF_DIVISOR
+  divides only the SLEPT wait (the RunControl slice-latch
+  precedent); the harness's main() sets it so scripted
+  runs do not pay real seconds on every thin fixture
+  page. The schedule itself and the backoff_ms the trail
+  records are never scaled, and the app never touches
+  the divisor — it stays 1 on device.
+- EXISTING CHECKS CHANGED: the standing version pin
+  (3.24.0 / code 46) and the three trail-registry pins
+  (the v3.20 and v3.22 lists and the v3.23 count) now
+  include "thin_map" / 32 types — the registry growth is
+  this release's point, registered first per the roadmap
+  gate. No other existing check changed; the three
+  behavioural groups the first design broke (settings
+  auto-read OFF, the Thorough runs, READISO) pass with
+  their original expectations.
+
+2,143 host tests green in the foreground (2,122 baseline
++ 21 new: ThinMap pure policy, budget selection and
+rendering, the two measured savings, and three scripted
+loop runs — RECOVERY, FALLBACK, and the auto-read-off
+GATE), suite wall time back at ~13 s. Manifest changes
+are the version stamp only: permissions byte-identical
+(the four standing), grammar still defaults OFF.
+Honest limitations: the fallback read is one chunk (the
+planner reads further itself, as the note says); the
+retries cost up to 3.5 s once per URL per tab on a
+genuinely thin page; a canvas app or a page that fights
+injection still ends at the planner's own tools, now
+with the page's text in front of it instead of a blind
+map. Device-owed: install, the weather goal end-to-end
+on defaults (this fix's real proof — it has never
+completed on device), a thin-page pass on a heavy
+script-driven site, and a long-page step pass to feel
+the trimmed map's speed.
+
+## v3.23.0 (Oct 26, 2026) — R12: home-screen widget + voice loop
+
+Built exactly to R12_BUILD_PLAN.md. Build-start checks, all
+verified against the live tree before editing: the tree
+matched the shipped v3.22.0 record (this file's section
+below; ./run-host-tests.sh = 2,041 passed); the plan's
+seams re-verified — BriefingLog's fields are label/kind/
+state/firstDiff/tsMs as the plan assumed; the run marker is
+"run-in-progress.json" in filesDir; the three latch waits
+(approval ~7849, ask ~7923, assist ~8111) and the two
+stopFlag=false start sites re-located by grep; the mascot
+drawable the widget previews is mascot_header. Two
+adaptations to the tree, design unchanged, stated plainly:
+
+- THE RUN-RECORD STAMPS RIDE THE ESTABLISHED CONSTRUCTOR
+  ROAD. The plan's §6 lists Agent.java as "no change
+  (stamps ride the run event's existing fields map)" — but
+  the fields map is built inside Agent.run(), and every
+  prior stamp release (R4 retry, R5 resume, R9 chain) added
+  it the same way: one new value on the fullest constructor,
+  the previous fullest kept as a delegating overload, the
+  stamps present ONLY when the value is non-null. R12 does
+  exactly that (voiceLoopFollowsTrail; the v3.18 signature
+  delegates with null). No loop behaviour, no governor, no
+  other Agent code changed; the stop plumbing proper —
+  the RunControl latch — touches Agent.java not at all
+  (the Ui interface is the seam, as the plan's §3 directs).
+- RESOURCE IDS RESOLVE BY NAME, per the v3.17 precedent:
+  the app has never referenced the generated R class and
+  the host harness compiles against android.jar alone,
+  where no R exists. GhostWidget resolves the layout and
+  its three view ids through getIdentifier; behaviour in
+  the APK is identical, and the harness pins the layout's
+  id names by grep so the two can never drift apart.
+
+- THE WIDGET (new pure WidgetState + WidgetText; new
+  GhostWidget provider). A READER, never a runner: no
+  background service, no polling (updatePeriodMillis = 0),
+  no wakelock. MainActivity — the only place a run exists —
+  writes every transition into the one JSON prefs store
+  (widget_state) and pushes GhostWidget.refresh at that
+  moment: run start (both start paths, beside their marker
+  writes), the Ui status callback's step advance (written
+  only when the step moved), approval/ask wait open and
+  close, the Stop tap (stopping), and finishRunUi for EVERY
+  ending (replays included — it is their finish path too),
+  with the card's outcomeLine. Both verdict seams refresh
+  through appendBriefingEntry, so a verdict that lands while
+  the app sits backgrounded reaches the board at its
+  moment. Content: the run line (running with step, the two
+  waitings distinct, stopping, interrupted, Last: outcome ·
+  relative time, "No runs yet"), the newest 3 BriefingLog
+  verdicts (briefed flags ignored — the board is not a
+  delivery channel), relative times computed at render.
+  THE DEAD-PROCESS JUDGEMENT (WidgetState.judge): a stored
+  live phase with no run-in-progress marker on disk renders
+  INTERRUPTED, goal still named; the launch pass persists
+  the judged phase back and pushes a fresh board, so
+  opening the app always corrects the widget. Stop from
+  the widget: an explicit-component broadcast
+  (com.ghosthands.app.WIDGET_STOP) minted only by this
+  app; onReceive re-checks the action, and only when the
+  judged phase is live does it RunControl.requestStop() +
+  write stopping + refresh — a non-live tap just refreshes
+  the corrected board. Manifest surface, named: ONE new
+  exported <receiver> .GhostWidget (exported="true" is
+  platform-mandated; the app's third exported component
+  after MainActivity and R11's ShareIntakeActivity, with
+  R11's QS tile exported behind its system permission),
+  the app's first res/layout/ and a res/xml widget-info.
+  No new uses-permission.
+- RUNCONTROL + SLICED WAITS (new pure RunControl). A
+  process-wide stop latch: requestStop / clear /
+  stopRequested. The Ui's stopRequested() returns
+  stopFlag || RunControl.stopRequested() — every poll the
+  loop makes inherits the widget stop with zero Agent
+  changes. Both start paths clear the latch beside their
+  stopFlag=false (a stale widget stop never kills a fresh
+  run). The three latch waits (approval, ask, co-pilot/
+  route pause) now sit in RunControl.awaitSliced — 250 ms
+  slices (STOP_POLL_SLICE_MS) over a SliceLatch seam —
+  and their return expressions consult the latch beside
+  stopFlag, so an outside stop resolves with exactly the
+  in-app Stop's outcomes: approval declines, ask returns
+  no-answer, pause declines. The waits' Ui entry guards
+  gained the same OR (a stop landed between steps never
+  opens a panel). The in-app Stop is unchanged — it still
+  releases the latches instantly; slicing only adds the
+  outside road. The widget phase during a co-pilot/route
+  pause stays "running" per the plan (a pause is the user
+  acting in the page, not a wait that strands a run).
+- THE VOICE LOOP (new pure VoiceLoop; exactly ONE new
+  setting, voice_loop, default OFF, VOICE & SPEECH). The
+  machine: IDLE → ARMED → PROMPTING → LISTENING → STARTING
+  → IDLE, MAX_FOLLOW_UPS = 1. It arms ONLY off the
+  auto-speak path: autoSpeakCard records the arm BEFORE
+  the speak call, inside both branches where the speak is
+  issued (ready-engine and lazy-init), with every leg —
+  loop on, voice on, speak-on-finish on, done outcome,
+  foreground, recognizer available, the finished run an
+  AGENT run (replays share finishRunUi; their spoken card
+  never opens a mic), and NOT loop-started (the cap). The
+  TTS listener routes the two utterance ids: card done
+  while ARMED speaks the one pinned prompt ("Answer done.
+  Say a follow-up goal, or stay silent to finish." — also
+  mirrored as a feed line + goal-field hint while
+  LISTENING, so the loop is followable with the sound
+  off); prompt done opens the recognizer through a THIRD
+  route (voiceForFollowUp, mutually exclusive with
+  voiceForAsk — setting one clears the other — with the
+  "Say the follow-up goal" prompt extra). The open
+  re-judges its gates and NEVER requests RECORD_AUDIO: not
+  granted closes quietly with the one feed line. A hearing
+  becomes a normal run through startFollowUpRun: heard
+  text into the goal field (visible), a "Voice follow-up:"
+  feed line, the saved-goal pin cleared (the R4 retry
+  rule), the retry pair cleared, pendingLoopStart +
+  pendingLoopFollowsTrail pinned (consumed at doStartAgent
+  like every pending), and the SAME startAgent() the Start
+  button calls — battery gate and all; if the warning
+  interposes, the goal sits in the field and the run
+  begins only on the user's confirm, the loop already
+  closed. The started run's run record stamps
+  via_voice_loop: "true" + follows_trail (the finished
+  run's trail file name) — the release's ONLY trail
+  change, two stamps on the existing event. Silence is
+  terminal and singular: recognizer error/timeout, an
+  unusable results bundle, onPause, a goal-mic tap
+  (supersede: loop closes, its session torn down, a fresh
+  review-first goal session opens), or a run starting by
+  any other road — one feed line, no re-prompt, no second
+  listen, no timer of its own. A Stop during LISTENING has
+  no run to stop and the loop registers no stop handling
+  of its own (the plan pins this as deliberate).
+- SETTINGS + REGISTRY. One new key (voice_loop /
+  voiceLoopOn, registry + round-trip, junk → default
+  OFF) and one accordion row beside speak-on-finish with
+  the plan's copy. The widget has no settings. NO new
+  trail event types (EVENT_TYPES unchanged at 31 — pinned
+  by count); NO new uses-permissions.
+
+GATES. Host suite 2,122 passed, 0 failed, twice in the
+foreground (2,041 baseline + 81 new checks across the
+plan's 28 named tests: latch semantics + the three sliced
+waits scripted at the pure seam; WidgetState round-trip/
+caps/tolerance + the full judge matrix; every WidgetText
+wording + relative-time boundaries + the stop-armed
+decision; the 8-leg arm matrix; the machine's speech/
+prompt/heard/silence/cancel legs; a scripted end-to-end
+follow-up run whose trail carries both stamps against an
+unstamped control; the settings key; the registry count;
+and source pins for the Activity wiring the harness
+cannot drive — the battery road, the never-request rule,
+route exclusivity — plus the layout's RemoteViews
+legality). Existing checks changed: exactly ONE — the
+standing version pin → 3.23.0 / code 45. ./build-apk.sh
+BUILD-OK (incl. the lambda check); apksigner cert
+de6969f0…25cd71b (preserved app.keystore); aapt2 badging
+3.23.0 / code 45; uses-permissions byte-identical to
+v3.22 (INTERNET, ACCESS_NETWORK_STATE, VIBRATE,
+RECORD_AUDIO); aapt2 dump xmltree on the shipped APK's
+binary manifest shows the .GhostWidget receiver,
+exported=true, the APPWIDGET_UPDATE filter and the
+android.appwidget.provider meta-data, and the widget-info
+resource compiled with updatePeriodMillis=0, 4×2 target
+cells and the mascot preview; the layout + info resources
+are in the APK; full arm64 lib set (6 libs); icon + all
+four mascot PNGs retained; grammar default OFF; a11y
+service unchanged and inert. APK 4,664,135 bytes, sha256
+538f85d7edda409cdcb99a2a63d707f66eb4cee02e3588c0e29f2f3537790bb6,
+delivered at ~/workspace/your_files/ghost-hands.apk (the
+remote-storage upload is the parent's, from the main
+chat — the R12 task's standing delivery rule).
+
+HONEST LIMITS (the plan's §10, carried into the ship
+record). The widget is a snapshot pushed at run
+transitions, not a live feed: Android and the launcher
+may delay a redraw, its "ago" times age between pushes,
+and after an abrupt app death it can show a live phase
+until the next refresh or app open corrects it through
+the marker judgement. It never polls, by design. Widget
+Stop is prompt, not instant: within a 250 ms slice at any
+blocking wait and at the next step boundary in the loop,
+and a native generation already in flight finishes first
+— the v2.6 caveat. If the app process is dead there is no
+run to stop. The loop STARTS what it heard, unreviewed —
+the one place voice in this app does not wait for a
+confirming tap; a mishearing becomes a real goal under
+the user's current pack, with approvals still asking, the
+heard text shown in the field and the feed, and Stop
+working — but the run itself is not pre-approved by
+anyone. The loop inherits the framework recognizer's
+nature: on phones whose speech service is cloud-backed,
+the dictated follow-up leaves the device; the app adds
+no audio handling of its own, and a phone that never
+granted the mic gets no loop (the loop never springs a
+permission request). One follow-up means one: no chained
+conversation, no re-prompt after silence, and a TTS
+engine that never reports an utterance done means no
+loop, never a hung mic. The widget's exported receiver
+is platform-mandated surface, named above.
+
+DEVICE-OWED (Ryan's pass). Add the widget from the
+launcher's widget list; resize wide and narrow; confirm
+the verdict lines and the open-app tap. Start a run and
+watch the step line advance; STOP it from the widget
+mid-run, again during an approval wait (the approval must
+resolve as a decline in seconds, never at the pack
+timeout), and during an ask wait. Run a watched check to
+a change: the widget gains the verdict without opening
+the app. Kill the app mid-run from Recents: the widget
+corrects to "interrupted" (next refresh / app open) and
+never claims the run is still going. Voice loop full
+pass: voice goals + speak-on-finish + loop on; a typed
+goal runs, its answer is spoken, the prompt plays, a
+spoken follow-up runs through its approvals and finishes;
+its answer speaks and the mic does NOT reopen. Silence
+pass: stay quiet at the prompt — one feed line, no second
+prompt, nothing runs. Mishearing pass: say something
+ambiguous and confirm the heard goal is visible in the
+field/feed and governable. Defaults pass: fresh install
+behaves exactly like v3.22 — no widget surprises, no mic.
+
+## v3.22.0 (Oct 26, 2026) — R11 GLUE: run reports, templates, share intake, QS tile
+
+Built exactly to R11_BUILD_PLAN.md. Build-start checks, all
+verified against the live tree before editing: the tree
+matched the shipped v3.21.0 record (this file's section
+below; ./run-host-tests.sh = 1,977 passed); the plan's
+seams re-verified — DlProvider served only the downloads
+root; PageWatches carries its R9 fields (condCharging/
+condWifi) with the label helper intact; build-apk.sh's
+source glob compiles new .java files automatically; the
+screen-switch seam is handleIntent + showScreen. Two seam
+findings shaped the build and are stated here plainly:
+
+- THE PENDING-BASELINE PATH WAS ALREADY WIRED. The plan's
+  §0.3 worry (R8 always created watches with a baseline,
+  so the null path might be unwired) does not hold in the
+  shipped tree: finishPageWatchCheck judges through
+  PageWatches.verdictFor, which yields BASELINE on a null
+  baseline; applyCompletedCheck records the baseline from
+  the capture; recordNotDone leaves it null. R11 therefore
+  adds TESTS for the pending path (§9.21–9.23), not wiring.
+- TWO SURFACES ADAPTED TO THE TREE, DESIGN UNCHANGED.
+  (1) The saved-goal "editor" in this tree is the Save-goal
+  dialog plus the row chips (⏰/👁), not a form screen: a
+  GOAL template's Create opens that same dialog prefilled
+  (name = template title), with the bundle's pack and
+  watch/schedule suggestions applied at Save — nothing is
+  stored before Save, and a same-name re-save keeps the
+  existing record's baseline. (2) The R10 compare view has
+  no per-side card surface (diff rows + Share comparison),
+  so the Report chip lands on the two card surfaces that
+  exist — the live card and the History card; a compared
+  run's report is made from its History card.
+
+- RUN REPORTS (new pure RunReport). One self-contained
+  HTML file per finished run: inline <style> only, NO
+  JavaScript, no external resources — it renders
+  identically offline, in a mail client, in any browser.
+  Sections in the plan's order: header (goal, run
+  date/time from the trail's own stamps, the outcome line,
+  a stats line — steps/duration from the card, approvals
+  asked and downloads counted from the events, each
+  nonzero-only — and the run event's pack/model when
+  present), the answer (facts with their page stamps, the
+  findings excerpt under its label, seeded facts under
+  "From the previous step:", never merged), the watch
+  section (the card's watchBanner in full, quiet-hours
+  wording included) when a watch event exists, a plain
+  timeline (run/decide/govern/approval/ask/answer/note/
+  read_file/download/page_watch/assist/screenshot/stop;
+  tab events fold into ONE counts line; fit, internals,
+  and UNKNOWN future types are skipped, never an error),
+  and the screenshots with their captions. EVERY
+  trail-derived string passes through the one escaper
+  (the HTML five, text and attribute positions alike);
+  an <a href> is emitted only for a URL that parses with
+  scheme exactly http/https and a host — javascript:,
+  file:, scheme-less, and host-less sources render as
+  escaped text. Size discipline: candidates are the end
+  shot then step shots in step order (only files the
+  store still holds — a pruned shot is simply absent, no
+  broken image); the Activity re-encodes at 720px/q70
+  (and 540px/q60 for rung 2), accounts BASE64 lengths, and
+  RunReport.planImages applies the ladder in order —
+  drop beyond MAX_IMAGES=8 (the note names the count),
+  re-encode smaller, drop step shots, drop the end shot —
+  under MAX_REPORT_BYTES = 5,000,000 on the final file;
+  every fired rung prints its note in the report; after
+  rung 4 the document is text-only and ships regardless.
+  Reports live in their own app-private store
+  (RunReport.DIR_NAME = "reports", kept 20 by name order,
+  regeneration of a trail's report overwrites the same
+  file name) and are shared with the R8 pattern
+  (ACTION_SEND, text/html, EXTRA_STREAM + per-URI grant,
+  chooser "Share report") on a background thread.
+- THE PROVIDER'S SECOND ROOT. DlProvider now routes a
+  two-segment …/reports/<name> path to the reports
+  directory; a bare name still serves downloads exactly as
+  in R8 (a one-segment "reports" is a bare downloads name
+  by that grammar — pinned). The name discipline is
+  unchanged and now shared: bareName + the canonical-path
+  guard against the CHOSEN root; the traversal table for
+  both roots is pinned in the harness (rootForSegments /
+  bareName are pure statics for exactly that). The
+  provider's javadoc and the manifest comment were
+  rewritten in this same change to say it serves the
+  downloads AND reports directories; the declaration
+  (authority, exported=false, grantUriPermissions) is
+  unchanged. getType needed no change (mimeForName
+  already maps .html → text/html).
+- TEMPLATES (new pure GoalTemplates; NO new store). Four
+  definitions pinned verbatim: fare_watch and forecast
+  (GOAL, watched, daily 07:00 suggested), headlines
+  (GOAL, plain), restock (PAGE_WATCH, the url slot is its
+  field). Caps: place/from/to/site ≤ 60, date ≤ 40, url
+  ≤ 500; validation is per-slot plain words and the form
+  asks the class at every keystroke (Create enables only
+  when it passes — no second validation logic). The
+  shelf is a TEMPLATES section at the TOP of the Goals
+  screen (no new drawer entry): title, blurb, Use; the
+  slot form expands inline (one open at a time). GOAL
+  Create → GoalTemplates.editorBundle (name, substituted
+  goal, the SETTINGS DEFAULT pack as suggestion, watch/
+  schedule suggestions) → the prefilled save dialog; the
+  store write is the dialog's Save, which also arms the
+  suggested check. PAGE_WATCH Create → URL judged by
+  isValidUrl (R8's rule: http(s), parseable, host), then
+  a direct write with baseline = null and NO_SCHEDULE,
+  and the confirmation in words ("Watching <host> — its
+  baseline is set on its first check. Set a check time
+  in Saved Goals."). The row label gains
+  PageWatches.PENDING_SUFFIX (" — baseline on first
+  check") exactly while baseline == null — beside R9's
+  condition suffixes, never instead of them — including
+  after a NOT_DONE check, which leaves the watch pending.
+  An instantiated template is an ordinary record
+  afterwards, edited/scheduled/deleted by the existing
+  machinery; user-authored templates are not in this
+  release (the plan's stated limit).
+- SHARE INTAKE (new pure ShareIntake + .ShareIntakeActivity;
+  manifest change #1, named in the manifest comment).
+  The parser: kind EMPTY/TEXT/URL_TEXT; the FIRST http(s)
+  URL wins — scan for scheme starts case-insensitively,
+  take to whitespace, strip trailing ) ] } > " ' . , ; : ! ?
+  — and the candidate must parse with a host or the scan
+  continues (a scheme-shaped fragment is TEXT). The URL
+  scan runs on the FULL text before the 2,000-char goal
+  cap, so a late link is still watchable; goalText is the
+  shared text trimmed, verbatim, capped. EXTRA_SUBJECT is
+  ignored, on the record. The activity (exported, single
+  SEND/text/plain filter, dialog theme, excluded from
+  recents) shows the parsed text read-only and offers Use
+  as goal (a prefill extra to MainActivity — nothing
+  starts), Watch this page (the pending-watch write,
+  above, from the intake's own side; duplicate → a toast
+  and the Goals screen), or Cancel (nothing stored). It
+  fetches nothing, runs nothing, schedules nothing.
+- THE TILE (.GhostTileService; manifest change #2, named
+  in the manifest comment). Exported with
+  BIND_QUICK_SETTINGS_TILE protection (the service's own,
+  not a uses-permission) and ACTIVE_TILE meta-data; label
+  "Ghost goal", subtitle "Goal from clipboard" (API ≥ 29,
+  guarded), icon @drawable/mascot_header, state always
+  STATE_ACTIVE — static and honest: the tile can know
+  neither run state nor clipboard contents (background
+  clipboard reads are platform-blocked), and does not
+  pretend to either. Tap → unlockAndRun (the keyguard is
+  never bypassed) → MainActivity with the clipboard
+  extra. THE SEAM: consumeLaunchExtras, called first in
+  handleIntent (onCreate and onNewIntent alike), removes
+  every extra as it reads it (consume-once, pinned);
+  ShareIntake.prefillDecision judges — a live run yields
+  the note and loads NOTHING (the v3.5 never-disturb
+  invariant), no text yields the empty line ("The
+  clipboard is empty — type or speak a goal instead."),
+  otherwise the text (trimmed, capped by the same rule)
+  loads into the goal field, the Agent screen comes
+  forward, and the feed names the source. Review-first:
+  Start is the user's tap, as with a typed or spoken goal.
+- NO NEW anything else: Trail.EVENT_TYPES byte-identical
+  (pinned as an exact string), no new settings keys, no
+  new uses-permissions (the aapt2 dump shows the standing
+  four), PlannerParse/grammar/Governor/AnswerCard/
+  SavedGoals/Downloads/Settings/Trail untouched;
+  AnswerCard.shareText/cardText pinned byte-identical for
+  a scripted card. Grammar still defaults OFF; the a11y
+  service is unchanged and inert.
+- GATES. Host suite 2,041 passed, 0 failed, twice in the
+  foreground (1,977 baseline + 64 new checks across the
+  plan's 31 named tests; the ONLY existing check changed
+  is the standing version pin → 3.22.0 / code 44).
+  ./build-apk.sh BUILD-OK (lambda check clean). APK
+  4,651,700 bytes, sha256
+  6af7803b1d81a5c82d10d278875bd14b9b6a8716c95d7d16e3f3ed8bc5bfda6e,
+  signed with the preserved app.keystore (cert
+  de6969f0…25cd71b), badging 3.22.0 / code 44,
+  uses-permissions byte-identical (INTERNET,
+  ACCESS_NETWORK_STATE, VIBRATE, RECORD_AUDIO), full
+  arm64 lib set (6 libs), icon + all four mascot PNGs in
+  the APK, and the binary manifest verified to carry both
+  new components (intake with its SEND filter; tile with
+  BIND_QUICK_SETTINGS_TILE + QS_TILE + ACTIVE_TILE).
+  Delivered to ~/workspace/your_files/ghost-hands.apk;
+  the remote-storage upload is the parent's step from
+  the main chat (per the v3.21 lesson), not run here.
+- HONEST LIMITS (the plan's §13, restated): a report
+  renders the trail; it is not new evidence — planner-
+  asserted facts appear as the card labels them, and a
+  step the trail recorded badly reads badly in print. A
+  shared report leaves the app's control the moment the
+  chooser fires: the file carries the goal, the facts,
+  and page screenshots in the clear — the header prints
+  the goal plainly so what travels is visible before it
+  travels; that visibility is the mitigation, not
+  encryption. Templates are four fixed definitions;
+  editing one means editing its instance. A pending-
+  baseline watch knows nothing until its first completed
+  check — a restock watch created Monday and first
+  checked Wednesday baselines on Wednesday's page, and a
+  sell-out in between is invisible to it; the
+  confirmation copy says the baseline sets on first
+  check, and this is the consequence. The tile is a
+  shortcut, not a status surface (R12's widget is the
+  status surface). Share intake's safety is the review:
+  shared text is untrusted until the user reads it in
+  the goal field, which is why nothing here auto-starts,
+  auto-schedules, or auto-fetches from a share.
+- DEVICE-OWED (Ryan's pass): generate a report from a
+  real finished run (step screenshots on) and open it
+  from the share sheet in a browser and in a mail client
+  (layout, photos, timeline); repeat from the same run's
+  History card; a report for a run whose shots were
+  pruned (no photos, no broken-image boxes). Create all
+  four templates: fare + forecast land in the editor
+  prefilled and save into watched, scheduled goals;
+  headlines saves plain; restock creates a pending watch
+  — run its first check from its row and see the BASELINE
+  verdict and the pending label clear. Share a link from
+  the browser (goal prefill reviewed, then Start; watch
+  created pending); share plain text (prefill only);
+  share with a run live (undisturbed, feed says why). Add
+  the tile in the Quick Settings editor; tap it unlocked
+  with text on the clipboard (prefill + source line),
+  with an empty clipboard (the empty line), locked
+  (unlock first, then prefill), and mid-run
+  (undisturbed).
+
+## v3.21.0 (Oct 26, 2026) — Art Ghost + Blink: the painted ghost returns, blinking
+
+Ryan's direction (Oct 25, 2026): "I like the other ghost
+on the app but I like the blinking animation." So the
+painted studio ghost is the mascot face again and the
+drawn GhostView face from v3.19 is RETIRED; the one piece
+of the drawn run that carried over is the blink, now a
+bitmap swap: a closed-eyes cut of the SAME artwork swaps
+in while the scheduler says the eye is shut. Everything
+else about the mascot is v3.17, untouched: MascotState,
+the pose table, the glow discipline (no red), the
+transform animators, the one-shots, reduce-motion stills,
+the hero's calm subset.
+
+- THE FACE. The header tile is the v3.17 bitmap
+  construction again — buildUi builds it through
+  MainActivity.mascotBitmapTile(), the very method v3.19
+  kept one swap away as its rollback — and the hero tile
+  never changed. The v3.17 transform life rides both
+  (float/sway/bounce/hop/droop + glow halo), byte-for-byte
+  the shipped animators.
+- THE BLINK. Two new drawable-nodpi assets, pre-made at
+  mascot-prep/blink/ as a deterministic paint-over of the
+  bundled art (pixel-identical outside the eye patches)
+  and copied in as mascot_header_blink.png (432px,
+  152,284 bytes) and mascot_hero_blink.png (1024px,
+  531,703 bytes); the open cuts stay byte-exact (146,404
+  / 510,035). Host tests pin the bundled bytes EQUAL to
+  the prep files. Each MascotDriver owns a blink ticker:
+  started with the pose in show() (after startPose, the
+  single start site), it re-asks GhostFigure.eyesClosedAt
+  every 30 ms — the scheduler's closed phase is ~70 ms
+  wide, so the tick cannot step over it — and swaps the
+  tile's cut only on a phase change. The blink clock is
+  TIME IN STATE from the pose's start, exactly the clock
+  the drawn ghost read. The ticker's life is the
+  animators' life: cancelAnimators() stops it (lifecycle
+  stops, the off-Agent-screen gate, pose changes) and
+  stopBlink() restores the OPEN cut, so a stopped mascot
+  never freezes mid-blink with its eyes shut.
+- THE SCHEDULER, KEPT. GhostFigure is reduced to the
+  blink scheduler it always owned — blinkIntervalMs,
+  isDoubleBlink, blinkShape, blinkOpenness and their
+  constants are the v3.19 code, unedited, and the seven
+  v3.19 blink checks pin them unchanged. Two small pure
+  adapters were added for the bitmap swap:
+  blinkScaleFor(state, hero) (the waits stare at x1.6,
+  riding heroStateFor like the pose table does; every
+  other state x1) and eyesClosedAt(t, scale) (openness
+  at or below half = the closed phase; both dips of a
+  double count).
+- THE DROOP'S EYES. The drawn ghost held half-mast eyes
+  under the slump and let no blink ride on top; the
+  bitmap has no half-mast cut, so the honest equivalent
+  is pinned instead: blinkScaleFor(STOPPED_DENIED) is 0
+  (suspended), eyesClosedAt at a suspended scale is
+  always false (and never reaches the interval walk a 0
+  scale would stall), and the painted eyes stay open
+  under the droop's transform.
+- REDUCE MOTION = NO BLINKING, pinned by construction:
+  show()'s reduce branch applies the static pose and
+  returns before the blink's one start site, and the
+  ticker is only ever started beside a pose start
+  (source-pinned: exactly one startBlink call site,
+  after startPose, after the reduce branch).
+- GHOSTVIEW/GHOSTFIGURE DISPOSITION (the judgment call,
+  disclosed): GhostView.java is DELETED — leaving it in
+  the tree would ship a dead second face in the APK,
+  quietly competing with the bitmap tiles. GhostFigure
+  stays under its name, reduced to the scheduler above:
+  the scheduler was always its section, its v3.19 checks
+  address it by name, and MainActivity's ticker reads it
+  — it is used code, not a husk. Nothing else in the app
+  referenced the drawn figure.
+- TEST ACCOUNTING. Host suite 1,977 checks green in the
+  foreground, twice: 2,002 baseline − 45 removed + 20 new
+  (v321Tests: 4 scale pins, 7 eyesClosedAt pins, 2 asset
+  byte-pins, 1 four-cuts size pin, 6 construction pins).
+  The standing version pin moved to 3.21.0 / code 43, as
+  every release. Every other change is a v3.19 check
+  whose subject — the drawn figure — was retired;
+  each is listed here individually:
+  REMOVED, figure table (5): "v319 figure table: no null
+  figures"; "v319 figure table: every figure has a
+  tail"; "v319 figure table: blink scales are 1 or 1.6"
+  (its surviving fact lives in GhostFigure's scheduler
+  constants, pinned by the kept band checks); "v319
+  figure table: the hero attention states ride the idle
+  figure"; "v319 figure table: waiting states blink
+  slower" (the fact is re-pinned against the surviving
+  adapter as "v321 blink: the panel waits stare
+  (scale 1.6)").
+  REMOVED, frames (1): "v319 determinism: frames are
+  pure functions".
+  REMOVED, tail (5): "v319 tail: the root never moves";
+  "v319 tail: the tip reaches the full amplitude";
+  "v319 tail: amplitude grows root to tip"; "v319 tail:
+  phase is continuous over 2 pi"; "v319 tail: full slump
+  keeps 15 percent".
+  REMOVED, breathing (4): "v319 breath: the idle breath
+  is the float period"; "v319 breath: the running breath
+  is the sway period"; "v319 breath: bounded at one
+  percent"; "v319 breath: it actually breathes".
+  REMOVED, blink (1 of 8): "v319 blink: the droop cap
+  holds at 0.45" (the drawn eye cap; the bitmap
+  equivalent — the droop suspends the blink — is pinned
+  by "v321 blink: the droop suspends the blink
+  (scale 0)" and "v321 blink: a suspended scale never
+  shuts"). The other seven blink checks are UNCHANGED.
+  REMOVED, squash-and-stretch (8): "v319 squash: the
+  envelope anticipates (dips first)"; "v319 squash:
+  anticipation widens as it dips"; "v319 squash: the
+  stretch peaks at 1.08"; "v319 squash: the landing
+  squashes to 0.92"; "v319 squash: finished hops total
+  two cycles"; "v319 squash: exactly neutral at and past
+  the end"; "v319 squash: the hero plays it at half
+  amplitude"; "v319 squash: the bounce envelope ends
+  each hop".
+  REMOVED, droop morph (3): "v319 droop: the morph is
+  monotonic, no step"; "v319 droop: full slump settles at
+  the pose values"; "v319 droop: the reverse morph
+  leaves over 250 ms". (The droop itself survives as the
+  v3.17 transform pose, pinned by the v317 checks.)
+  REMOVED, glance (5): "v319 glance: approval and ask
+  look down 1.8"; "v319 glance: running glances half as
+  far"; "v319 glance: no glance anywhere else"; "v319
+  glance: the cap is 1.8, never more"; "v319 glance: it
+  eases in from the carried value". (The bitmap ghost
+  has no separate eye layer to glance with — the drawn
+  run's own notes flagged the glance as its weakest
+  effect.)
+  REMOVED, path (2): "v319 path: the segment count is
+  inside budget"; "v319 path: the tail out-samples the
+  hem".
+  REMOVED, one clock (6): "v319 one clock: the float
+  runs v3.17's triangle"; "v319 one clock: the sway runs
+  v3.17's triangle"; "v319 one clock: the bounce hop is
+  v3.17's sine"; "v319 one clock: the hop glow peaks
+  mid-envelope"; "v319 one clock: the droop glow dies
+  with the morph"; "v319 one clock: the running tail
+  trails the sway". (The parity they proved — drawn
+  frame vs v3.17 animator — is moot: the shipped motion
+  IS the v3.17 animators again, pinned by v317.)
+  REMOVED, stills (2): "v319 still: the idle still is
+  the rest frame"; "v319 still: the droop still is fully
+  slumped". (Reduce-motion stills are the bitmap static
+  poses again, pinned by v317 group 7.)
+  REMOVED, source pins (3 of 5): "v319 pins: the header
+  installs the drawn ghost" (replaced by "v321 pins:
+  both tiles are bitmap, both wired to blink" and "v321
+  pins: no drawn face in the shipped tree"); "v319 pins:
+  the callback stop rides the lifecycle" (the callback
+  is deleted with its view; the blink's stop discipline
+  is pinned by "v321 pins: every stop restores the open
+  cut", and the lifecycle stops themselves by the kept
+  v317 pin); "v319 pins: no R, no lambdas, no shadow
+  layer" (its GhostView half is moot with the file gone;
+  the no-lambda rule stays enforced by build-apk.sh's
+  LambdaMetafactory gate, green on this build, and the
+  surviving figure source is covered by the v321
+  no-drawn-face pin).
+  RELABELED (1): "v319 pins: the rollback bitmap is
+  still bundled" is now "v319 pins: the header bitmap is
+  still bundled" — the assertion is identical
+  (mascot_header.png, 146,404 bytes); only the word
+  "rollback" left the label, because the bitmap is the
+  construction again, not a fallback.
+  KEPT UNCHANGED (8): the seven v319 blink checks and
+  "v319 pins: the permission set is unchanged".
+- GATES. Host suite green twice (above); ./build-apk.sh
+  BUILD-OK incl. the lambda check; signer SHA-256
+  de6969f0…25cd71b (preserved app.keystore); badging
+  com.ghosthands.app 3.21.0 (43), minSdk 24 / targetSdk
+  34; uses-permissions exactly the four standing ones;
+  the a11y service declared as before, unchanged and
+  inert; grammar default OFF; full arm64 lib set (llama,
+  ggml, ggml-base, ggml-cpu, ghhands, omp); launcher icon
+  retained; all FOUR mascot PNGs in the APK. APK
+  4,639,413 bytes, sha256
+  020183c79b2cf19086d3a676b86122d9a2de57a5ffd8afe5be32f40b6e674459
+  (the +~664 KB over v3.20 is the two blink cuts; the
+  drawn face's code leaving the dex is a rounding error
+  beside them).
+- HONEST LIMITS. The blink is a two-cut swap, not the
+  drawn run's smooth 70/90 ms eyelid: at 46dp the eye is
+  a handful of pixels and the swap reads as a blink, but
+  there is no half-open frame and there cannot be one
+  without a third cut. The ticker polls at 30 ms on the
+  UI thread only while a pose animates; it is one more
+  small runnable in the family the animators already
+  run, and it stops wherever they stop. The blink clock
+  restarts with each pose, so a state that changes every
+  few seconds blinks less often than the cadence implies
+  — the same time-in-state semantics the drawn ghost
+  shipped with.
+- DEVICE-OWED (Ryan's pass): the painted ghost reads as
+  the face again at 46dp beside the pill; the blink
+  cadence feels alive, not twitchy, over a long approval
+  wait (the waits blink SLOWER by design — the stare);
+  the hero blinks in step with its own float; reduce
+  motion freezes both tiles open-eyed; no freeze-frame
+  with eyes shut after a mid-blink Stop or screen
+  change; the droop reads as v3.17's droop (eyes open —
+  the suspended blink is the point to eyeball).
+
+## v3.20.0 (Oct 25, 2026) — Everything Train R10: mission board, run-compare, ask-about-a-run
+
+Built exactly to R10_BUILD_PLAN.md. Three readers of records
+the app already keeps, and nothing else: no new trail event
+types, no new permissions, no new settings keys, the a11y
+service untouched, defaults byte-identical (the standing pin
+proves an ordinary run's trail and first prompt unchanged).
+
+- MISSION BOARD (new MissionBoard, pure; NavState.MISSION =
+  5, SCREEN_COUNT 6, drawer order Agent, Mission, Saved
+  Goals, Routes, History, Settings — only the drawer arrays'
+  order is new; every v3.5 id and invariant keeps its
+  meaning). The board is a DERIVED VIEW, never a store: at
+  every entry MainActivity hands the SavedGoals and
+  PageWatches stores plus every retained trail's parsed
+  events to MissionBoard.derive, and the rows are recomputed
+  on the spot. Goal and page-watch verdicts are discriminated
+  by the page_watch flag on the watch event, never by label,
+  so a page watch named like a goal cannot feed the goal's
+  row (pinned both directions). The newest COMPLETED verdict
+  fills the row in the answer card's own words; a newest
+  not_done surfaces as "last check couldn't run <date>"
+  without hiding the verdict behind it; not_done checks are
+  skipped in the quiet streak, a changed or baseline verdict
+  ends it, and a streak that runs off the oldest supplied
+  trail still counting renders "N+", never a false exact
+  figure. A row with no retained verdict falls back to the
+  store's baseline record, then to an honest "no checks yet".
+  Page rows read verdict/last-check/diff from trail events
+  when retained and from the store record when not. Next
+  check comes from the standing nextFireMillis math plus the
+  R9 condition suffix. A row tap opens the newest trail
+  carrying that item's verdict as its History answer card
+  (baseline-fallback rows go to the Saved Goals list); the tap
+  never starts anything. While a run is live the board's head
+  carries one status row; verdicts render closed records
+  only. No red anywhere on the board; a change carries the
+  cyan accent.
+- RUN-COMPARE (new RunCompare, pure; a Compare chip on every
+  History row). Two picks distill side by side; a third pick
+  replaces the FIRST (the pair is the two most recent picks);
+  selection is session-only and entering History starts
+  unselected. The shared core (finished, outcome, steps, last
+  time) is TrailStats.factsFromEvents reused as-is; a second
+  pass carries goal/pack/model/grammar, seconds, the token
+  tallies, the counted families (reads from read events plus
+  planner read/read_file executions; notes landed only; asks;
+  answers; approvals asked/denied; guard corrections;
+  downloads; tabs opened), the watch verdict, and the
+  screenshot flag. A tally a trail does not carry renders
+  "not recorded", never 0 — including per-field absence
+  inside a summary written with live stats off. There is
+  deliberately no winner: no score, no "better", only 22 diff
+  rows in a stable order with signed B − A deltas on steps
+  and seconds. Same-goal pairs get fact set work (only-A /
+  only-B / both over Scratchpad-normalised texts — a reworded
+  duplicate joins "both" only when its normalisation matches
+  exactly, the notebook rule as written); different goals get
+  per-side fact lists. An unfinished side distills as
+  "unfinished" with its partial counts. Share is plain text
+  through the standing share path, sources named by title or
+  host, never a raw URL (fixture-proven). No Listen for
+  compare.
+- ASK-ABOUT-A-RUN (new RunDigest + RunQa, pure; a panel in
+  BOTH card slots — the live Agent card and the picked
+  History card, each its own session). The subject is a
+  CLOSED trail, digested by RunDigest under a 1,000 estimated
+  token budget: header (goal, outcome, source, steps/
+  seconds, model, grammar, pack, the card's watch banner),
+  facts verbatim in the card's rendered form, questions and
+  answers quoted as recorded, step lines distilled from the
+  execute/result spine (results capped at 120 chars), and
+  the stop line. Inherited chain facts ride under their own
+  "From the previous step:" heading (a disclosed judgment
+  call: a chain step's done may rest on them, so they are
+  part of its evidence, labeled — never merged into its own
+  facts). Overflow runs the condensation ladder in order:
+  (a) result tails 120 → 60, (b) consecutive same-page reads
+  collapse into one line naming the count, (c) middle step
+  lines drop (first 5 + last 10 kept). Evidence lines —
+  notes, asks, answers, approvals, denials, guard
+  corrections, the stop — are never dropped by any rung.
+  Past the ladder, a chunked plan (≤ MAX_QA_CHUNKS = 4
+  chunks, oldest first) compresses through the model and
+  assembles; the panel discloses condensation whenever it
+  fired. RunQa judges every completion HOST-SIDE: each
+  numeric token (the relevance guard's own tokenizer, so
+  grouping commas and decimals mean the same on both sides)
+  must appear in the digest's evidence set. One failure earns
+  ONE correction re-ask naming the offending numbers; a
+  second failure is REFUSED and the ungrounded text never
+  reaches the thread — the panel renders the refusal line
+  instead. The verbatim "That is not in the trail." is a
+  first-class ANSWER. Grammar is forced OFF for every Q&A
+  generation (the engine flag saved and restored around the
+  calls; the setting itself is never written), prior pairs
+  ride within a 250-est allowance (oldest drop first),
+  answers cap at 220 tokens, Ask is disabled during a live
+  run and when no model is loaded, and the Q&A writes
+  NOWHERE — a scripted session leaves the subject trail
+  byte-identical (pinned). Two disclosed reconciliations of
+  the plan with itself: §4.2 measures the digest with the run
+  loop's estTokens while §4.4/§9.36 pin no reference to the
+  loop class in RunDigest/RunQa — so the estimator is
+  MIRRORED line-for-line inside RunDigest, the harness pins
+  the mirror equal to the original over its fixtures, and
+  the construction pin (no Agent/Governor/WebView/start-path
+  reference in either file) holds literally.
+- GATES. Host suite 2,002 checks green in the foreground,
+  twice (1,932 baseline + 70 new across the plan's 40 named
+  tests). The ONE existing check changed is the standing
+  version pin, re-pinned to 3.20.0 / code 42 as every release
+  does; nothing else was touched. APK: preserved keystore
+  (signer SHA-256 de6969f0…25cd71b), badging
+  com.ghosthands.app 3.20.0 (42), minSdk 24 / targetSdk 34,
+  uses-permissions exactly the four standing ones, full
+  arm64 lib set (llama, ggml, ggml-base, ggml-cpu, ghhands,
+  omp), launcher icon and both mascot PNGs retained (the
+  header PNG still byte-pinned at 146,404).
+- HONEST LIMITS (the plan's §11, stated as written). Streaks
+  are bounded by trail retention, and retention counts
+  trails across ALL runs (default 25), not per watch: a busy
+  week of manual runs shortens every watch's visible memory.
+  The "N+" marker discloses the edge when a streak runs into
+  it, but a streak that ended inside pruned history reads
+  shorter than the truth — the board shows what the record
+  holds, and says so. The board can under-report after
+  pruning: if a goal's newest watch-event trail is pruned,
+  the row falls back to the goal's baseline record and reads
+  "baseline set" with its date, even though later checks
+  happened; the date is the disclosure, and a verdict store
+  of R10's own was rejected on purpose, not overlooked.
+  Compare's token rows exist only for runs made with live
+  stats on; older or stats-off runs show "not recorded", so
+  some pairs compare thinner than others. The board and
+  compare are views at entry time — neither live-updates
+  while you sit on it. Ask-about-a-run grounding enforces
+  NUMBERS, not names: an invented place or person with no
+  digits in it can pass the check; the citation rule, the
+  short-answer discipline, and the verbatim refusal mitigate,
+  they do not eliminate. Answers come from a 1.5B model
+  reading a lossy digest — result tails are truncated and
+  long runs are condensed — so "not in the trail" can
+  occasionally mean "not in the digest" on pathological
+  trails; the panel's condensed line is the disclosure. A Q&A
+  answer costs a full generate call on a serialized engine:
+  seconds to a minute on device, one question at a time, and
+  never during a live run.
+- DEVICE-OWED (Ryan's pass): open the board on the real
+  watch roster (verdict words match the cards, streaks match
+  the checks remembered, next-check times match the alarms
+  set; the six-item drawer's feel and order); compare the
+  Clinch River pass trail against a later rerun (same-goal
+  header, fact set-diff, token rows); compare a died run
+  against its resumed retry (the unfinished side); ask-about-
+  a-run on a real trail (a noted-number question → a grounded
+  answer with a step citation; an unanswerable question →
+  "That is not in the trail."; a trap question inviting an
+  invented number → the correction or the refusal, never the
+  invented figure presented as fact); Q&A feel (generate
+  latency on device, the thread across follow-ups, Ask
+  correctly disabled during a live run).
+
+## v3.19.0 (Oct 25, 2026) — Mascot Animation Upgrade: the drawn ghost
+
+Built exactly to mascot-prep/ANIMATED_GHOST_PLAN.md, at Ryan's
+"I want better animations." v3.17 animated the PICTURE (rigid
+transforms of a static bitmap on two animators whose phases
+could never agree); v3.19 animates the GHOST ITSELF. The
+header tile is now a GhostView — the app's first custom View —
+painting a procedurally drawn sheet ghost from canvas paths:
+a flowing tail, a breathing body, blinking eyes, squash-and-
+stretch hops, and a droop that is a MORPH (the crown sags, the
+half-lidded eyes settle at 0.45, the smile inverts to -0.2,
+the tail goes limp) instead of a tilt.
+
+- ONE CLOCK. A single Choreographer frame callback produces
+  the COMPLETE frame at absolute time in state: the outer
+  transform, the halo alpha, and the figure, all computed by
+  the new pure GhostFigure from (state, hero, elapsed, the
+  morph values carried in). The v3.17 two-animator phase
+  fight is gone by construction: the tail's wave trails the
+  body's own sway (about 0.6 rad behind on the running pose),
+  and the frame's outer/glow values at sampled times ARE the
+  v3.17 pose animators' values, pinned (group 10).
+- GhostFigure (pure, host-tested): figureFor(state, hero) is
+  MascotState.figureFor's sibling table — hero rides
+  heroStateFor, so attention states draw the idle figure,
+  exactly as the hero's pose does. Tail: a bezier spine (root
+  at the sheet's hem, tip down-left) swept by a sine whose
+  amplitude grows down the tail and scales with (1 - 0.85 *
+  slump), 15 percent kept at full droop. Breathing: +-1
+  percent / -+0.7 percent on the POSE's own period constants
+  (float 2600, sway 1800, download 3000, bounce cycle 1600;
+  one-shots and the droop do not breathe). Blinking: a
+  deterministic scheduler (2.8-4.6 s cadence from a hashed
+  index, every fifth event a double, waiting states at 1.6x),
+  70 ms close to 0.08 and 90 ms open, smoothstepped; the
+  droop overrides the scheduler with a constant 0.45.
+  Squash-and-stretch: the plan's keyframe envelopes (dip
+  0.94, stretch 1.08, landing 0.92), applied on one-shot hops
+  and inside each bounce hop, EXACTLY neutral at the envelope
+  end and beyond; the hero plays at half amplitude. Glance:
+  the approval and ask waits (and only they, plus a half
+  glance while running) ease the eyes 1.8 units down toward
+  the panel over 200 ms; the cap is pinned.
+- GhostView: preallocated paths/paints/buffers, zero
+  allocations in onDraw, the body path at 73 segments against
+  the plan's 120 cap, a 12 ms draw-rate cap, invalidation
+  confined to the header view. The gradient body is a single
+  unit-space LinearGradient (a second paint is rim light;
+  setShadowLayer is NOT used — source-pinned). Halo and rim
+  take the pose's glow role color.
+- The driver forks by surface, not by logic: MascotDriver
+  keeps state resolution, epoch/one-shot bookkeeping, glow
+  roles, de-dup, and the lifecycle stops for both surfaces;
+  the drawn path registers/unregisters the frame callback
+  instead of starting animators, and the callback unregisters
+  at the same sites (stopMascotAnimators via onPause/
+  onDestroy, detach). The hero stays BITMAP, untouched.
+- Reduce motion draws ONE still frame of the figure (rest
+  phase; a stopped still is fully slumped) under the existing
+  reduce_motion key, and one-shots settle on the same 1200 ms
+  timer as v3.17. Poses are re-entered with the morph carried
+  across (slump, glance, glow read back from the last drawn
+  frame), so a state change never snaps the figure.
+- Rollback arrangement (disclosed): the plan left v3.17's
+  source pin "both tiles load the bundled mascot drawables"
+  standing, and the pin still passes as written — the header
+  PNG stays bundled, byte-pinned, and loadable through
+  MainActivity.mascotBitmapTile(), the v3.17 ImageView tile
+  kept one construction swap away in buildUi per the plan's
+  section 7 rollback (the hero's own mascot_hero load is
+  live regardless). If the drawn ghost fails its device pass,
+  the retreat is that one swap; no v317 check was edited.
+- Host suite: 1,932 tests green twice in the foreground
+  (1,878 standing + 54 new in v319Tests, the plan's 12
+  groups: figure table, determinism, tail shape, breathing
+  bounds, blink scheduler + droop cap, squash envelope,
+  droop morph both ways, glance discipline, path budget,
+  one-clock pose parity, reduce-motion stills, source pins).
+  Existing checks changed: exactly ONE, the standing version
+  pin to 3.19.0 / code 41. MascotState, its constants, and
+  the v317 pose values are untouched.
+- APK: 3,959,296 bytes, sha256
+  f06608be4cbb0ed3dc74d0da8342cc3638aa6117980cf5940d81c0e1bdf4e4f1,
+  cert de6969f0...25cd71b, badging 3.19.0 / code 41,
+  uses-permissions byte-identical (the four standing), full
+  arm64 lib set, icon + both mascot PNGs retained. Grammar
+  default still OFF; the a11y service is unchanged and inert.
+- OWED (device): the drawn ghost itself — figure legibility
+  at 46dp (tail read, blink visibility), the tail's phase
+  feel against the sway, blink cadence over a long approval
+  wait, the droop morph read, reduce-motion stills, WebView
+  jank while the header animates during a run, and the
+  standing mascot items from v3.17 (tile crispness, glow vs
+  smear, hero at largest feed text). If the figure fails at
+  46dp, the rollback above is the retreat, not a redesign.
+
+## v3.18.0 (Oct 25, 2026) — Everything Train R9: chaining, smart checks, briefing
+
+Built exactly to R9_BUILD_PLAN.md. Three features, one
+principle each: a chain hands its evidence forward WITHOUT
+inventing autonomy, a condition can delay a reminder
+WITHOUT touching browsing, and a briefing reports verdicts
+WITHOUT re-deriving them. versionCode 40.
+
+CHAINING. Named chains live in Goals (GoalChains, pure,
+one JSON prefs value): a name and 2..5 steps, each a goal
+text plus the pack that step runs under. A step's text may
+carry {prev}, replaced literally and host-side by the
+previous step's outcome line before the goal reaches the
+field or the Agent (GoalChains.substitute; a seedless start
+substitutes ""). Step 1 may not contain it —
+GoalChains.validate refuses at save time. There is NO new
+planner action: a chain step is an ordinary run carrying an
+inheritance. The Agent's fullest constructor gains the
+seed list plus the chain stamps (the pre-R9 signature is
+kept as a delegating overload, so teach/replay/watched/
+harness callers are untouched); at run start, after the run
+record — which carries chain_name / chain_step /
+chain_total ONLY on a chain step — the loop records the
+release's ONE new trail type, chain_seed (facts + stamps +
+from_goal + from_trail), BEFORE the scratchpad is touched,
+then seeds each fact through the new Scratchpad.seedIn
+under its provenance stamp ("previous step: <goal>"), so
+the prompt's FACTS block labels it and the done-grounding
+guard judges it as evidence like any noted fact (the
+scripted SEED-GROUNDS run proves a step-2 done citing only
+the seeded number completes; the unseeded control is
+corrected). Captured seeds use the answer card's own entry
+rule over the finished run's note events, capped at the
+scratchpad's capacity with the oldest dropped
+(GoalChains.captureSeedFacts) — and ONLY a done run is ever
+asked: a failed step captures nothing, advances nothing,
+and the card says the chain paused (its findings were
+labelled unconfirmed on its own card; they are not
+laundered into a later goal's evidence). An ad-hoc
+continuation ("Continue with these findings", offered on
+any ordinary done run whose card carries facts) mints an
+unnamed 2-step run state; named steps load into the goal
+field for review — chains stay ATTENDED: every step is
+tapped, governed, and approved on its own merits, and a
+chain state survives relaunch (a resume offer rides the
+Goals screen; discarding is one tap and touches nothing
+recorded). The finished chain composes ONE combined card
+(ChainCard, pure): the per-step AnswerCards under step
+headings with a closing chain-outcome line; the card box
+renders it while the live card is the chain's last step,
+Listen speaks SpeakText.ofChain (each step through the one
+scrub discipline), Share shares ChainCard.shareText. On a
+step's own card, inherited facts render under their own
+"From the previous step:" group — never merged into the
+run's facts (AnswerCard reads chain_seed in its single
+pass; a chain_seed-free trail cards byte-identically).
+
+SMART CHECKS. SavedGoal and PageWatch gain condCharging /
+condWifi (keys cond_charge / cond_wifi, written only when
+set — an unconditioned record serializes byte-identically;
+legacy records parse unconditioned; a re-save carries them
+through copyWatchFrom). The decision is
+CheckConditions.decide / judgeFiring (pure,
+BatteryGuard-shaped): master off or no conditions -> POST
+(the pre-v3.18 behaviour); every set condition must be
+PROVEN met (unproven is unmet — a charging state the phone
+did not report is not one the app may invent); a firing
+deferred for MAX_DEFER_MS (6 h) posts anyway — late beats
+lost. The gate sits in CheckReceiver between its standing
+re-judgement (a deleted or unscheduled check fires
+NOTHING, conditions never resurrect it) and its post, and
+judges the POST ONLY: a deferred firing posts nothing,
+records in the CheckDeferrals book, arms a retry
+(RETRY_MS, 30 min) under a DISTINCT PendingIntent request
+code with an EXTRA_RETRY extra — a check has at most one
+daily alarm and one retry, and they never alias — and the
+daily cadence re-arms on its firing regardless. A retry
+firing never re-arms the daily alarm; it posts and clears
+when conditions hold or the window runs out. Charging is
+read from the sticky ACTION_BATTERY_CHANGED intent;
+Wi-Fi from the active network's capabilities —
+ACCESS_NETWORK_STATE covers it, NO new permission (the set
+is byte-identical, harness-pinned and aapt2-diffed).
+Editing conditions re-arms nothing: judgement happens at
+fire time. The launch pass prunes deferrals whose check is
+gone, and clears all of them (retries disarmed) when the
+master is off. UI: one master toggle ("Smart check
+conditions", ALERTS, default OFF — Settings key
+check_conditions) and, while it is on, two chips under
+each scheduled goal's and page watch's Goals-screen row;
+the rows' labels carry the " · charging" / " · Wi-Fi"
+suffix (SavedGoals.conditionSuffix).
+
+BRIEFING. BriefingLog (pure; 30-entry cap, oldest dropped)
+gains one entry at the moment each watched verdict is
+recorded, appended in MainActivity from the values already
+in hand: the goal watch's in finishRunUi (label = the
+run's pinned goal name, kind goal, the verdict state, its
+first diff line, the watch's quiet-deferred flag), and the
+page watch's at BOTH finishPageWatchCheck paths (kind
+page; the NOT_DONE path appends a NOT_DONE entry — a state
+like any other). R8 CAVEAT RESOLVED, as the plan ordered:
+PageWatches.verdictFor CAN return null for a baseline-less
+watch, but the callback reaches it only on the completed
+path, where the run has by construction captured the
+page's text — and applyCompletedCheck consumes that same
+text; the null (NO_VERDICT-style) outcome is unreachable
+in the callback, so the briefing fabricates nothing for
+it: no entry is appended for an outcome the watch never
+produced. Delivery is BriefingDigest.due + compose at
+launch (after the stores load, beside the arm-all pass):
+on the day's first open with the setting on (Settings key
+morning_briefing, ALERTS, default OFF), the digest —
+CHANGED first (label + first diff line + "(during quiet
+hours)" when held), then NOT_DONE "couldn't check", then
+BASELINE "now watching", NO_CHANGE never itemised but
+counted in the closing line, at most 5 itemised lines with
+the overflow folded into "and N more changes/checks." —
+shows as a banner above the goal card and is spoken
+through the lazy-TTS pattern (a ready engine speaks, a
+starting one stays quiet, none starts one; speech never
+blocks launch). Entries are marked briefed when the
+BANNER is shown — the banner is the delivery; a phone
+without speech still got its briefing. The day stamp
+(year*1000 + day-of-year, DST-immune, strictly increasing)
+advances even on a verdict-free day; with the setting OFF
+the pass does nothing and advances nothing, so switching
+it on later briefs the backlog (bounded by the cap).
+
+HONEST LIMITS, stated as the plan states them. Chaining
+is a sequence of attended runs, not autonomy: every step
+starts with a tap, runs under its own pack, and its
+approvals are its own. Seed facts are planner-asserted
+evidence carried forward — a wrong step-1 fact can seed
+step 2; the provenance label is the mitigation, on the
+prompt, on the card, and in the trail. Condition deferral
+is judged at fire time on the retry cadence — a 5-minute
+plug-in between retries can miss its window, and the
+6-hour give-up can post unplugged. The briefing log is a
+cache of trail verdicts: pruned trails do not remove log
+entries, and cleared app data takes the backlog — the
+trails remain the record. An unnamed step goal that ends a
+chain mid-way (chain deleted under a standing run state)
+keeps its retry only by re-creating the chain or typing
+the step's goal — the app says so rather than guessing.
+
+GATES. 1,878 host tests green, run TWICE in the foreground
+via ./run-host-tests.sh (v3.17's 1,806 + 72 new: the
+plan's 37 named tests — chain registry + seed-order +
+stamps, store/validation/substitution/capture, ChainCard
++ spoken forms, the CheckConditions matrix, the deferral
+book, record round-trips, the BriefingLog/Digest
+discipline, both Settings keys, the permission/source
+pins, and the regression pair proving an ordinary run's
+trail AND first prompt are byte-identical through the new
+seam; ONE existing check changed — the standing version
+pin, to 3.18.0 / code 40). Grammar default OFF; the a11y
+service is unchanged and inert.
+APK: 3,951,105 bytes, sha256
+fb1eb13c3564480cefa70eeb059da11ff5eb451a5d4dd051e5c7783d62e3aad9,
+signer de6969f02188f03b78f1f56afcd231a367ae5264b2f77acea38fe746425cd71b
+(preserved product keystore), badging 3.18.0 / code 40,
+permissions byte-identical (INTERNET, ACCESS_NETWORK_STATE,
+VIBRATE, RECORD_AUDIO), icon + mascot drawables retained,
+full arm64 lib set (libllama, libggml, libggml-base,
+libggml-cpu, libghhands, libomp). Delivered at
+~/workspace/your_files/ghost-hands.apk; remote link in
+ghost-hands-v318-upload.json beside it (expires Oct 27,
+2026, 7:13 PM ET).
+
+DEVICE-OWED (Ryan's pass).
+Install; Settings > ALERTS shows both new toggles, off.
+Build a 2-step chain on real goals (step 2 using {prev});
+run step 1, tap Next on its card, review the loaded goal
+({prev} already substituted), Start step 2 — its card shows
+the "From the previous step:" group, and the chain's end
+shows the combined card (Listen + Share read the chain).
+Kill the app mid-chain and relaunch — the Goals screen
+offers the resume. A done run with facts offers "Continue
+with these findings". Set the charging condition on a
+scheduled check with Smart check conditions ON, leave the
+phone unplugged past the check time: no reminder; plug in
+and it posts within a retry (30 min); force the 6-hour
+give-up only if patience allows. Watched checks overnight,
+then Morning briefing ON before the first open of the day:
+the banner reads the verdicts and speech (if on) reads
+them once — a second open the same day stays quiet.
+
+## v3.17.0 (Oct 25, 2026) — Mascot Interlude: the studio ghost, animated
+
+The interlude between R8 and R9, built exactly to
+mascot-prep/MASCOT_PLAN.md. The studio ghost (original
+design, Ryan's rule: NOT a likeness of the Muse avatar)
+now lives on the Agent screen and reacts to run state with
+framework view animations — no video, no new permissions,
+no new settings keys. versionCode 39.
+
+SURFACES. A 46dp header tile sits between the wordmark
+column and the status pill (the plan's primary slot), and a
+72dp hero tile greets from the model card's top row, left
+of the status line (statusText re-parented into a column
+beside it; the card's other children keep their order and
+margins). Both tiles are the pill halo's construction one
+size up: a GradientDrawable halo (rectangle, 22dp radius)
+behind a rounded tile (12dp, the WebView stage's
+setClipToOutline trick). The source art is an opaque navy
+square and is presented as a tile, never keyed out; its
+navy sits naturally on the ethereal skin. The PNGs ship as
+the app's first drawable resources
+(res/drawable-nodpi/mascot_header.png 432×432 / 146,404
+bytes, mascot_hero.png 1024×1024 / 510,035 bytes — the
+prep cuts, byte-pinned in the harness). ONE DEVIATION
+from the plan, disclosed: the plan loaded them via
+R.drawable, but this app has never referenced the
+generated R class and the host harness compiles against
+android.jar alone, where no R exists — the R route breaks
+the host gate. The tiles resolve their drawable ids by
+name (getIdentifier) once at buildUi; identical behavior
+in the APK, where aapt2 has compiled the resources in.
+
+DECISIONS. MascotState (new, pure, host-tested) resolves
+everything: the base state from the pill's own inputs
+(running / stopping / downloading / the two panels'
+visibility), the priority ladder (held STOPPED_DENIED >
+panel waits > queued one-shots > base), the one-shot
+queue (WATCH_CHANGED then FINISHED, depth capped at 2, a
+third dropped never stacked; STOPPED_DENIED clears the
+queue and HOLDS until a live state replaces it), the pose
+table (idle float 2600ms; download float 2000ms; running
+sway 1800ms with the glow on the pill's own 1400ms pulse;
+waits bounce 550ms hops on a 1600ms cycle; a change is
+one 550ms bounce; finished hops 450ms twice; the droop
+lands in 400ms at +4dp / +6° / alpha 0.55, HELD), and
+the glow discipline (violet its own, cyan the accent
+family, amber the guard/ask family, stopped = OFF — no
+state maps to red; red stays the pill's and the stop
+button's). The hero runs heroStateFor's calm subset
+(attention states read as the idle float; its finished
+hop is a single gentle one at half amplitude).
+MainActivity owns only views and animators: one
+MascotDriver per tile, one transform animator + one glow
+animator at a time, transform/alpha only (no layout
+passes over the stage), mirroring startPulse/stopPulse's
+lazily-made, idempotent, null-guarded discipline.
+updateMascot() rides the END of updatePill() itself, so
+the mascot is judged at every site the pill is judged and
+cannot drift from it; applyScreens() gates it to the
+Agent screen (GONE elsewhere, animators stopped). Panel
+hooks fire mascotEvent at the approval/ask VISIBLE sites
+and re-resolve at the GONE sites; finishRunUi fires the
+finish one-shots (a goal watch's change first, then
+FINISHED for done, STOPPED_DENIED for every other ending
+— the card's outcome, the trail's terminal word, is the
+source), and a page watch's change fires in
+finishPageWatchCheck, where its verdict actually lands.
+One-shots are live-only (the inForeground gate): a finish
+nobody saw earns its notification as ever, never a
+queued hop. Lifecycle: onPause and onDestroy stop the
+mascot's animators beside stopPulse's line; a lifecycle
+stop settles a one-shot caught mid-play, and the held
+droop survives it. Never-disturb: the tiles are passive,
+non-focusable, IMPORTANT_FOR_ACCESSIBILITY_NO — no input,
+no focus, no sound, no haptics, no announcements; the
+pill remains the state in words.
+
+REDUCE MOTION adds no key: MascotDriver reads
+Settings.KEY_REDUCE_MOTION at animation time, every time
+(the pill pulse's precedent, so the toggle applies live;
+onReduceMotionToggled re-judges the mascot beside the
+pill). Reduced, no animator runs: each state snaps to its
+pinned static pose (rest pose, steady glow — waiting
+holds amber 110 so the signal survives as color; the
+droop applies instantly), and a one-shot's static pose
+holds ~1.2s, then settles the queue the way an animation
+end does.
+
+TESTS. 1,806 host tests green in the foreground, run
+twice (+68 new: the plan's eight MascotStateTest groups
+carried as v317Tests in GovernorTest, the house harness
+pattern — transition-table completeness over all 32
+input combinations, priority incl. both-panels =
+APPROVAL_WAITING and stopping-stays-RUNNING, the queue
+order/cap/hold semantics, waiting exits, the pose table
+pinning the plan's constants, glow discipline incl. the
+no-red pin, the reduce-motion mapping, state-name
+stability — plus source pins: tiles loading both
+drawables by name, one shared MascotState, the panel and
+finish event sites, lifecycle stops, and both PNGs'
+exact byte sizes). ONE existing check changed — the
+standing version pin moves to 3.17.0 / code 39 —
+disclosed here as every release discloses it.
+./build-apk.sh green (the lambda check stands); signer
+cert de6969f0…25cd71b (the preserved keystore); badging
+3.17.0 / code 39; uses-permissions identical to v3.16
+(the four standing ones, aapt2-listed); the a11y service
+unchanged and inert; the full arm64 library set; icon
+retained. APK 3,934,721 bytes (+663,722 over v3.16 —
+the two PNGs are 656,439 of it), sha256
+d7f8107d07a81f160dbcdaf4d09f077a628794c75fe20f0571ba6df51b3231af,
+delivered at ~/workspace/your_files/ghost-hands.apk with
+the remote-storage link in
+~/workspace/your_files/ghost-hands-v317-upload.json
+(expires Oct 27, 2026, 6:18 PM ET). Grammar default
+remains OFF. Still Ryan's: install + the device pass
+(the plan's list: the tile crisp at 46dp on the Moto G;
+the glow reading as glow, not a smear; the bounce
+tolerable across a long approval wait; the
+reduce-motion toggle settling the mascot mid-run; no
+visible jank in the WebView while the sway runs; the
+hero not crowding the status text at the largest feed
+text size — and the header-width check the plan
+flagged: the title column absorbs the squeeze first, so
+if the wordmark or its subtitle clips beside the pill,
+the tile drops to 40dp before the pill is touched).
+
 ## v3.16.0 (Oct 25, 2026) — R8: Downloads, Documents, Page Watch
 
 Everything Train R8 of 13 (ROADMAP_EVERYTHING.md). Three
@@ -190,14 +2920,20 @@ grammar-v316.txt BYTE FOR BYTE, and the parity oracle
 re-run against that extraction scores 57 passed, 0 failed;
 (4) the fake-JNI host harness rebuilt around the
 reconstruction (harness-recon, ASan+UBSan, the pinned
-llama) ran the hunt's own scenarios: Q5_K_M grammar ON +
-cache ON — all 8 calls returned, grammar_flag 1 on every
-call, prefix reuse 385 tokens/call, outputs valid action
-objects; Q4_K_M grammar ON + cache ON — all 12 calls
-returned the same way. [harness results as run; see
-grammar-lab recon logs.] The function's source ORDER also
-follows the v3.11 object (helpers, loadModel, freeModel,
-generate). What the reconstruction cannot claim: the
+llama) re-ran the hunt's own scenarios (logs:
+grammar-lab/recon-*.log): Q5_K_M grammar ON + cache ON —
+ALL 8 CALLS RETURNED, grammar_flag 1 on every call, prefix
+reuse 385 tokens/call (the post-fix record's own numbers),
+outputs valid action objects; Q5_K_M grammar ON + cache
+OFF — all 4 calls returned with reuse 0 on every call, the
+v3.6 switch behaving as documented; Q4_K_M grammar ON +
+cache ON — all 12 calls returned the same way. Zero
+sanitizer reports across the three runs. The function's
+source ORDER also follows the v3.11 object (helpers,
+loadModel, freeModel, generate). The shipped .so itself
+was read back after the build: exactly the three JNI
+exports, the read-file grammar present in its strings, and
+no accept call anywhere in it. What the reconstruction cannot claim: the
 original's comments are rewritten where they were not
 recoverable (the grammar and header blocks document the
 current contract in current words), and byte-identity with

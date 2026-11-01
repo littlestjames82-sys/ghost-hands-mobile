@@ -29,10 +29,18 @@ rm -rf "$OUT"; mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/libs" "$OUT/apkroot/lib/
 
 echo '[0/9] keystore (preserved across versions)'
 if [ ! -f "$KS" ]; then
-  "$JDK/bin/keytool" -genkeypair -keystore "$KS" \
-    -alias ghosthands -keyalg RSA -keysize 2048 -validity 10950 \
-    -storepass ghosthands -keypass ghosthands \
-    -dname "CN=Ghost Hands, OU=Ghost Developer Studio, O=Ghost Developer Studio, C=US"
+  # v3.32: fail closed. The keystore IS the signing identity:
+  # silently minting a new one (this step's behaviour through
+  # v3.31) would sign every future build differently, and no
+  # phone would ever accept an update over the installed app
+  # again. A missing keystore means the preserved identity
+  # was lost — stop and say so, never improvise a replacement.
+  echo "ERROR: the preserved signing keystore is missing: $KS" >&2
+  echo "Refusing to generate a new one: a new keystore is a new" >&2
+  echo "signing identity, and updates signed with it cannot be" >&2
+  echo "installed over the shipped app. Restore app.keystore" >&2
+  echo "from its backup and re-run." >&2
+  exit 1
 fi
 
 echo '[1/9] compiling JNI shim (pure C over the llama.cpp C API)'
