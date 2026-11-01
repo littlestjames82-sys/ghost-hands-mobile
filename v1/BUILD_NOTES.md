@@ -5,6 +5,156 @@ entirely on the phone. Foundation reused from the on-device proof
 (~/workspace/ghost-hands-mobile/BUILD_NOTES.md): same pinned llama.cpp
 b11382 Android build, same JNI shim design, same model download flow.
 
+## v3.33.0 (Nov 1, 2026) — speaking locks + visible import progress
+
+One defect, experienced live: at 1:54 AM on Nov 1, 2026
+Ryan tapped "Import trained model" in Settings > BRAIN
+and reported "it does nothing" — no picker, no toast,
+no progress. The import in fact completed (the trained
+planner ran that night); the silence was the bug, in
+three parts, each verified in the code before a line
+was written: pickTrainedModel() and onModelPicked()
+returned bare and silent on `downloading || importing`;
+and the import worker posted its progress only to the
+home screen's statusText/progressBar — invisible from
+the Settings screen the import was started on, and
+indistinguishable from a genuinely stuck import. No
+features, no settings keys, no permission changes, no
+policy/prompt/trail changes; the registry stands at 33
+types. Build-start checks: the tree matched the
+v3.32.0 record (version pin 3.32.0 / code 54) and the
+suite was re-verified green in the foreground (2,315)
+before the first edit. Version is now 55 / "3.33.0".
+
+- SPEAKING LOCKS (new pure class BusyLocks). The
+  wording decision for every busy refusal on the
+  model surface now lives in one host-testable place:
+  BusyLocks.messageFor(running, downloading, importing,
+  action) returns the line for the FIRST set flag in
+  the handlers' standing priority (running, then
+  importing, then downloading), or null when nothing
+  is busy. The running line is "Finish the run before "
+  + the tap's own action — byte-for-byte the toasts the
+  handlers already showed, so no standing wording
+  moved. The two lines that did not exist: an import in
+  flight answers "An import is already running — its
+  progress is on the model card"; a download answers
+  "A model download is running — let it finish first".
+  FOUR SITES FIXED, the two named plus the sweep's two:
+  (1) pickTrainedModel — its running toast and its
+  silent `downloading || importing` return are one
+  helper call now ("importing a model"); (2)
+  onModelPicked — same shape ("switching brains"), so
+  a brain-chip tap mid-import or mid-download names
+  the state instead of dying; (3) onGrammarToggled —
+  the grammar chip's `if (downloading) return;` was
+  the same silent shape in the same BRAIN section; it
+  consults the helper for the two flags that hold its
+  lock ("changing the grammar lock" — its running
+  toast verbatim). An import does NOT hold the grammar
+  lock (refreshGrammarUi keeps the chip enabled
+  through one), so the site passes importing=false
+  rather than quietly growing a new lock; (4)
+  startDownload — its busy leg is split out of the
+  readiness return and speaks through the helper. The
+  card button is normally disabled by the refresh
+  first, so that site is belt-and-braces for any caller
+  the disable misses; the launch auto-start can never
+  reach it (the flag is born false). The sweep also
+  examined, and left alone as already speaking or
+  out of shape: onDeleteModel (its importing and
+  downloading refusals already toast, verbatim in the
+  v3.30/v3.7 idiom), the model-manager rows (disabled
+  buttons carry their reason as visible row text), and
+  startDownload's import-spec return (a routing guard,
+  not a busy flag — the card button sends import specs
+  to the picker before it can be reached).
+
+- VISIBLE IMPORT PROGRESS (new pure class
+  ImportProgress + the importPercent state field).
+  The import worker's progress callbacks now also feed
+  the BRAIN section's own import button, on the same
+  callbacks the model card gets: percent(done, total)
+  is the share copied clamped to 0..100, or -1 when
+  the stream names no total (no honest figure); the
+  button's text is label(importing, importPercent,
+  "Q5 TRAINED") — "Importing Q5 TRAINED… 43%" while
+  the copy runs, "Importing Q5 TRAINED…" while it
+  runs figureless, and the standing "Import trained
+  model" at rest. The label is drawn FROM STATE, not
+  set once: refreshModelUi itself calls
+  importModelBtn.setText(importButtonLabel()) beside
+  the standing setEnabled, so any refresh that lands
+  mid-import (a brain switch's, the settle's) redraws
+  the live figure instead of wiping it, and the first
+  refresh after the import settles restores the
+  invitation — success or failure alike, the worker's
+  settle path unchanged (importing=false, percent
+  reset, refreshModelUi, the verdict feed line keeps
+  its job). The worker's per-chunk redraw is the cheap
+  refreshImportButton() (a single setText, only when
+  the percent actually changed) — the full refresh,
+  which rebuilds the model-manager rows, is never run
+  per chunk. The home-screen card's behaviour is
+  untouched: same statusText lines, same progressBar.
+
+- TESTS (2,315 -> 2,335, all green in the foreground;
+  20 new checks, all in v333Tests, plus the two import
+  lines the harness's explicit-import discipline
+  requires). Pure: BusyLocks — unlocked returns null;
+  the running line for two different actions (each
+  handler keeps its own verbatim toast); the import
+  line; the download line; priority with all three
+  flags set, with import+download set, and with
+  running+download set. ImportProgress — percent
+  floored (1/3 is 33), the ends (0 and 100), the
+  over-run clamp, the figureless -1 for zero and
+  negative totals; the label at rest (a stale percent
+  ignored), mid-import with a figure, mid-import
+  figureless. Pins: the registry stands at 33; neither
+  "if (downloading || importing) return;" nor
+  "if (downloading) return;" stands anywhere in
+  MainActivity (the dead-button shape is gone whole);
+  BusyLocks.messageFor( is consulted at four or more
+  sites; refreshModelUi draws the import button's text
+  through ImportProgress.label(importing, ...); the
+  worker computes .percent(done, total) and calls
+  refreshImportButton();. EXISTING CHECKS CHANGED
+  (one, the standing one): the version pin moves to
+  3.33.0 / code 55. No other expectation changed and
+  no fixture world needed repair.
+
+- BUILD. Host suite is not this record: the APK was
+  built in-tree with ./build-apk.sh (BUILD-OK) —
+  4,701,001 bytes, sha256
+  bc006e7810449ad6fe0c7e93bb02cf14396fb6904c290aa9434960e789866619
+  — badging verified 55 / "3.33.0", signing cert
+  de6969f0…25cd71b (the preserved product keystore),
+  permissions byte-identical to v3.32's ten, and the
+  dex verified to carry BusyLocks and ImportProgress.
+  At ~/workspace/ghost-hands-mobile/v1/ghost-hands.apk;
+  nothing pushed, nothing uploaded — the parent ships.
+
+- WHAT THE HOST CANNOT PROVE, stated plainly: that a
+  disabled chip's tap reaches no handler is platform
+  behaviour the host cannot stage — the speaking
+  handlers are the second line behind the disables,
+  and the progress label is the first (a button showing
+  "Importing Q5 TRAINED… 43%" is its own answer to
+  "it does nothing"). Whether the percent cadence
+  feels right against a real Drive stream's chunking
+  is a device question.
+
+- DEVICE PASS OWED (Ryan's phone, on the shipped
+  build): re-import the trained model (or start one
+  and watch Settings > BRAIN — the button counts up
+  in place); during the copy, tap a brain chip and
+  the Import button — each answers with a toast
+  naming the import; on the model card, start a
+  download and tap a brain chip — the toast names the
+  download; when the import settles, the button reads
+  "Import trained model" again.
+
 ## v3.32.0 (Nov 1, 2026) — trust hardening: the record is the product
 
 Four defects, each verified firsthand against this tree

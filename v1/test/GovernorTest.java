@@ -2,6 +2,8 @@ import com.ghosthands.app.Agent;
 import com.ghosthands.app.AnswerCard;
 import com.ghosthands.app.DownloadRedirects;
 import com.ghosthands.app.NavScheme;
+import com.ghosthands.app.BusyLocks;
+import com.ghosthands.app.ImportProgress;
 import com.ghosthands.app.Copilot;
 import com.ghosthands.app.ElementInfo;
 import com.ghosthands.app.ErrorPages;
@@ -9191,6 +9193,7 @@ public class GovernorTest {
         v330Tests(args);
         v331Tests(args);
         v332Tests(args);
+        v333Tests(args);
 
         System.out.println();
         System.out.println("GovernorTest: " + passed + " passed, " + failed + " failed");
@@ -13289,12 +13292,13 @@ public class GovernorTest {
         // the ONE existing check a release changes, disclosed
         // in the notes (v3.17's pin; v3.18, v3.19, v3.20,
         // v3.21, v3.22, v3.23, v3.24, v3.25, v3.26, v3.27,
-        // v3.28, v3.29, v3.30, v3.31 and v3.32 move it again).
-        check("v3.32 pin: the version is 3.32.0 / code 54",
+        // v3.28, v3.29, v3.30, v3.31, v3.32 and v3.33 move
+        // it again).
+        check("v3.33 pin: the version is 3.33.0 / code 55",
                 Boolean.valueOf(manifest.contains(
-                                "android:versionCode=\"54\"")
+                                "android:versionCode=\"55\"")
                         && manifest.contains(
-                                "android:versionName=\"3.32.0\"")),
+                                "android:versionName=\"3.33.0\"")),
                 Boolean.TRUE);
         check("v3.14 pin: the config asks for read + gestures, no flags",
                 Boolean.valueOf(cfgSrc.contains(
@@ -24891,6 +24895,150 @@ public class GovernorTest {
                         && buildSrc332.contains(
                                 "the preserved signing "
                                         + "keystore is missing")),
+                Boolean.TRUE);
+    }
+
+    /** v3.33 tests, in their own method like every wave's:
+     *  the speaking locks (BusyLocks) and the visible
+     *  import progress (ImportProgress) as pure checks,
+     *  then the source pins that the two named handlers
+     *  hold no bare silent busy return and the progress
+     *  wiring reaches the BRAIN button. */
+    private static void v333Tests(String[] args) {
+        // ============ BusyLocks: the wording decision ====
+        check("v333 locks pure: unlocked names nothing — "
+                        + "the tap proceeds",
+                BusyLocks.messageFor(false, false, false,
+                        "importing a model"),
+                null);
+        check("v333 locks pure: running speaks the "
+                        + "standing toast, action and all",
+                BusyLocks.messageFor(true, false, false,
+                        "importing a model"),
+                "Finish the run before importing a model");
+        check("v333 locks pure: the same running line "
+                        + "carries each handler's own action",
+                BusyLocks.messageFor(true, false, false,
+                        "switching brains"),
+                "Finish the run before switching brains");
+        check("v333 locks pure: an import in flight names "
+                        + "itself and where its progress is",
+                BusyLocks.messageFor(false, false, true,
+                        "switching brains"),
+                "An import is already running — its "
+                        + "progress is on the model card");
+        check("v333 locks pure: a download in flight names "
+                        + "itself",
+                BusyLocks.messageFor(false, true, false,
+                        "importing a model"),
+                "A model download is running — let it "
+                        + "finish first");
+        check("v333 locks pure: priority — running outranks "
+                        + "import and download together",
+                BusyLocks.messageFor(true, true, true,
+                        "switching brains"),
+                "Finish the run before switching brains");
+        check("v333 locks pure: priority — an import "
+                        + "outranks a download",
+                BusyLocks.messageFor(false, true, true,
+                        "importing a model"),
+                "An import is already running — its "
+                        + "progress is on the model card");
+        check("v333 locks pure: priority — running outranks "
+                        + "a download alone beside it",
+                BusyLocks.messageFor(true, true, false,
+                        "changing the grammar lock"),
+                "Finish the run before changing the "
+                        + "grammar lock");
+
+        // ============ ImportProgress: the figure =========
+        check("v333 progress pure: percent is the share "
+                        + "copied, floored",
+                Integer.valueOf(ImportProgress.percent(1, 3)),
+                Integer.valueOf(33));
+        check("v333 progress pure: percent at the ends — "
+                        + "nothing copied, all copied",
+                Boolean.valueOf(ImportProgress.percent(0, 100) == 0
+                        && ImportProgress.percent(100, 100) == 100),
+                Boolean.TRUE);
+        check("v333 progress pure: an over-run stream "
+                        + "clamps at 100, never past it",
+                Integer.valueOf(ImportProgress.percent(150, 100)),
+                Integer.valueOf(100));
+        check("v333 progress pure: no total named, no "
+                        + "figure claimed (-1)",
+                Boolean.valueOf(ImportProgress.percent(10, 0) == -1
+                        && ImportProgress.percent(10, -5) == -1),
+                Boolean.TRUE);
+
+        // ============ ImportProgress: the label ==========
+        check("v333 progress pure: at rest the button is "
+                        + "the invitation, stale figures ignored",
+                Boolean.valueOf("Import trained model".equals(
+                                ImportProgress.label(false, -1,
+                                        "Q5 TRAINED"))
+                        && "Import trained model".equals(
+                                ImportProgress.label(false, 43,
+                                        "Q5 TRAINED"))),
+                Boolean.TRUE);
+        check("v333 progress pure: mid-import the button "
+                        + "carries the live figure",
+                ImportProgress.label(true, 43, "Q5 TRAINED"),
+                "Importing Q5 TRAINED… 43%");
+        check("v333 progress pure: mid-import without a "
+                        + "figure the button still says "
+                        + "importing, never the invitation",
+                ImportProgress.label(true, -1, "Q5 TRAINED"),
+                "Importing Q5 TRAINED…");
+
+        // ================= pins & registry ===============
+        check("v333 registry: EVENT_TYPES unchanged (33 "
+                        + "types, no v3.33 addition)",
+                Integer.valueOf(com.ghosthands.app.Trail
+                        .EVENT_TYPES.length),
+                Integer.valueOf(33));
+        if (args == null || args.length == 0) return;
+        java.io.File shim333 = new java.io.File(args[0]);
+        java.io.File shimDir333 = shim333.getParentFile();
+        java.io.File v1Dir333 = shimDir333 == null ? null
+                : shimDir333.getParentFile() == null ? null
+                : shimDir333.getParentFile().getParentFile();
+        if (v1Dir333 == null) return;
+        String mainSrc333 = readTestFile(new java.io.File(
+                v1Dir333, "app/src/main/java/com/ghosthands/app/"
+                        + "MainActivity.java"));
+        if (mainSrc333 == null) return;
+        check("v333 pin: no bare silent busy return stands "
+                        + "in MainActivity — the shape that "
+                        + "made the button look dead is gone",
+                Boolean.valueOf(!mainSrc333.contains(
+                        "if (downloading || importing) return;")
+                        && !mainSrc333.contains(
+                        "if (downloading) return;")),
+                Boolean.TRUE);
+        check("v333 pin: the speaking lock is consulted at "
+                        + "all four fixed sites (import picker, "
+                        + "brain chips, grammar chip, download "
+                        + "start)",
+                Boolean.valueOf(countOccurrences(mainSrc333,
+                        "BusyLocks.messageFor(") >= 4),
+                Boolean.TRUE);
+        check("v333 pin: the BRAIN import button's label is "
+                        + "drawn from the import state in the "
+                        + "refresh itself",
+                Boolean.valueOf(mainSrc333.contains(
+                        "importModelBtn.setText("
+                                + "importButtonLabel())")
+                        && mainSrc333.contains(
+                        "ImportProgress.label(importing")),
+                Boolean.TRUE);
+        check("v333 pin: the import worker feeds its "
+                        + "progress to the BRAIN button on the "
+                        + "same callbacks the model card gets",
+                Boolean.valueOf(mainSrc333.contains(
+                        ".percent(done, total)")
+                        && mainSrc333.contains(
+                        "refreshImportButton();")),
                 Boolean.TRUE);
     }
 }

@@ -235,6 +235,13 @@ public class MainActivity extends Activity {
     private Button modelTrainedBtn;
     private Button importModelBtn;
     private boolean importing = false;
+    // v3.33: the import's last reported percent (-1 while
+    // the stream has named no total), kept as STATE beside
+    // `importing` so the BRAIN import button's label is
+    // driven from it (ImportProgress.label) — a
+    // refreshModelUi mid-import redraws the live figure
+    // instead of wiping the button back to its invitation.
+    private volatile int importPercent = -1;
 
     // v2.6.1 (grammar kill-switch): the persisted "Output grammar
     // lock" choice, resolved at launch; it defaults to OFF — the
@@ -4644,14 +4651,17 @@ public class MainActivity extends Activity {
      *  copies; only the exact trained file lands. Locked
      *  while a run, a download or another import is in
      *  flight — importing is an idle-time act, like
-     *  switching brains. */
+     *  switching brains. v3.33: the lock SPEAKS — a tap
+     *  that arrives busy gets the BusyLocks line naming
+     *  the state, never the bare silent return that made
+     *  this button look dead on Nov 1, 2026. */
     private void pickTrainedModel() {
-        if (running) {
-            Toast.makeText(this, "Finish the run before "
-                    + "importing a model", Toast.LENGTH_SHORT).show();
+        String busy = BusyLocks.messageFor(running, downloading,
+                importing, "importing a model");
+        if (busy != null) {
+            Toast.makeText(this, busy, Toast.LENGTH_SHORT).show();
             return;
         }
-        if (downloading || importing) return;
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
@@ -4663,11 +4673,37 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** v3.33: the BRAIN import button's label, from state:
+     *  mid-import it carries the live percent (the same
+     *  figure the model card's bar shows), at rest it is
+     *  the standing invitation. refreshModelUi draws it
+     *  through here, so a rebuild during the copy keeps
+     *  the progress on the button. */
+    private String importButtonLabel() {
+        return ImportProgress.label(importing, importPercent,
+                ModelStore.TRAINED.shortName);
+    }
+
+    /** v3.33: redraw just the BRAIN import button from the
+     *  import state — cheap enough for the worker's
+     *  progress callbacks, which must not rebuild the
+     *  whole model UI per chunk. */
+    private void refreshImportButton() {
+        if (importModelBtn != null) {
+            importModelBtn.setText(importButtonLabel());
+        }
+    }
+
     /** v3.30: the import worker. The store judges the copy;
      *  this flow only moves its progress and verdict onto
-     *  the model card and the feed, honestly either way. */
+     *  the model card and the feed, honestly either way.
+     *  v3.33: the same progress also lands on the BRAIN
+     *  section's import button (via the importPercent
+     *  state + refreshImportButton), the screen the
+     *  import was started from. */
     private void startTrainedImport(final android.net.Uri uri) {
         importing = true;
+        importPercent = -1;
         refreshModelUi();
         final ModelStore.Spec spec = ModelStore.TRAINED;
         statusText.setText("Importing " + spec.displayName + "...");
@@ -4697,6 +4733,19 @@ public class MainActivity extends Activity {
                                         statusText.setText("Importing "
                                                 + spec.shortName + ": "
                                                 + done + " / " + total);
+                                        // v3.33: the BRAIN
+                                        // button carries the
+                                        // figure too — state
+                                        // first (so any refresh
+                                        // agrees), then the
+                                        // cheap redraw, and
+                                        // only on a change.
+                                        int pct = ImportProgress
+                                                .percent(done, total);
+                                        if (pct != importPercent) {
+                                            importPercent = pct;
+                                            refreshImportButton();
+                                        }
                                     }
                                 });
                             }
@@ -4720,6 +4769,7 @@ public class MainActivity extends Activity {
                     }
                 }
                 importing = false;
+                importPercent = -1;
                 final boolean doneOk = ok;
                 runOnUiThread(new Runnable() {
                     @Override public void run() {
@@ -6339,6 +6389,11 @@ public class MainActivity extends Activity {
         if (importModelBtn != null) {
             importModelBtn.setEnabled(!running && !downloading
                     && !importing);
+            // v3.33: the label is state-driven — a refresh
+            // mid-import redraws the live progress figure
+            // on the button, and the first refresh after
+            // the import settles restores the invitation.
+            importModelBtn.setText(importButtonLabel());
         }
         refreshBrainChips();
         refreshGrammarUi();
@@ -6373,12 +6428,16 @@ public class MainActivity extends Activity {
      *  (verified, resumable) when it is not. Neither model's file
      *  is ever deleted. Switching mid-run is refused outright. */
     private void onModelPicked(String id) {
-        if (running) {
-            Toast.makeText(this, "Finish the run before switching brains",
-                    Toast.LENGTH_SHORT).show();
+        // v3.33: the lock speaks (BusyLocks) — the running
+        // line is the standing toast verbatim; a download
+        // or import in flight now names itself instead of
+        // the chip tap dying silently.
+        String busy = BusyLocks.messageFor(running, downloading,
+                importing, "switching brains");
+        if (busy != null) {
+            Toast.makeText(this, busy, Toast.LENGTH_SHORT).show();
             return;
         }
-        if (downloading || importing) return;
         ModelStore.Spec spec = ModelStore.specFor(id);
         if (spec == null || spec.id.equals(activeModelId)) {
             refreshModelUi();
@@ -6445,12 +6504,18 @@ public class MainActivity extends Activity {
      *  new setting. Refused mid-run, inert mid-download, like a
      *  brain switch. */
     private void onGrammarToggled() {
-        if (running) {
-            Toast.makeText(this, "Finish the run before changing the grammar lock",
-                    Toast.LENGTH_SHORT).show();
+        // v3.33: the lock speaks (BusyLocks) — the running
+        // line is the standing toast verbatim, and the
+        // mid-download tap that used to return silently
+        // now names the download. An import does NOT hold
+        // this lock (refreshGrammarUi keeps the chip
+        // enabled through one), so it is passed false.
+        String busy = BusyLocks.messageFor(running, downloading,
+                false, "changing the grammar lock");
+        if (busy != null) {
+            Toast.makeText(this, busy, Toast.LENGTH_SHORT).show();
             return;
         }
-        if (downloading) return;
         grammarOn = !grammarOn;
         // v3.4: persists through the settings model (the same
         // "grammar_on" key, in ModelStore.grammarPrefValue's
@@ -8270,7 +8335,19 @@ public class MainActivity extends Activity {
     private void startDownload() {
         // v3.30: an import-sourced choice never downloads.
         if (activeSpec() != null && activeSpec().isImport()) return;
-        if (downloading || store.ready(activeSpec())) return;
+        if (downloading) {
+            // v3.33: the lock speaks (BusyLocks). The card
+            // button is normally disabled by the refresh
+            // first; a tap that still lands here mid-
+            // download names the state instead of dying
+            // silently. (The launch auto-start can never
+            // see this branch — the flag is born false.)
+            Toast.makeText(this, BusyLocks.messageFor(false,
+                    true, false, "start a download"),
+                    Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (store.ready(activeSpec())) return;
         downloading = true;
         // v3.7: the model manager's rows read this beside
         // `downloading` (a session only ever fetches the
