@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/littlestjames82-sys/ghost-hands-mobile/actions/workflows/ci.yml/badge.svg)](https://github.com/littlestjames82-sys/ghost-hands-mobile/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/littlestjames82-sys/ghost-hands-mobile)](https://github.com/littlestjames82-sys/ghost-hands-mobile/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v3.16.0-blue.svg)](CHANGELOG.md)
-[![Host tests](https://img.shields.io/badge/host_tests-1%2C738-green.svg)](v1/BUILD_NOTES.md)
+[![Release](https://img.shields.io/badge/release-v3.34.0-blue.svg)](CHANGELOG.md)
+[![Host tests](https://img.shields.io/badge/host_tests-2%2C376-green.svg)](v1/BUILD_NOTES.md)
 
 **A goal-driven web agent that runs entirely on your phone. No cloud brain, no account, no data leaving the device.**
 
@@ -11,7 +11,7 @@ Give it a goal in plain words ("find the length of the Clinch River", "watch thi
 
 From [Ghost Developer Studio](https://github.com/littlestjames82-sys). MIT licensed. Sibling project: [Ghost Hands for desktop](https://github.com/littlestjames82-sys/ghost-hands) (Python, governed browser automation).
 
-> Status (Oct 25, 2026): latest shipped release is **v3.16.0** (downloads, documents, page watch), and the source in this repo is synced to it. Nothing here is on the Play Store; builds are sideloaded APKs signed with the studio keystore. What is being built next is in `ROADMAP_EVERYTHING.md`.
+> Status (Nov 1, 2026): latest shipped release is **v3.34.0** (weather tool, trained planner, fact-grounding guard), and the source in this repo is synced to it. Nothing here is on the Play Store; builds are sideloaded APKs signed with the studio keystore. What is being built next is in `ROADMAP_EVERYTHING.md`.
 
 ## How it works
 
@@ -25,6 +25,7 @@ From [Ghost Developer Studio](https://github.com/littlestjames82-sys). MIT licen
 
 Full list in `CHANGELOG.md`.
 
+- **v3.34 Weather tool:** the planner gets a governed Open-Meteo weather action (readonly, allowed under every pack) that resolves places properly and reports figures from the source it read. v3.30 to v3.33 brought the trained planner imported from 718 examples, the fact-grounding guard, trust hardening for the trail, and speaking locks. Full detail in `v1/BUILD_NOTES.md`.
 - **v3.16 Downloads, Documents, Page Watch:** every download offer is judged by the Governor's own order (executable and archive shapes are consequential and ask first), goals can read local documents the way they read pages, and any page can be watched for changes.
 - **v3.15 Multi-tab:** up to 3 tabs, per-tab perception and read state, done-grounding isolated per tab (a fact read in tab 1 does not ground an answer in tab 2; the scratchpad is the sanctioned bridge).
 - **v3.14 Beyond the Browser (spike):** an accessibility-service feasibility probe, inert unless you enable it in Android Settings AND flip the experimental toggle. Verdict: GO-IF, readonly first.
@@ -52,7 +53,7 @@ The app builds without Gradle, using the Android SDK command-line tools directly
 
 ```bash
 cd v1
-./run-host-tests.sh   # host harness: 1,738 checks at v3.16, must be green twice
+./run-host-tests.sh   # host harness: 2,376 checks at v3.34, must be green twice
 ./build-apk.sh        # produces ghost-hands.apk, signed with the preserved keystore
 ```
 
