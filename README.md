@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/littlestjames82-sys/ghost-hands-mobile/actions/workflows/ci.yml/badge.svg)](https://github.com/littlestjames82-sys/ghost-hands-mobile/actions/workflows/ci.yml) [![Release](https://img.shields.io/github/v/release/littlestjames82-sys/ghost-hands-mobile)](https://github.com/littlestjames82-sys/ghost-hands-mobile/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/release-v3.34.0-blue.svg)](CHANGELOG.md)
 [![Host tests](https://img.shields.io/badge/host_tests-2%2C376-green.svg)](v1/BUILD_NOTES.md)
 
 **A goal-driven web agent that runs entirely on your phone. No cloud brain, no account, no data leaving the device.**
